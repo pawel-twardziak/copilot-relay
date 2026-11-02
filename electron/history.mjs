@@ -88,6 +88,17 @@ export function countFrom(events, idx) {
   return events.slice(idx).filter(isUser).length;
 }
 
+/** Number of user.message events recorded for session `id`; 0 when it has no events.jsonl yet. */
+export function countUserMessages(id) {
+  const dir = sessionDir(id);
+  try {
+    return readEvents(dir).events.filter(isUser).length;
+  } catch (err) {
+    if (err.code === "ENOENT") return 0;
+    throw err;
+  }
+}
+
 /** What cutting session `id` at `target` would remove, for the confirm dialog. */
 export function describeCut(id, target) {
   const { events } = readEvents(sessionDir(id));

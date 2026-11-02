@@ -211,6 +211,7 @@ class SessionView {
     this.relayName = null;
     this.turn = 0; // user/relay messages so far = the turn ordinal of the latest one (see append)
     this.turnText = null; // getter for the latest user message's text
+    this.turnReplyEl = null; // the latest turn's reply element carrying actions
     this.turnReplied = false; // the latest turn's reply already has fork/delete actions
     this.historyOp = false; // a fork/delete is running
 
@@ -225,6 +226,14 @@ class SessionView {
     this.sendBtn = h("button", { class: "primary", onclick: () => this.send() }, "Send");
     this.stopBtn = h("button", { onclick: () => this.cancel(), disabled: true }, "Stop");
     this.statusEl = h("div", { class: "status-line" });
+    this.agentOption = undefined; // latest ACP "agent" config option
+    this.agentPicker = h("select", { class: "agent-picker", hidden: true });
+    this.agentPicker.addEventListener("change", () => this.chooseAgent(this.agentPicker.value));
+    this.commands = []; // Copilot's availableCommands
+    this.cmdMatches = [];
+    this.cmdIndex = 0;
+    this.cmdToken = null;
+    this.cmdPopup = h("div", { class: "cmd-popup", role: "listbox", hidden: true, onmousedown: (e) => e.preventDefault() });
 
     this.el = h(
       "section",
@@ -240,16 +249,37 @@ class SessionView {
         h("button", { class: "danger", title: "Close this session in the app (it stays resumable)", onclick: () => closeView(this.sessionId) }, "Close"),
       ),
       this.log,
-      h("div", { class: "composer" }, this.input, h("div", { class: "btns" }, this.sendBtn, this.stopBtn)),
+      h("div", { class: "composer" }, this.cmdPopup, this.input, this.agentPicker, h("div", { class: "btns" }, this.sendBtn, this.stopBtn)),
       this.statusEl,
     );
+    // registered before the Enter/Esc handler below; consumes keys only while the popup is visible
+    this.input.addEventListener("keydown", (e) => {
+      if (this.cmdPopup.hidden || e.isComposing) return;
+      const n = this.cmdMatches.length;
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        this.cmdIndex = (this.cmdIndex + (e.key === "ArrowDown" ? 1 : n - 1)) % n;
+        this.renderPopup();
+      } else if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.altKey)) this.insertCommandAt(this.cmdIndex);
+      else if (e.key === "Escape") this.hidePopup();
+      else return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    });
+    this.input.addEventListener("keyup", (e) => {
+      if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) this.updatePopup();
+    });
+    this.input.addEventListener("click", () => this.updatePopup());
+    this.input.addEventListener("blur", () => this.hidePopup());
     this.input.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
         e.preventDefault();
         this.send();
       } else if (e.key === "Escape" && this.busy) this.cancel();
     });
-    this.input.addEventListener("input", () => this.autosize());
+    this.input.addEventListener("input", () => {
+      this.autosize();
+      this.updatePopup();
+    });
     this.input.addEventListener("paste", (e) => this.onFiles(e, e.clipboardData));
     this.input.addEventListener("dragover", (e) => e.preventDefault());
     this.input.addEventListener("drop", (e) => this.onFiles(e, e.dataTransfer));
@@ -331,6 +361,20 @@ class SessionView {
     if (listed && t) listed.title = t; // the list shows the new name before the next refresh
   }
 
+  /** Rename through Copilot's /rename (used by the title editor and the typed /rename command). */
+  async applyRename(name) {
+    if (this.busy || this.dead) return;
+    this.setBusy(true);
+    try {
+      this.setTitle(await api.renameSession(this.sessionId, name));
+    } catch (e) {
+      this.error(`Rename failed: ${e.message}`);
+    } finally {
+      if (!this.dead) this.setBusy(false);
+      scheduleRefresh();
+    }
+  }
+
   /** Inline editor for the session title; saved through Copilot's /rename. */
   renameSession() {
     if (this.busy || this.dead) return;
@@ -343,15 +387,7 @@ class SessionView {
       input.replaceWith(this.titleEl);
       const name = input.value.replace(/\s+/g, " ").trim();
       if (!save || !name || name === this.title || this.busy || this.dead) return;
-      this.setBusy(true);
-      try {
-        this.setTitle(await api.renameSession(this.sessionId, name));
-      } catch (e) {
-        this.error(`Rename failed: ${e.message}`);
-      } finally {
-        if (!this.dead) this.setBusy(false);
-        scheduleRefresh();
-      }
+      await this.applyRename(name);
     };
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter") done(true);
@@ -360,6 +396,67 @@ class SessionView {
     input.addEventListener("blur", () => done(false));
     this.titleEl.replaceWith(input);
     input.select();
+  }
+
+  setCommands(list) {
+    this.commands = Array.isArray(list) ? list : [];
+    if (!this.cmdPopup.hidden) this.updatePopup();
+  }
+
+  hidePopup() {
+    this.cmdPopup.hidden = true;
+    this.cmdToken = null;
+  }
+
+  updatePopup() {
+    const token = SlashCommands.commandToken(this.input.value, this.input.selectionStart);
+    if (token === null) return this.hidePopup();
+    const own = this.agentAvailable()
+      ? [{ name: "agent", description: "Choose the custom agent for this session", input: { hint: "name" } }]
+      : [];
+    const matches = SlashCommands.filterCommands([...own, ...this.commands], token);
+    if (!matches.length) return this.hidePopup();
+    this.cmdIndex = token === this.cmdToken ? Math.min(this.cmdIndex, matches.length - 1) : 0;
+    this.cmdToken = token;
+    this.cmdMatches = matches;
+    this.renderPopup();
+    this.cmdPopup.hidden = false;
+    this.cmdPopup.querySelector(".active")?.scrollIntoView({ block: "nearest" });
+  }
+
+  renderPopup() {
+    this.cmdPopup.replaceChildren(
+      ...this.cmdMatches.map((c, i) =>
+        h(
+          "div",
+          {
+            class: "cmd-row" + (i === this.cmdIndex ? " active" : ""),
+            role: "option",
+            "aria-selected": i === this.cmdIndex ? "true" : "false",
+            title: c.description ?? "",
+            // keep focus in the textarea
+            onmousedown: (e) => {
+              e.preventDefault();
+              this.insertCommandAt(i);
+            },
+          },
+          h("span", { class: "cmd-name" }, "/" + c.name),
+          c.input?.hint ? h("span", { class: "cmd-hint" }, c.input.hint) : null,
+          h("span", { class: "cmd-desc" }, c.description ?? ""),
+        ),
+      ),
+    );
+    this.cmdPopup.querySelector(".active")?.scrollIntoView({ block: "nearest" });
+  }
+
+  insertCommandAt(i) {
+    const c = this.cmdMatches[i];
+    if (!c) return;
+    const r = SlashCommands.insertCommand(this.input.value, c.name);
+    this.input.value = r.text;
+    this.input.setSelectionRange(r.caret, r.caret);
+    this.autosize();
+    this.hidePopup();
   }
 
   autosize() {
@@ -386,13 +483,35 @@ class SessionView {
       this.turn++;
       this.turnText = el._matchText ?? (() => "");
       this.turnReplied = false;
+      this.turnReplyEl = null;
       Object.assign(el, { _turn: this.turn, _kind: "user" });
     } else if (this.turn > 0 && !this.turnReplied && ((c.contains("msg") && c.contains("agent")) || (el.tagName === "DETAILS" && c.contains("tool")))) {
       this.turnReplied = true;
+      this.turnReplyEl = el;
       // cuts are anchored on user messages: a reply is found through its turn's user message
       Object.assign(el, { _turn: this.turn, _kind: "reply", _matchText: this.turnText });
     } else return;
     this.addActions(el);
+  }
+
+  /** Un-number a turn that Copilot did not record (a CLI command such as /context): strip its actions. */
+  dropTurn(userEl) {
+    if (userEl._turn !== this.turn) return;
+    for (const el of [userEl, this.turnReplyEl]) {
+      if (!el) continue;
+      for (const bar of el.querySelectorAll(".acts")) {
+        if (bar.tagName === "DIV") {
+          const copy = [...bar.children].find((c) => c.classList.contains("copy"));
+          if (copy) bar.replaceWith(copy);
+          else bar.remove();
+        } else bar.remove();
+      }
+      delete el._turn;
+      delete el._kind;
+    }
+    this.turn--;
+    this.turnReplied = true;
+    this.turnReplyEl = null;
   }
 
   /** "Fork" / "Delete" buttons next to the element's Copy button (in a tool card: in its summary line). */
@@ -516,6 +635,7 @@ class SessionView {
     this.sendBtn.disabled = b || this.dead;
     this.stopBtn.disabled = !b || this.dead;
     this.input.disabled = this.dead;
+    this.agentPicker.disabled = b || this.dead;
     this.statusEl.textContent = b ? "Working…" : this.dead ? "Copilot process ended" : this.inbox.length ? `${this.inbox.length} relay message(s) waiting` : "";
     renderList();
     if (!b) queueMicrotask(() => this.pump());
@@ -660,8 +780,11 @@ class SessionView {
       case "config_option_update":
         if (u.configOptions) this.setConfig(u.configOptions);
         break;
+      case "available_commands_update":
+        this.setCommands(u.availableCommands ?? []);
+        break;
       default:
-        break; // available_commands_update, current_mode_update, usage_update…
+        break; // current_mode_update, usage_update…
     }
   }
 
@@ -753,9 +876,10 @@ class SessionView {
 
   setConfig(configOptions) {
     if (!Array.isArray(configOptions)) return;
+    this.setAgent(configOptions.find((c) => c.id === "agent"));
     this.selects.replaceChildren(
       ...configOptions
-        .filter((c) => c.type === "select" && Array.isArray(c.options))
+        .filter((c) => c.id !== "agent" && c.type === "select" && Array.isArray(c.options))
         .map((c) => {
           const seen = new Set();
           const opts = c.options.filter((o) => !seen.has(o.value) && seen.add(o.value));
@@ -783,6 +907,47 @@ class SessionView {
     );
   }
 
+  setAgent(option) {
+    this.agentOption = option;
+    const model = SlashCommands.agentPickerModel(option);
+    this.agentPicker.hidden = !model.show;
+    this.agentPicker.replaceChildren(
+      ...model.entries.map((e) => {
+        const opt = h("option", { value: e.value, title: e.description }, e.name);
+        if (e.missing) opt.disabled = true;
+        return opt;
+      }),
+    );
+    this.agentPicker.value = model.current;
+    this.agentPicker.title = model.entries.find((e) => e.value === model.current)?.description || "Agent";
+    this.agentPicker.disabled = this.busy || this.dead;
+  }
+
+  agentAvailable() {
+    return SlashCommands.agentPickerModel(this.agentOption).show;
+  }
+
+  async chooseAgent(value) {
+    if (this.busy) {
+      this.statusEl.textContent = "Wait until Copilot finishes this turn.";
+      this.setAgent(this.agentOption);
+      return false;
+    }
+    const previous = this.agentOption;
+    try {
+      const updated = await api.setConfig(this.sessionId, "agent", value);
+      if (updated) this.setConfig(updated);
+      else this.setAgent({ ...this.agentOption, currentValue: value });
+      const entry = SlashCommands.agentPickerModel(this.agentOption).entries.find((e) => e.value === value);
+      this.system("Agent: " + (entry?.name ?? (value || "Copilot")));
+      return true;
+    } catch (e) {
+      this.setAgent(previous);
+      this.statusEl.textContent = "Agent change failed: " + e.message;
+      return false;
+    }
+  }
+
   /** Whole conversation as Markdown: prompts, relay messages, answers, tool calls and plans (not thinking). */
   async copyThread(btn) {
     this.flush();
@@ -799,9 +964,35 @@ class SessionView {
 
   send() {
     const text = this.input.value.trim();
-    if (!text || this.busy || this.dead) return;
+    if (!text || this.dead) return;
+    const cmd = this.agentAvailable() ? SlashCommands.parseAgentCommand(text) : null;
+    if (this.busy) {
+      if (cmd) this.statusEl.textContent = "Wait until Copilot finishes this turn.";
+      return;
+    }
     this.input.value = "";
     this.autosize();
+    if (cmd) {
+      if (cmd.arg === "") {
+        this.agentPicker.focus();
+        this.agentPicker.showPicker?.();
+        return;
+      }
+      const entries = SlashCommands.agentPickerModel(this.agentOption).entries.filter((e) => !e.missing);
+      const hit = SlashCommands.matchAgent(entries, cmd.arg);
+      if (hit) this.chooseAgent(hit.value);
+      else {
+        this.input.value = text;
+        this.autosize();
+        this.statusEl.textContent = `Unknown agent "${cmd.arg}". Available: ${entries.map((e) => e.name).join(", ")}`;
+      }
+      return;
+    }
+    const rename = SlashCommands.parseRenameCommand(text);
+    if (rename) {
+      this.applyRename(rename.name);
+      return;
+    }
     this.runPrompt(text, bubble("user", text), "app");
   }
 
@@ -812,6 +1003,9 @@ class SessionView {
     this.log.scrollTop = this.log.scrollHeight;
     this.setBusy(true);
     this.prompting = true;
+    // CLI commands (/context ...) are not recorded in events.jsonl; compare the recorded count to tell
+    const isCmd = SlashCommands.isCommandPrompt(text);
+    const before = isCmd ? await api.userMessages(this.sessionId).catch(() => null) : null;
     try {
       const stop = await api.prompt(this.sessionId, text, source);
       this.flush();
@@ -821,6 +1015,10 @@ class SessionView {
       this.error(e.message);
     } finally {
       this.prompting = false;
+      if (before !== null) {
+        const after = await api.userMessages(this.sessionId).catch(() => null);
+        if (after === before) this.dropTurn(bubble);
+      }
       if (!this.dead) this.setBusy(false);
       scheduleRefresh();
     }
@@ -929,6 +1127,7 @@ async function closeView(id) {
   if (!v) return;
   if (v.busy && !v.dead && !confirm("Copilot is still working in this session. Stop it and close?")) return;
   views.delete(id);
+  lastCommands.delete(id);
   lastUsage.delete(id); // a re-opened session must not flash this stale snapshot
   v.el.remove();
   if (activeId === id) activate([...views.keys()].pop() ?? null);
@@ -1066,7 +1265,11 @@ $("#settings").addEventListener("close", async () => {
 // ---------------------------------------------------------------------------
 // wiring
 
-api.onUpdate(({ sessionId, update }) => views.get(sessionId)?.onUpdate(update));
+const lastCommands = new Map(); // latest availableCommands per session (updates can precede the view)
+api.onUpdate(({ sessionId, update }) => {
+  if (update?.sessionUpdate === "available_commands_update") lastCommands.set(sessionId, update.availableCommands ?? []);
+  views.get(sessionId)?.onUpdate(update);
+});
 api.onPermission((p) => views.get(p.sessionId)?.permission(p));
 api.onExit((e) => views.get(e.sessionId)?.markDead(e));
 api.onNotice((n) => views.get(n.sessionId)?.system(n.text));
@@ -1081,6 +1284,7 @@ const forView = (sessionId, fn) => {
 };
 function flushEarly(v) {
   if (lastUsage.has(v.sessionId)) v.usage(lastUsage.get(v.sessionId));
+  if (lastCommands.has(v.sessionId)) v.setCommands(lastCommands.get(v.sessionId));
   for (const fn of early.get(v.sessionId) ?? []) fn(v);
   early.delete(v.sessionId);
 }

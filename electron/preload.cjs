@@ -21,6 +21,8 @@ contextBridge.exposeInMainWorld("api", {
   relayRename: (sessionId, name) => call("relay:rename", sessionId, name),
   // the Copilot session's title (Copilot's /rename), not the relay name
   renameSession: (sessionId, name) => call("sessions:rename", sessionId, name),
+  // number of user messages recorded in the Copilot session history
+  userMessages: (sessionId) => call("sessions:userMessages", sessionId),
   cancel: (sessionId) => call("sessions:cancel", sessionId),
   closeSession: (sessionId) => call("sessions:close", sessionId),
   // target: { ordinal, text, where } – the message to cut at, see electron/history.mjs

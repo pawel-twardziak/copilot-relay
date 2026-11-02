@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { AcpConnection } from "./acp.mjs";
-import { describeCut, forkSession, truncateSession } from "./history.mjs";
+import { countUserMessages, describeCut, forkSession, truncateSession } from "./history.mjs";
 import { createUsagePusher } from "./usage.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -164,14 +164,16 @@ const usage = createUsagePusher({ send: (sessionId, view) => send("usage:update"
 function attach(sessionId, conn, cwd, relay) {
   const entry = { conn, cwd, permissions: new Map(), relay: relayStart(sessionId, cwd, relay), toolTitles: new Map() };
   open.set(sessionId, entry);
-  conn.on("notification", (method, params) => {
-    if (method !== "session/update" || params?.sessionId !== sessionId) return;
-    const u = params.update;
+  // one path for live and replayed updates (see sessions:new)
+  entry.update = (u) => {
     if (u?.sessionUpdate === "tool_call" && u.title) entry.toolTitles.set(u.toolCallId, u.title);
     if (u?.sessionUpdate === "usage_update" && open.get(sessionId) === entry) usage.context(sessionId, { used: u.used, size: u.size });
     // /rename answers with a chat line ("Session renamed to: …"); the new title arrives as session_info_update
     if (entry.renaming && u?.sessionUpdate === "agent_message_chunk") return;
     send("acp:update", { sessionId, update: u });
+  };
+  conn.on("notification", (method, params) => {
+    if (method === "session/update" && params?.sessionId === sessionId) entry.update(params.update);
   });
   conn.on("request:session/request_permission", (rpcId, params) => {
     // the relay's own tools run without asking, as with the terminal extension. The tool_call update carries
@@ -233,9 +235,17 @@ handle("sessions:new", async (cwd) => {
   requireDir(cwd);
   const conn = await connect(cwd);
   const relay = relayPrepare();
+  // the agent may send updates (available_commands_update…) before it answers session/new: keep them
+  const early = [];
+  const hold = (method, params) => {
+    if (method === "session/update") early.push(params);
+  };
+  conn.on("notification", hold);
   try {
     const res = await conn.request("session/new", { cwd, mcpServers: relay.mcpServers });
-    attach(res.sessionId, conn, cwd, relay);
+    const entry = attach(res.sessionId, conn, cwd, relay);
+    conn.off("notification", hold);
+    for (const p of early) if (p?.sessionId === res.sessionId) entry.update(p.update);
     usage.refresh(res.sessionId);
     return { sessionId: res.sessionId, cwd, configOptions: res.configOptions ?? [] };
   } catch (e) {
@@ -482,6 +492,9 @@ handle("sessions:prompt", async (sessionId, text, source = "relay") => {
     if (open.get(sessionId) === entry) usage.refresh(sessionId); // not after a close/truncate mid-turn
   }
 });
+
+// Count of user messages Copilot recorded in events.jsonl (0 before the first turn).
+handle("sessions:userMessages", async (sessionId) => countUserMessages(sessionId));
 
 // Copilot's own /rename command: it runs no model turn and isn't stored in the history, so turn numbers
 // used by fork/delete stay right. Copilot saves the name in workspace.yaml (user_named: true).
