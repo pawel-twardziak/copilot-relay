@@ -50,6 +50,7 @@ here. The app does the extension's job itself. Every open session joins the rela
 identity it has in a terminal (`cli:<sessionId>`), so it keeps its relay name. It also gets the relay tools
 (`relay-list_sessions`, `relay-send_message`) as an MCP server, and these run without a permission prompt.
 
+- The header shows the context window use (`22.9k / 200k · 11%`) and Copilot usage (AI credits) of the session; hover for requests, tokens and changes. The latest premium quota line is shown at the bottom of the sidebar.
 - The header shows the session's relay name (e.g. `relay: swift-otter`). Click it to rename the session.
 - Messages from other sessions appear as purple "from …" bubbles. Each becomes a new turn as soon as the
   session is idle. Messages that arrive while it is working wait in a queue.

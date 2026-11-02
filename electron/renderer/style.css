@@ -43,6 +43,8 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberat
 #search { width: 100%; }
 #session-list { flex: 1; overflow-y: auto; margin: 0 -10px; padding: 0 4px; }
 #side-status { color: var(--muted); font-size: 12px; min-height: 16px; white-space: pre-wrap; }
+#side-quota { color: var(--muted); font-size: 11.5px; white-space: pre-wrap; }
+#side-quota[hidden] { display: none; }
 #side-status.error { color: var(--err); }
 .group-title {
   color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
@@ -137,6 +139,11 @@ dialog label { display: flex; flex-direction: column; gap: 6px; }
 
 /* ---------- copilot-relay ---------- */
 .relay-chip { font-size: 12px; padding: 3px 9px; border-radius: 12px; color: #a5d6ff; border-color: #1f6feb66; background: #1f6feb1a; }
+.usage-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 3px 9px; border-radius: 12px; color: var(--muted); border: 1px solid var(--border); white-space: nowrap; }
+.usage-chip .meter { width: 40px; height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
+.usage-chip .fill { display: block; height: 100%; width: 0; border-radius: 3px; background: var(--accent); }
+.usage-chip.warn .fill { background: #d29922; }
+.usage-chip.full .fill { background: var(--err); }
 .relay-chip.off { color: var(--muted); border-color: var(--border); background: none; }
 .relay-rename { width: 160px; font-size: 12px; }
 .msg.relay { align-self: flex-start; background: #2a1f3d; border: 1px solid #6e40c966; padding: 8px 12px; border-radius: 10px; white-space: pre-wrap; }
