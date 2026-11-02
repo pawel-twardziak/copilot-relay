@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { AcpConnection } from "./acp.mjs";
+import { describeCut, forkSession, truncateSession } from "./history.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 let win = null;
@@ -452,15 +453,22 @@ handle("sessions:prompt", async (sessionId, text, source = "relay") => {
   //         "relay" – sent by another session: neither
   // Images are only ever attached for "app": the broker can't prove who is behind a relay message, and reading
   // local files must never be triggered from outside this window.
-  const { conn, relay, cwd } = getOpen(sessionId);
+  const entry = getOpen(sessionId);
+  const { conn, relay, cwd } = entry;
   if (source === "app" || source === "human") relay?.human();
   const { blocks, notes } = await promptBlocks(text, cwd, {
     attachImages: source === "app",
     imagesSupported: conn.init?.agentCapabilities?.promptCapabilities?.image === true,
   });
   for (const note of notes) send("acp:notice", { sessionId, text: note });
-  const res = await conn.request("session/prompt", { sessionId, prompt: blocks });
-  return res?.stopReason ?? "end_turn";
+  // fork/truncate refuse while a turn is running: the agent is still writing the history
+  entry.prompting = true;
+  try {
+    const res = await conn.request("session/prompt", { sessionId, prompt: blocks });
+    return res?.stopReason ?? "end_turn";
+  } finally {
+    entry.prompting = false;
+  }
 });
 
 handle("sessions:cancel", async (sessionId) => {
@@ -471,13 +479,69 @@ handle("sessions:cancel", async (sessionId) => {
   e.conn.notify("session/cancel", { sessionId });
 });
 
-handle("sessions:close", async (sessionId) => {
+/** Close an open session and stop its agent; returns the stopped connection (undefined if it wasn't open). */
+async function closeEntry(sessionId) {
   const e = open.get(sessionId);
   if (!e) return;
+  // removed from `open` first, so the connection's exit handler stays silent (no acp:exit)
   open.delete(sessionId);
   e.relay?.stop();
   await Promise.race([e.conn.request("session/close", { sessionId }).catch(() => {}), new Promise((r) => setTimeout(r, 2000))]);
   e.conn.kill();
+  return e.conn;
+}
+
+handle("sessions:close", async (sessionId) => {
+  await closeEntry(sessionId);
+});
+
+// ---------- history: fork / delete from a message ----------
+
+const CUT_POSITIONS = ["beforeUser", "beforeReply", "afterReply"];
+
+/** The renderer's cut target, checked before it reaches history.mjs. */
+function cutTarget(target) {
+  const { ordinal, text, where } = target ?? {};
+  if (!Number.isInteger(ordinal) || ordinal < 1) throw new Error("Invalid message position.");
+  if (typeof text !== "string") throw new Error("Invalid message text.");
+  if (!CUT_POSITIONS.includes(where)) throw new Error(`Unknown cut position: ${where}`);
+  return { ordinal, text, where };
+}
+
+function refuseWhilePrompting(sessionId) {
+  if (open.get(sessionId)?.prompting) throw new Error("Wait until Copilot finishes this turn.");
+}
+
+/** Resolves once `conn`'s process has exited, or after `ms` (kill() escalates to SIGKILL after 3 s). */
+function exited(conn, ms = 4000) {
+  if (!conn || conn.exited) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    conn.once("exit", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+// how many messages a delete would remove, for the confirm dialog
+handle("sessions:countFrom", async (sessionId, target) => describeCut(sessionId, cutTarget(target)));
+
+// copy of the history up to the target under a new session id; the source stays as it is (open or not)
+handle("sessions:fork", async (sessionId, target) => {
+  target = cutTarget(target);
+  refuseWhilePrompting(sessionId);
+  return forkSession(sessionId, target);
+});
+
+// cut the history in place; the session is closed first and the renderer reopens it via sessions:open
+handle("sessions:truncate", async (sessionId, target) => {
+  target = cutTarget(target);
+  refuseWhilePrompting(sessionId);
+  describeCut(sessionId, target); // throws for a target that doesn't match, before anything is closed
+  // the agent may write to events.jsonl until its process is gone
+  await exited(await closeEntry(sessionId));
+  return truncateSession(sessionId, target);
 });
 
 handle("sessions:setConfig", async (sessionId, configId, value) => {

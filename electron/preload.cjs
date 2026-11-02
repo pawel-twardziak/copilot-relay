@@ -21,6 +21,10 @@ contextBridge.exposeInMainWorld("api", {
   relayRename: (sessionId, name) => call("relay:rename", sessionId, name),
   cancel: (sessionId) => call("sessions:cancel", sessionId),
   closeSession: (sessionId) => call("sessions:close", sessionId),
+  // target: { ordinal, text, where } – the message to cut at, see electron/history.mjs
+  countFrom: (sessionId, target) => call("sessions:countFrom", sessionId, target),
+  forkSession: (sessionId, target) => call("sessions:fork", sessionId, target),
+  truncateSession: (sessionId, target) => call("sessions:truncate", sessionId, target),
   setConfig: (sessionId, configId, value) => call("sessions:setConfig", sessionId, configId, value),
   answerPermission: (sessionId, reqId, optionId) => call("permission:answer", sessionId, reqId, optionId),
   pickDir: () => call("dialog:pickDir"),

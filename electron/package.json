@@ -30,6 +30,7 @@
     "files": [
       "main.mjs",
       "acp.mjs",
+      "history.mjs",
       "relay-client.mjs",
       "preload.cjs",
       "renderer/**",
