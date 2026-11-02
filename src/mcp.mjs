@@ -1,6 +1,7 @@
 // MCP endpoint of the broker (Streamable HTTP).
 //
-//  /mcp?peer=<key>  – stateless, identity given by the broker (used by broker-spawned ACP sessions)
+//  /mcp?peer=<key>  – stateless, identity given by the URL (broker-spawned ACP sessions; the desktop app
+//                     passes an alias that /api/peer/stream?alias= maps to the session's key)
 //  /mcp             – stateful: every MCP session becomes its own "mcp" peer with a mailbox.
 //                     Use this from any MCP client (VS Code, other agents…).
 import { randomUUID } from "node:crypto";
@@ -105,7 +106,7 @@ export function createMcpHandler(registry) {
     // Broker-owned sessions: stateless, identity from the URL.
     if (fixedKey) {
       if (req.method !== "POST") return res.writeHead(405, { Allow: "POST" }).end();
-      const server = buildServer(registry, () => fixedKey, { mailbox: false });
+      const server = buildServer(registry, () => registry.resolve(fixedKey), { mailbox: false });
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       res.on("close", () => {
         transport.close();

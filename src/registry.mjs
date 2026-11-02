@@ -24,6 +24,7 @@ export class Registry extends EventEmitter {
     super();
     this.byKey = new Map();
     this.byName = new Map();
+    this.aliases = new Map(); // alias -> peer key (MCP URL token chosen before the Copilot session ID is known)
     this.maxAgentMessages = maxAgentMessages;
     this.budget = maxAgentMessages;
   }
@@ -104,6 +105,14 @@ export class Registry extends EventEmitter {
 
   get(key) {
     return this.byKey.get(key);
+  }
+
+  setAlias(alias, key) {
+    this.aliases.set(alias, key);
+  }
+  /** Map an MCP `?peer=` value to a peer key (aliases are used by the desktop app). */
+  resolve(keyOrAlias) {
+    return this.aliases.get(keyOrAlias) ?? keyOrAlias;
   }
   getByName(name) {
     return this.byName.get(name);

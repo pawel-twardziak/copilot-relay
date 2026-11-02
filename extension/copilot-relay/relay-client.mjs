@@ -10,6 +10,7 @@ export class RelayClient {
    * @param {string} o.key        stable peer key (Copilot sessionId)
    * @param {string} o.cwd
    * @param {string} [o.name]     preferred name
+   * @param {string} [o.alias]    extra ID the broker maps to `key` (MCP `?peer=` token used by the desktop app)
    * @param {string} [o.brokerScript] path to server.mjs – auto-started if the broker is down
    * @param {string} [o.nodePath]  Node executable used to start the broker
    * @param {(m:{from:string,text:string,prompt:string})=>void} o.onMessage
@@ -107,6 +108,7 @@ export class RelayClient {
     this.abort = new AbortController();
     const qs = new URLSearchParams({ key: this.key, cwd: this.cwd ?? "" });
     if (this.requestedName) qs.set("name", this.requestedName);
+    if (this.alias) qs.set("alias", this.alias);
     const res = await this.#fetch(`/api/peer/stream?${qs}`, { signal: this.abort.signal, headers: { accept: "text/event-stream" } });
     if (!res.ok || !res.body) throw new Error(`broker answered ${res.status}`);
     this.connected = true;

@@ -241,6 +241,7 @@ const server = http.createServer(async (req, res) => {
       case "GET /api/peer/stream": {
         const key = q.get("key");
         if (!key) return json(res, 400, { error: "key required" });
+        if (q.get("alias")) registry.setAlias(q.get("alias"), key);
         sse(res);
         const write = (event, data) => !res.destroyed && res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
         const onRenamed = (ev) => ev.key === key && write("renamed", { name: ev.name });
