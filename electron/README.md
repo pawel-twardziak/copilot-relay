@@ -30,6 +30,9 @@ It runs on Windows, macOS and Linux.
   **Delete pasted images**, plus the location of the settings file.
 - Copy anything. Hover a message, code block or tool output to show its **Copy** button; copying a diff gives the
   new file content. **Copy thread** copies the whole conversation as Markdown. Right-click shows Copy / Select All.
+- **Rename** a session: click its title in the header, type a name, press Enter (Esc cancels). The app uses Copilot's
+  own `/rename` command, so the name is the same in the terminal CLI and in the list; it runs no model turn and is
+  not added to the conversation.
 - **Fork** or **Delete** from any message (hover a prompt, relay message or the start of an answer).
   Fork on a prompt starts a new session with the history before it and puts the prompt in the message box to edit;
   Fork on an answer starts a new session that ends with that answer. Delete removes the message (or answer) and

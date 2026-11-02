@@ -76,6 +76,9 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberat
 }
 .head .title { flex: 1; min-width: 0; }
 .head .title b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.head .title b.renamable { cursor: text; }
+.head .title b.renamable:hover { text-decoration: underline dotted; }
+.title-rename { display: block; width: 100%; font-weight: bold; }
 .head .title a { color: var(--muted); font-size: 12px; cursor: pointer; text-decoration: none; }
 .head .title a:hover { text-decoration: underline; }
 .head select { max-width: 190px; }

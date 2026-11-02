@@ -19,6 +19,8 @@ contextBridge.exposeInMainWorld("api", {
   // source: "app" (typed here), "human" (relay web GUI) or "relay" (another session) – see sessions:prompt
   prompt: (sessionId, text, source = "relay") => call("sessions:prompt", sessionId, text, source),
   relayRename: (sessionId, name) => call("relay:rename", sessionId, name),
+  // the Copilot session's title (Copilot's /rename), not the relay name
+  renameSession: (sessionId, name) => call("sessions:rename", sessionId, name),
   cancel: (sessionId) => call("sessions:cancel", sessionId),
   closeSession: (sessionId) => call("sessions:close", sessionId),
   // target: { ordinal, text, where } – the message to cut at, see electron/history.mjs

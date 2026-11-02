@@ -214,7 +214,7 @@ class SessionView {
     this.turnReplied = false; // the latest turn's reply already has fork/delete actions
     this.historyOp = false; // a fork/delete is running
 
-    this.titleEl = h("b");
+    this.titleEl = h("b", { class: "renamable", onclick: () => this.renameSession() });
     this.selects = h("span", { class: "selects" });
     this.relayChip = h("button", { class: "relay-chip", hidden: true, onclick: () => this.renameRelay() });
     this.log = h("div", { class: "log" });
@@ -322,7 +322,40 @@ class SessionView {
   setTitle(t) {
     if (t) this.title = t;
     this.titleEl.textContent = this.title ? shortTitle(this.title) : "New session";
-    this.titleEl.title = this.title;
+    this.titleEl.title = `${this.title ? this.title + "\n" : ""}Click to rename`;
+    const listed = sessions.find((s) => s.sessionId === this.sessionId);
+    if (listed && t) listed.title = t; // the list shows the new name before the next refresh
+  }
+
+  /** Inline editor for the session title; saved through Copilot's /rename. */
+  renameSession() {
+    if (this.busy || this.dead) return;
+    const input = h("input", { class: "title-rename", value: this.title, spellcheck: "false", maxlength: "200" });
+    let finished = false;
+    const done = async (save) => {
+      // removing the focused input fires "blur" inside replaceWith, which would call done again mid-replace
+      if (finished) return;
+      finished = true;
+      input.replaceWith(this.titleEl);
+      const name = input.value.replace(/\s+/g, " ").trim();
+      if (!save || !name || name === this.title || this.busy || this.dead) return;
+      this.setBusy(true);
+      try {
+        this.setTitle(await api.renameSession(this.sessionId, name));
+      } catch (e) {
+        this.error(`Rename failed: ${e.message}`);
+      } finally {
+        if (!this.dead) this.setBusy(false);
+        scheduleRefresh();
+      }
+    };
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") done(true);
+      else if (e.key === "Escape") done(false);
+    });
+    input.addEventListener("blur", () => done(false));
+    this.titleEl.replaceWith(input);
+    input.select();
   }
 
   autosize() {
@@ -498,8 +531,10 @@ class SessionView {
   renameRelay() {
     if (!this.relayName) return;
     const input = h("input", { class: "relay-rename", value: this.relayName, spellcheck: "false" });
+    let finished = false;
     const done = async (save) => {
-      if (!input.isConnected) return;
+      if (finished) return; // see renameSession
+      finished = true;
       input.replaceWith(this.relayChip);
       const name = input.value.trim();
       if (!save || !name || name === this.relayName) return;

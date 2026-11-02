@@ -164,6 +164,8 @@ function attach(sessionId, conn, cwd, relay) {
     if (method !== "session/update" || params?.sessionId !== sessionId) return;
     const u = params.update;
     if (u?.sessionUpdate === "tool_call" && u.title) entry.toolTitles.set(u.toolCallId, u.title);
+    // /rename answers with a chat line ("Session renamed to: …"); the new title arrives as session_info_update
+    if (entry.renaming && u?.sessionUpdate === "agent_message_chunk") return;
     send("acp:update", { sessionId, update: u });
   });
   conn.on("request:session/request_permission", (rpcId, params) => {
@@ -469,6 +471,23 @@ handle("sessions:prompt", async (sessionId, text, source = "relay") => {
   } finally {
     entry.prompting = false;
   }
+});
+
+// Copilot's own /rename command: it runs no model turn and isn't stored in the history, so turn numbers
+// used by fork/delete stay right. Copilot saves the name in workspace.yaml (user_named: true).
+handle("sessions:rename", async (sessionId, name) => {
+  const entry = getOpen(sessionId);
+  if (entry.prompting) throw new Error("Wait until Copilot finishes this turn.");
+  name = String(name ?? "").replace(/\s+/g, " ").trim();
+  if (!name) throw new Error("The name can't be empty.");
+  if (name.length > 200) throw new Error("The name is too long (200 characters at most).");
+  entry.prompting = entry.renaming = true;
+  try {
+    await entry.conn.request("session/prompt", { sessionId, prompt: [{ type: "text", text: `/rename ${name}` }] });
+  } finally {
+    entry.prompting = entry.renaming = false;
+  }
+  return name;
 });
 
 handle("sessions:cancel", async (sessionId) => {
