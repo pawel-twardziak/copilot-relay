@@ -211,6 +211,7 @@ class SessionView {
     this.relayName = null;
     this.turn = 0; // user/relay messages so far = the turn ordinal of the latest one (see append)
     this.turnText = null; // getter for the latest user message's text
+    this.turnReplyEl = null; // the latest turn's reply element carrying actions
     this.turnReplied = false; // the latest turn's reply already has fork/delete actions
     this.historyOp = false; // a fork/delete is running
 
@@ -360,6 +361,20 @@ class SessionView {
     if (listed && t) listed.title = t; // the list shows the new name before the next refresh
   }
 
+  /** Rename through Copilot's /rename (used by the title editor and the typed /rename command). */
+  async applyRename(name) {
+    if (this.busy || this.dead) return;
+    this.setBusy(true);
+    try {
+      this.setTitle(await api.renameSession(this.sessionId, name));
+    } catch (e) {
+      this.error(`Rename failed: ${e.message}`);
+    } finally {
+      if (!this.dead) this.setBusy(false);
+      scheduleRefresh();
+    }
+  }
+
   /** Inline editor for the session title; saved through Copilot's /rename. */
   renameSession() {
     if (this.busy || this.dead) return;
@@ -372,15 +387,7 @@ class SessionView {
       input.replaceWith(this.titleEl);
       const name = input.value.replace(/\s+/g, " ").trim();
       if (!save || !name || name === this.title || this.busy || this.dead) return;
-      this.setBusy(true);
-      try {
-        this.setTitle(await api.renameSession(this.sessionId, name));
-      } catch (e) {
-        this.error(`Rename failed: ${e.message}`);
-      } finally {
-        if (!this.dead) this.setBusy(false);
-        scheduleRefresh();
-      }
+      await this.applyRename(name);
     };
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter") done(true);
@@ -476,13 +483,35 @@ class SessionView {
       this.turn++;
       this.turnText = el._matchText ?? (() => "");
       this.turnReplied = false;
+      this.turnReplyEl = null;
       Object.assign(el, { _turn: this.turn, _kind: "user" });
     } else if (this.turn > 0 && !this.turnReplied && ((c.contains("msg") && c.contains("agent")) || (el.tagName === "DETAILS" && c.contains("tool")))) {
       this.turnReplied = true;
+      this.turnReplyEl = el;
       // cuts are anchored on user messages: a reply is found through its turn's user message
       Object.assign(el, { _turn: this.turn, _kind: "reply", _matchText: this.turnText });
     } else return;
     this.addActions(el);
+  }
+
+  /** Un-number a turn that Copilot did not record (a CLI command such as /context): strip its actions. */
+  dropTurn(userEl) {
+    if (userEl._turn !== this.turn) return;
+    for (const el of [userEl, this.turnReplyEl]) {
+      if (!el) continue;
+      for (const bar of el.querySelectorAll(".acts")) {
+        if (bar.tagName === "DIV") {
+          const copy = [...bar.children].find((c) => c.classList.contains("copy"));
+          if (copy) bar.replaceWith(copy);
+          else bar.remove();
+        } else bar.remove();
+      }
+      delete el._turn;
+      delete el._kind;
+    }
+    this.turn--;
+    this.turnReplied = true;
+    this.turnReplyEl = null;
   }
 
   /** "Fork" / "Delete" buttons next to the element's Copy button (in a tool card: in its summary line). */
@@ -954,6 +983,11 @@ class SessionView {
       }
       return;
     }
+    const rename = SlashCommands.parseRenameCommand(text);
+    if (rename) {
+      this.applyRename(rename.name);
+      return;
+    }
     this.runPrompt(text, bubble("user", text), "app");
   }
 
@@ -964,6 +998,9 @@ class SessionView {
     this.log.scrollTop = this.log.scrollHeight;
     this.setBusy(true);
     this.prompting = true;
+    // CLI commands (/context ...) are not recorded in events.jsonl; compare the recorded count to tell
+    const isCmd = SlashCommands.isCommandPrompt(text);
+    const before = isCmd ? await api.userMessages(this.sessionId).catch(() => null) : null;
     try {
       const stop = await api.prompt(this.sessionId, text, source);
       this.flush();
@@ -973,6 +1010,10 @@ class SessionView {
       this.error(e.message);
     } finally {
       this.prompting = false;
+      if (before !== null) {
+        const after = await api.userMessages(this.sessionId).catch(() => null);
+        if (after === before) this.dropTurn(bubble);
+      }
       if (!this.dead) this.setBusy(false);
       scheduleRefresh();
     }

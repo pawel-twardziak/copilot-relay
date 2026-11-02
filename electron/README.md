@@ -79,6 +79,14 @@ From the repo root, run `npm run app:install` once and then `npm run app`.
 The first `npm start` downloads the Electron binary (about 100 MB, from GitHub). Behind a corporate proxy, set
 `HTTPS_PROXY`, or point `ELECTRON_MIRROR` at an internal mirror, e.g. `ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/`.
 
+## Slash commands and agents
+
+Type `/` in the prompt box for a popup of the CLI's commands, your skills and the app's own commands. A command only
+counts as the first word of the prompt. If the session has custom agents, an agent picker appears in the header;
+`/agent [name]` opens it or switches directly. `/rename <name>` renames the session without sending a message.
+Commands the CLI handles itself (such as `/context`) are not stored in the session history, so their bubbles get no
+Fork/Delete actions and don't count as turns.
+
 ## Prebuilt downloads (Windows, Linux)
 
 The [Desktop app workflow](../.github/workflows/desktop.yml) builds:
