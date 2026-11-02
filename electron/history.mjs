@@ -132,8 +132,8 @@ export function forkSession(id, target, now = new Date()) {
   const sessionId = randomUUID();
   const dst = path.join(path.dirname(src), sessionId);
   try {
-    // the original's delete backup and leftover temp files belong to the original only
-    const own = (p) => path.dirname(p) !== src || !/^(events\.jsonl\.bak|\.events\.jsonl\..*\.tmp)$/.test(path.basename(p));
+    // the original's delete backup, temp files and Copilot's lock file belong to the original only
+    const own = (p) => path.dirname(p) !== src || !/^(events\.jsonl\.bak|\.events\.jsonl\..*\.tmp|\.workspace-fork\.lock)$/.test(path.basename(p));
     fs.cpSync(src, dst, { recursive: true, errorOnExist: true, force: false, filter: own });
     const start = structuredClone(events[0]);
     start.data = { ...start.data, sessionId };

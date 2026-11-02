@@ -290,9 +290,10 @@ describe("forkSession", () => {
     const { id, dir } = makeSession();
     fs.writeFileSync(path.join(dir, "events.jsonl.bak"), "old");
     fs.writeFileSync(path.join(dir, ".events.jsonl.x.tmp"), "tmp");
+    fs.writeFileSync(path.join(dir, ".workspace-fork.lock"), "");
     const res = forkSession(id, { ordinal: 2, text: "", where: "beforeUser" }, now);
     const files = fs.readdirSync(path.join(home, "session-state", res.sessionId));
-    assert.ok(!files.includes("events.jsonl.bak") && !files.includes(".events.jsonl.x.tmp"));
+    for (const f of ["events.jsonl.bak", ".events.jsonl.x.tmp", ".workspace-fork.lock"]) assert.ok(!files.includes(f), f);
     assert.ok(files.includes("checkpoints"));
   });
 
