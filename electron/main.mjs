@@ -2,10 +2,11 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from "electron";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, statSync, writeFileSync } from "node:fs";
+import { lstat, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { AcpConnection } from "./acp.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -56,8 +57,6 @@ const copilotCommand = () => loadSettings().copilotCommand || process.env.COPILO
 
 function friendly(err) {
   const msg = String(err?.message ?? err);
-  if (/ENOENT|not recognized|not found/i.test(msg) && !/session/i.test(msg))
-    return `Could not start "${copilotCommand()}". Install GitHub Copilot CLI or set its full path in Settings. (${msg})`;
   if (/auth|login|unauthor/i.test(msg)) return `${msg}\n\nRun \`copilot login\` in a terminal, then try again.`;
   return msg;
 }
@@ -102,7 +101,9 @@ function relayStart(sessionId, cwd, { cfg, alias }) {
     cwd,
     brokerScript: cfg.brokerScript,
     nodePath: cfg.nodePath,
-    onMessage: (m) => send("relay:message", { sessionId, from: m.from, text: m.text, prompt: m.prompt }),
+    // `human` is set by the broker (true only for messages typed by a person in the relay GUI), not by the sender's name
+    // human: true/false from this broker, undefined from an older one (the renderer then falls back to the sender name)
+    onMessage: (m) => send("relay:message", { sessionId, from: m.from, human: m.human, text: m.text, prompt: m.prompt }),
     onRegistered: () => status(),
     onRenamed: () => status(),
     log: (note) => status({ note }),
@@ -117,7 +118,16 @@ const send = (channel, payload) => win && !win.isDestroyed() && win.webContents.
 
 async function connect(cwd) {
   const conn = new AcpConnection({ command: copilotCommand(), cwd });
-  await conn.start();
+  try {
+    await conn.start();
+  } catch (e) {
+    conn.kill();
+    // installed but signed out: friendly() adds the login hint (the command path is left out of the test,
+    // so a missing /home/author/bin/copilot is still reported as "could not start")
+    if (/auth|login|unauthor/i.test(e.message.replaceAll(copilotCommand(), ""))) throw e;
+    // any other failure to start or initialize (not found, "command not found", missing interpreter, crash)
+    throw new Error(`Could not start "${copilotCommand()}": ${e.message}\n\nInstall GitHub Copilot CLI or set its full path in Settings.`);
+  }
   return conn;
 }
 
@@ -225,10 +235,128 @@ handle("sessions:open", async (sessionId, cwd) => {
   }
 });
 
-handle("sessions:prompt", async (sessionId, text, human = true) => {
-  const { conn, relay } = getOpen(sessionId);
-  if (human) relay?.human(); // a human prompt re-opens the relay's agent-to-agent message budget
-  const res = await conn.request("session/prompt", { sessionId, prompt: [{ type: "text", text }] });
+// ---------- images ----------
+
+// The one table of image types the models accept: pasted images are saved in one of these formats, and
+// `@path` mentions of these files are attached to prompts.
+const IMAGE_TYPES = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp" };
+/** "3.7 MB" / "512 KB": the one byte formatter (notes in the chat and the Settings dialog). */
+const fmtBytes = (b) => (b < 1024 * 1024 ? `${Math.round(b / 1024)} KB` : `${(b / 1024 / 1024).toFixed(1)} MB`);
+
+// mime → file extension for saving pasted images (derived, so the two can't drift apart)
+const EXT_FOR_MIME = Object.fromEntries(Object.entries(IMAGE_TYPES).filter(([ext]) => ext !== "jpeg").map(([ext, mime]) => [mime, ext]));
+
+/** "~/x" and "~\\x" mean the home folder, as in a shell. */
+const expandHome = (p) => (p === "~" ? os.homedir() : /^~[\\/]/.test(p) ? path.join(os.homedir(), p.slice(2)) : p);
+// Model APIs reject images over about 5 MB *after* base64 encoding (4/3 of the file size), and an oversized
+// image fails the whole turn. Files are checked against the encoded size, and the prompt has a total budget.
+const MAX_IMAGE_BYTES = Math.floor((5 * 1024 * 1024 * 3) / 4) - 64 * 1024; // ≈3.7 MB file → <5 MB base64
+const MAX_TOTAL_IMAGE_BYTES = 12 * 1024 * 1024; // all images of one prompt together
+const MAX_IMAGE_SIDE = 2048; // pasted images larger than the byte limit are scaled down to this
+
+// Pasted images are saved here and an @path mention is put into the prompt. The temp dir is per-user on Windows
+// and macOS. On Linux /tmp is shared, so the folder name carries the user ID and the folder is private (0700).
+const PASTE_DIR = path.join(
+  os.tmpdir(),
+  process.platform === "win32" || process.platform === "darwin" ? "copilot-sessions" : `copilot-sessions-${process.getuid()}`,
+  "pastes",
+);
+
+/** Refuse a paste folder (or its parent) that someone else created, that others can access, or that is a symlink. */
+async function assertPrivate() {
+  for (const dir of [path.dirname(PASTE_DIR), PASTE_DIR]) {
+    const st = await lstat(dir); // ENOENT if it doesn't exist yet
+    if (process.platform === "win32") continue;
+    if (!st.isDirectory() || st.isSymbolicLink() || st.uid !== process.getuid() || (st.mode & 0o077) !== 0)
+      throw new Error(`Refusing to use ${dir}: it is not a private folder owned by you. Delete it and try again.`);
+  }
+}
+
+/** The paste folder, created if needed (for saving). */
+async function pasteDir() {
+  await mkdir(PASTE_DIR, { recursive: true, mode: 0o700 });
+  await assertPrivate();
+  return PASTE_DIR;
+}
+
+/** The paste folder if it already exists (for listing / deleting), or null. Never follows a planted symlink. */
+async function existingPasteDir() {
+  try {
+    await assertPrivate();
+  } catch (e) {
+    if (e.code === "ENOENT") return null;
+    throw e;
+  }
+  return PASTE_DIR;
+}
+
+/** Names of the pasted images (the same set is counted in Settings and deleted by "Delete pasted images"). */
+async function listPastes() {
+  if (!(await existingPasteDir())) return [];
+  return (await readdir(PASTE_DIR)).filter((f) => f.startsWith("paste-"));
+}
+
+// `@path` / `@"path with spaces"` mentions. The terminal UI expands them itself; over ACP the agent only sees
+// the text, so images are attached here as ACP image blocks. Other files stay as text: the agent reads them with its tools.
+const MENTION_RE = /(?:^|\s)@(?:"([^"]+)"|(\S+))/g;
+
+/** Build the ACP prompt. Returns the blocks plus notes about mentioned images that could not be attached. */
+async function promptBlocks(text, cwd, { attachImages, imagesSupported }) {
+  const blocks = [{ type: "text", text }];
+  const notes = [];
+  if (!attachImages) return { blocks, notes };
+  const files = new Set();
+  for (const m of text.matchAll(MENTION_RE)) {
+    const file = path.resolve(cwd, expandHome(m[1] ?? m[2].replace(/[.,;:!?)]+$/, "")));
+    if (IMAGE_TYPES[path.extname(file).slice(1).toLowerCase()]) files.add(file);
+  }
+  if (files.size && !imagesSupported) {
+    notes.push("This Copilot CLI does not accept images over ACP; image mentions were sent as text only.");
+    return { blocks, notes };
+  }
+  const NOT_FOUND = -1;
+  const NOT_A_FILE = -2;
+  const sizes = await Promise.all([...files].map((f) => stat(f).then((s) => (s.isFile() ? s.size : NOT_A_FILE), () => NOT_FOUND)));
+  const chosen = [];
+  let total = 0;
+  [...files].forEach((file, i) => {
+    const size = sizes[i];
+    if (size === NOT_FOUND) return notes.push(`${file} was not found, so the image was not attached.`);
+    if (size === NOT_A_FILE) return notes.push(`${file} is not a file, so it was not attached.`);
+    if (size > MAX_IMAGE_BYTES) return notes.push(`${path.basename(file)} (${fmtBytes(size)}) is over the ${fmtBytes(MAX_IMAGE_BYTES)} image limit and was not attached.`);
+    if (total + size > MAX_TOTAL_IMAGE_BYTES) return notes.push(`${path.basename(file)} was not attached: the images of one prompt are limited to ${fmtBytes(MAX_TOTAL_IMAGE_BYTES)} together.`);
+    total += size;
+    chosen.push(file);
+  });
+  const read = await Promise.all(
+    chosen.map(async (file) => {
+      try {
+        const mimeType = IMAGE_TYPES[path.extname(file).slice(1).toLowerCase()];
+        return { type: "image", mimeType, data: (await readFile(file)).toString("base64"), uri: pathToFileURL(file).href };
+      } catch (e) {
+        notes.push(`${path.basename(file)} could not be read (${e.code ?? e.message}), so it was not attached.`);
+        return null;
+      }
+    }),
+  );
+  blocks.push(...read.filter(Boolean));
+  return { blocks, notes };
+}
+
+handle("sessions:prompt", async (sessionId, text, source = "relay") => {
+  // source: "app"   – typed in this app: re-opens the relay budget and attaches mentioned images
+  //         "human" – typed by a person in the relay web GUI: re-opens the budget only
+  //         "relay" – sent by another session: neither
+  // Images are only ever attached for "app": the broker can't prove who is behind a relay message, and reading
+  // local files must never be triggered from outside this window.
+  const { conn, relay, cwd } = getOpen(sessionId);
+  if (source === "app" || source === "human") relay?.human();
+  const { blocks, notes } = await promptBlocks(text, cwd, {
+    attachImages: source === "app",
+    imagesSupported: conn.init?.agentCapabilities?.promptCapabilities?.image === true,
+  });
+  for (const note of notes) send("acp:notice", { sessionId, text: note });
+  const res = await conn.request("session/prompt", { sessionId, prompt: blocks });
   return res?.stopReason ?? "end_turn";
 });
 
@@ -290,6 +418,157 @@ handle("settings:set", async (s) => {
   return true;
 });
 
+// ---------- links ----------
+
+const WEB_LINK = /^(https?|mailto):/i;
+
+// File types that default apps display rather than run. Everything else (installers, scripts, shortcuts,
+// app bundles, unknown types…) is only shown in the file manager: an allowlist, because a list of dangerous
+// extensions is never complete.
+const SAFE_TO_OPEN = new Set(
+  (
+    // Deliberately small. Not here: source code and scripts (an installed interpreter may run them: .py, .lua, .mjs…),
+    // html/svg/xml (script in the browser), Office/RTF/OpenDocument (macros, OLE/DDE). Those are revealed instead.
+    "txt text md markdown rst adoc log csv tsv json jsonc json5 ndjson yaml yml toml diff patch " +
+    "png jpg jpeg gif webp bmp ico tif tiff avif heic pdf"
+  ).split(" "),
+);
+
+// folders with these extensions are app/plugin packages that the OS launches instead of browsing
+const PACKAGE_DIRS = new Set(
+  "app bundle framework plugin kext prefpane appex xpc workflow action saver qlgenerator mdimporter component pkg mpkg".split(" "),
+);
+
+function openWeb(url) {
+  if (WEB_LINK.test(url)) shell.openExternal(url);
+}
+
+/** UNC paths and file://host URLs would make Windows contact a remote SMB server (and send the user's NTLM hash). */
+function isRemote(p) {
+  return /^(\\\\|\/\/)/.test(p);
+}
+
+/** Resolve a link target from agent output to an existing local path: file:// URL, absolute or relative to the session folder. */
+function resolveTarget(cwd, target) {
+  const raw = String(target ?? "").trim();
+  let candidates;
+  if (/^file:/i.test(raw)) {
+    const url = new URL(raw);
+    if (url.host && url.host !== "localhost") throw new Error(`Remote file links are not opened: ${raw}`);
+    url.hash = "";
+    candidates = [fileURLToPath(url)]; // decodes %xx once
+  } else {
+    // Markdown links come percent-encoded (marked encodes spaces and non-ASCII); plain paths may contain a
+    // literal '%' or '#'. Try the text as is and decoded, each with and without an editor-style line suffix.
+    const noLine = (x) => x.replace(/#L\d+(-L?\d+)?$/, "").replace(/(:\d+){1,2}$/, "");
+    let decoded = raw;
+    try {
+      decoded = decodeURIComponent(raw);
+    } catch {}
+    candidates = [...new Set([raw, noLine(raw), decoded, noLine(decoded)])];
+  }
+  const abs = candidates.map((c) => path.resolve(cwd || os.homedir(), expandHome(c)));
+  if (candidates.some(isRemote) || abs.some(isRemote)) throw new Error(`Network paths are not opened: ${raw}`);
+  for (const c of abs) {
+    const real = localRealpath(c);
+    if (real) return real;
+  }
+  throw new Error(`File not found: ${abs[1] ?? abs[0]}`);
+}
+
+/**
+ * realpath that never touches the network: every symlink (or Windows junction) on the way is read with readlink
+ * and refused if it points to a UNC / network path, before anything follows it. (fs.realpath or existsSync would
+ * already open the SMB connection, which leaks the user's NTLM hash on Windows.) Returns null if the path doesn't exist.
+ */
+function localRealpath(p, depth = 0) {
+  if (depth > 32) throw new Error(`Too many symbolic links: ${p}`);
+  const { root } = path.parse(p);
+  let cur = root;
+  for (const part of p.slice(root.length).split(/[\\/]+/).filter(Boolean)) {
+    const next = path.join(cur, part);
+    let st;
+    try {
+      st = lstatSync(next);
+    } catch {
+      return null;
+    }
+    if (!st.isSymbolicLink()) {
+      cur = next;
+      continue;
+    }
+    let target = readlinkSync(next);
+    if (/^\\\\\?\\UNC\\/i.test(target)) throw new Error(`Network paths are not opened: ${next} → ${target}`);
+    target = target.replace(/^\\\\\?\\/, ""); // \\?\C:\x (Windows long-path form) is local
+    const resolved = path.resolve(cur, target);
+    if (isRemote(target) || isRemote(resolved)) throw new Error(`Network paths are not opened: ${next} → ${target}`);
+    cur = localRealpath(resolved, depth + 1);
+    if (!cur) return null;
+  }
+  return cur;
+}
+
+/** One entry point for every link click: web links go to the browser, safe files open, anything else is revealed. */
+handle("open:link", async (cwd, target) => {
+  const t = String(target ?? "");
+  if (WEB_LINK.test(t)) return void (await shell.openExternal(t));
+  // other URI schemes are refused; "main.mjs:42" (file:line) and "C:\\x" (drive) are paths, not schemes
+  if (/^[a-z][a-z0-9+.-]*:(?!\d)/i.test(t) && !/^file:/i.test(t) && !/^[a-z]:[\\/]/i.test(t)) throw new Error(`Unsupported link: ${t}`);
+  // decide on the real target: a symlink named notes.txt may point at an app or a program
+  // resolveTarget returns the real local path: symlinks resolved (a "notes.txt" link may point at an app), none remote
+  const file = resolveTarget(cwd, t);
+  const st = statSync(file);
+  // Windows ignores trailing dots and spaces ("payload.exe." runs payload.exe), so drop them before reading the extension
+  const name = process.platform === "win32" ? path.basename(file).replace(/[. ]+$/, "") : path.basename(file);
+  const ext = path.extname(name).slice(1).toLowerCase();
+  let safe;
+  if (st.isDirectory()) safe = !PACKAGE_DIRS.has(ext); // "v1.2" or "conf.d" open; "Tool.app" would launch
+  else if (ext) safe = SAFE_TO_OPEN.has(ext);
+  else safe = false; // no extension: the OS would pick a handler by sniffing the content (.desktop, scripts…)
+  if (!safe) {
+    shell.showItemInFolder(file);
+    return "revealed";
+  }
+  const err = await shell.openPath(file);
+  if (err) throw new Error(err);
+  return "opened";
+});
+
+handle("paste:saveImage", async (bytes, mime) => {
+  if (!(bytes instanceof Uint8Array) || !bytes.length) throw new Error("Empty image");
+  if (bytes.length > 50 * 1024 * 1024) throw new Error("Image is larger than 50 MB");
+  const ext = EXT_FOR_MIME[mime]; // the renderer converts other image types to PNG first
+  if (!ext) throw new Error(`Unsupported image type: ${mime}`);
+  const dir = await pasteDir();
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
+  const file = path.join(dir, `paste-${stamp}-${randomUUID().slice(0, 6)}.${ext}`);
+  await writeFile(file, bytes, { mode: 0o600, flag: "wx" }); // wx: never follow or overwrite an existing file
+  return file;
+});
+
+async function pasteStats() {
+  const files = await listPastes();
+  const sizes = await Promise.all(files.map((f) => stat(path.join(PASTE_DIR, f)).then((s) => s.size, () => 0)));
+  return { dir: PASTE_DIR, count: files.length, size: fmtBytes(sizes.reduce((a, b) => a + b, 0)) };
+}
+
+handle("images:config", async () => ({ mimes: Object.keys(EXT_FOR_MIME), maxBytes: MAX_IMAGE_BYTES, maxSide: MAX_IMAGE_SIDE }));
+
+handle("storage:get", async () => ({ pastes: await pasteStats(), settingsFile: settingsFile() }));
+
+handle("storage:openPastes", async () => {
+  const err = await shell.openPath(await pasteDir());
+  if (err) throw new Error(err);
+});
+
+handle("storage:clearPastes", async () => {
+  const files = await listPastes();
+  const results = await Promise.allSettled(files.map((f) => rm(path.join(PASTE_DIR, f), { force: true })));
+  const failed = results.filter((r) => r.status === "rejected");
+  if (failed.length) throw new Error(`${failed.length} of ${files.length} file(s) could not be deleted: ${failed[0].reason?.message}`);
+  return files.length;
+});
+
 handle("clipboard:write", async (text) => clipboard.writeText(String(text ?? "")));
 
 handle("shell:openPath", async (p) => {
@@ -316,15 +595,16 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
-  // links in agent output open in the system browser, never inside the app
+  // The renderer handles link clicks (it knows the session folder) through open:link. These are the fallback for
+  // anything that still tries to navigate: web links use the same allowlist, everything else is blocked.
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:/i.test(url)) shell.openExternal(url);
+    openWeb(url);
     return { action: "deny" };
   });
   win.webContents.on("will-navigate", (e, url) => {
     if (url !== win.webContents.getURL()) {
       e.preventDefault();
-      if (/^https?:/i.test(url)) shell.openExternal(url);
+      openWeb(url);
     }
   });
   // Electron has no context menu of its own: offer the usual edit actions for the selection / text fields
@@ -333,7 +613,7 @@ function createWindow() {
     if (p.isEditable) items.push({ role: "cut", enabled: p.editFlags.canCut });
     if (p.selectionText || p.isEditable) items.push({ role: "copy", enabled: p.editFlags.canCopy });
     if (p.isEditable) items.push({ role: "paste", enabled: p.editFlags.canPaste });
-    if (p.linkURL && /^https?:/i.test(p.linkURL)) items.push({ label: "Copy link", click: () => clipboard.writeText(p.linkURL) });
+    if (p.linkURL && WEB_LINK.test(p.linkURL)) items.push({ label: "Copy link", click: () => clipboard.writeText(p.linkURL) });
     items.push({ type: "separator" }, { role: "selectAll" });
     Menu.buildFromTemplate(items).popup({ window: win });
   });

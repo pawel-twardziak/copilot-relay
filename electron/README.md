@@ -8,6 +8,25 @@ It runs on Windows, macOS and Linux.
 - **Start** a new session in any folder: use **+ New session**, `Ctrl/Cmd+N`, or the `+` next to a folder in the list.
 - Chat with streamed answers, collapsible thinking and tool calls, file diffs and permission prompts.
   Press **Stop** (or `Esc`) to cancel a turn.
+- Links are clickable. Web and `mailto:` links open in your browser or mail app. File links and file paths in
+  tool calls and diffs open in the default app. Relative paths resolve against the session folder, and `:line` /
+  `#L12` suffixes are ignored. Only plain text, Markdown, data files (JSON, YAML, CSV, TOML…), diffs, images and PDF are opened, after
+  resolving symlinks. Everything else is only shown in the file manager: source code and scripts (an installed
+  interpreter could run them), files without an extension, installers, shortcuts, app bundles, HTML/SVG/XML,
+  Office/RTF documents and unknown types. `~/` paths and `file:line` links such as `main.mjs:42` work. Network paths (`\\server\share`, `file://host/…`)
+  are never opened.
+- Paste a screenshot or image into the message box and an `@path` mention is inserted. Pasting or dropping files from
+  the file manager inserts `@path` mentions for them. When you send a prompt, every `@path` (or `@"path with spaces"`)
+  that points to a png, jpg, gif or webp image of up to about 3.7 MB (5 MB once encoded for the API) is attached, so
+  the model sees it. A prompt can attach up to 12 MB of images in total. Pasted images in other formats, or larger
+  than the limit (e.g. a full-screen Retina/4K screenshot), are scaled down to 2048 px and saved as PNG or JPEG so
+  they fit. Other files stay as text mentions, and the agent reads them with its tools. Only prompts
+  you type in this app attach images; relay messages never do, whoever sent them. `@~/…` paths work.
+- Pasted images are saved in the system temp folder: `%TEMP%\copilot-sessions\pastes` on Windows,
+  `$TMPDIR/copilot-sessions/pastes` on macOS, and `/tmp/copilot-sessions-<uid>/pastes` on Linux (private, mode 0700).
+  The app never deletes them by itself, but the system may clean its temp folder, e.g. `/tmp` on reboot.
+  **⚙ Settings → Files** shows the exact folder, the number and size of the files, **Open folder** and
+  **Delete pasted images**, plus the location of the settings file.
 - Copy anything. Hover a message, code block or tool output to show its **Copy** button; copying a diff gives the
   new file content. **Copy thread** copies the whole conversation as Markdown. Right-click shows Copy / Select All.
 - Switch mode (Agent / Plan / Autopilot), model, reasoning effort and approval settings per session.

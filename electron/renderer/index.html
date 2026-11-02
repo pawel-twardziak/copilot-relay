@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src data: https:; font-src 'self' data:"
     />
     <title>Copilot Sessions</title>
     <link rel="stylesheet" href="style.css" />
@@ -42,6 +42,18 @@
           <span><input id="set-relay" type="checkbox" /> Connect sessions to copilot-relay</span>
         </label>
         <p class="hint" id="set-relay-hint"></p>
+        <h3>Files</h3>
+        <div class="store">
+          <div class="store-label">Pasted images</div>
+          <code id="store-pastes" class="path"></code>
+          <p class="hint" id="store-pastes-info"></p>
+          <div class="store-actions">
+            <button id="store-open" type="button">Open folder</button>
+            <button id="store-clear" type="button" class="danger">Delete pasted images</button>
+          </div>
+          <div class="store-label">Settings file</div>
+          <code id="store-settings" class="path"></code>
+        </div>
         <div class="dialog-actions">
           <button value="cancel">Cancel</button>
           <button id="set-save" value="save" class="primary">Save</button>

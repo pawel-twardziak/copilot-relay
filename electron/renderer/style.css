@@ -156,3 +156,14 @@ dialog label { display: flex; flex-direction: column; gap: 6px; }
 .codewrap > pre { margin-top: 0; }
 .msg.agent .codewrap { margin: 0 0 1em; }
 .msg, .tool .body, .perm, .plan { user-select: text; }
+
+/* ---------- links ---------- */
+.log a { color: var(--accent); cursor: pointer; }
+.path-link { cursor: pointer; }
+.path-link:hover { color: var(--accent); text-decoration: underline; }
+dialog h3 { font-size: 13px; margin: 16px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.store { display: flex; flex-direction: column; gap: 4px; }
+.store-label { font-size: 12px; color: var(--muted); margin-top: 6px; }
+.store .path { user-select: text; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; overflow-wrap: anywhere; }
+.store-actions { display: flex; gap: 8px; }
+.store .hint { margin: 2px 0; }

@@ -47,15 +47,131 @@ function decoratePres(root) {
   }
 }
 
+const URL_RE = /\bhttps?:\/\/[^\s<>"'`]+/g;
+
+/** Drop sentence punctuation after a URL, and closing brackets that have no opening one inside it
+ *  ("(see https://x.dev/a)" → "https://x.dev/a", but ".../Rust_(language)" keeps its ")"). */
+function trimUrl(u) {
+  for (;;) {
+    const last = u.at(-1);
+    const pair = { ")": "(", "]": "[", "}": "{" }[last];
+    if (".,;:!?'\"".includes(last)) u = u.slice(0, -1);
+    else if (pair && u.split(pair).length <= u.split(last).length - 1) u = u.slice(0, -1);
+    else return u;
+  }
+}
+
+/** Turn plain-text URLs inside `root` into links (existing links and code blocks are left alone).
+ *  codeOnly: only inside inline code (for rendered Markdown, where marked has already linked the plain text). */
+function linkify(root, { codeOnly = false } = {}) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: (n) => {
+      const parent = n.parentElement;
+      if (!n.nodeValue.includes("http") || parent?.closest("a, button, pre")) return NodeFilter.FILTER_REJECT;
+      // inside inline code only a code span that is nothing but a URL becomes a link (not `curl https://…`)
+      const code = parent?.closest("code");
+      if (codeOnly && !code) return NodeFilter.FILTER_REJECT;
+      if (code && !/^https?:\/\/\S+$/.test(code.textContent.trim())) return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  for (const node of nodes) {
+    const text = node.nodeValue;
+    if (!text.match(URL_RE)) continue; // (not .test(): it would move lastIndex and matchAll would start after the URL)
+    const frag = document.createDocumentFragment();
+    let last = 0;
+    for (const m of text.matchAll(URL_RE)) {
+      const url = trimUrl(m[0]);
+      frag.append(text.slice(last, m.index), h("a", { href: url }, url));
+      last = m.index + url.length;
+    }
+    frag.append(text.slice(last));
+    node.replaceWith(frag);
+  }
+}
+
 /** A finished chat bubble (user prompt or relay message) with a copy button and a Markdown export. */
 function bubble(cls, text, from) {
   const el = h("div", { class: `msg ${cls}` }, from && h("div", { class: "from" }, `from ${from}`), h("div", { class: "body" }, text), copyBtn(() => text));
+  linkify(el);
   el._md = () => `**${from ? `from ${from}` : "You"}:**\n\n${text}`;
   return el;
 }
 
 marked.use({ gfm: true, breaks: false });
+// DOMPurify's default URI rules, plus file: for <a href> only. Links are opened by the main process on click, which
+// refuses network paths. An <img src="file://host/..."> would be fetched on render (on Windows an SMB connection that
+// leaks the NTLM hash), so file: stays forbidden everywhere else (and the CSP has no 'self' for images).
+DOMPurify.addHook("uponSanitizeAttribute", (node, data) => {
+  if (node.nodeName === "A" && data.attrName === "href" && /^file:/i.test(data.attrValue)) data.forceKeepAttr = true;
+});
 const md = (text) => DOMPurify.sanitize(marked.parse(text ?? ""), { ADD_ATTR: ["target"] });
+
+// image types and size limit come from the main process, which attaches the images (one source of truth)
+let imageConfigPromise;
+const imageConfig = () =>
+  (imageConfigPromise ??= api.imageConfig().catch((e) => {
+    imageConfigPromise = null; // don't cache a failure: the next paste asks again
+    throw e;
+  }));
+
+/** Decode any image the browser understands. createImageBitmap does not decode SVG, an <img> from a data: URL does. */
+function decodeImage(file) {
+  if (file.type !== "image/svg+xml") return createImageBitmap(file);
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error);
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error("could not decode the SVG"));
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * Make a pasted image attachable: supported types within the size limit are kept as they are. Anything else
+ * (bmp, svg, tiff…, or a large Retina/4K screenshot) is redrawn, scaled down to the maximum side, and saved as
+ * PNG, or as JPEG when the PNG is still too large, so the model always gets to see it.
+ */
+async function toAttachable(file) {
+  const cfg = await imageConfig();
+  const bytesOf = async (blob) => new Uint8Array(await blob.arrayBuffer());
+  if (cfg.mimes.includes(file.type) && file.size <= cfg.maxBytes) return { bytes: await bytesOf(file), mime: file.type };
+  const img = await decodeImage(file);
+  try {
+    const w0 = img.naturalWidth || img.width || 512;
+    const h0 = img.naturalHeight || img.height || 512;
+    const scale = Math.min(1, cfg.maxSide / Math.max(w0, h0));
+    const [w, hgt] = [Math.max(1, Math.round(w0 * scale)), Math.max(1, Math.round(h0 * scale))];
+    const draw = (background) => {
+      const canvas = new OffscreenCanvas(w, hgt);
+      const ctx = canvas.getContext("2d");
+      if (background) {
+        ctx.fillStyle = background; // JPEG has no transparency
+        ctx.fillRect(0, 0, w, hgt);
+      }
+      ctx.drawImage(img, 0, 0, w, hgt);
+      return canvas;
+    };
+    let blob = await draw(null).convertToBlob({ type: "image/png" });
+    if (blob.size > cfg.maxBytes) {
+      const canvas = draw("#fff");
+      for (const quality of [0.9, 0.8, 0.65, 0.5]) {
+        blob = await canvas.convertToBlob({ type: "image/jpeg", quality });
+        if (blob.size <= cfg.maxBytes) break;
+      }
+    }
+    if (blob.size > cfg.maxBytes) throw new Error("the image is too large even after scaling it down");
+    return { bytes: await bytesOf(blob), mime: blob.type };
+  } finally {
+    img.close?.(); // free the decoded ImageBitmap right away
+  }
+}
 
 const shortTitle = (t) => {
   const line = String(t ?? "").split("\n").find((l) => l.trim()) ?? "";
@@ -125,8 +241,77 @@ class SessionView {
       } else if (e.key === "Escape" && this.busy) this.cancel();
     });
     this.input.addEventListener("input", () => this.autosize());
+    this.input.addEventListener("paste", (e) => this.onFiles(e, e.clipboardData));
+    this.input.addEventListener("dragover", (e) => e.preventDefault());
+    this.input.addEventListener("drop", (e) => this.onFiles(e, e.dataTransfer));
+    // left click, Enter on a focused link (fires "click") and middle click all go through openLink
+    const onLink = (e) => {
+      if (e.type === "auxclick" && e.button !== 1) return;
+      const a = e.target.closest("a[href]");
+      const p = e.target.closest("[data-path]");
+      if (!a && !p) return;
+      e.preventDefault();
+      this.openLink(a ? a.getAttribute("href") : p.dataset.path);
+    };
+    this.log.addEventListener("click", onLink);
+    this.log.addEventListener("auxclick", onLink);
     this.setTitle(title);
     $("#main").append(this.el);
+  }
+
+  /** Web links open in the browser; anything else is treated as a file path (relative to the session folder). */
+  async openLink(href) {
+    if (!href || href.startsWith("#")) return;
+    try {
+      const r = await api.openLink(this.cwd, href);
+      if (r === "revealed") this.statusEl.textContent = `Shown in the file manager instead of opened: ${href} is not a document type the app opens directly.`;
+    } catch (e) {
+      this.statusEl.textContent = e.message;
+    }
+  }
+
+  /** Paste / drop: files become their paths, pasted images (screenshots) are saved to a temp file first. */
+  async onFiles(e, data) {
+    const files = [...(data?.files ?? [])];
+    if (!files.length) return; // ordinary text paste
+    // Office apps and browsers put a rendered picture next to the copied text: when there is text and none of the
+    // files is a real file on disk, it is a text paste
+    // (only for paste: an image dragged from a web page also carries its URL as text, but the image is what is meant)
+    const hasText = e.type === "paste" && Boolean(data.getData?.("text/plain")?.trim());
+    if (hasText && !files.some((f) => api.pathForFile(f))) return;
+    e.preventDefault();
+    // problems go to the status line, not into the conversation (that would split an answer being streamed)
+    const problems = [];
+    const results = await Promise.all(
+      files.map(async (f) => {
+        try {
+          const p = api.pathForFile(f);
+          if (p) return p;
+          if (!f.type.startsWith("image/")) return null;
+          const { bytes, mime } = await toAttachable(f);
+          return await api.savePastedImage(bytes, mime);
+        } catch (err) {
+          problems.push(`Could not paste ${f.name || "image"}: ${err.message}`);
+          return null;
+        }
+      }),
+    );
+    const paths = results.filter(Boolean); // in the order the files were pasted
+    const report = () => problems.length && (this.statusEl.textContent = problems.join(" · "));
+    if (!paths.length) return report();
+    // @path is Copilot's file mention syntax; images mentioned this way are attached when the prompt is sent
+    // @"..." cannot hold a '"': a path with both spaces and quotes (rare) is inserted as plain text, not attached
+    const mention = (p) => (!/\s/.test(p) ? `@${p}` : !p.includes('"') ? `@"${p}"` : p);
+    const unquotable = paths.filter((p) => /\s/.test(p) && p.includes('"'));
+    if (unquotable.length) problems.push(`Cannot attach (the path has both spaces and quotes): ${unquotable.join(", ")}`);
+    report();
+    const text = paths.map(mention).join(" ");
+    const { selectionStart: s, selectionEnd: end, value } = this.input;
+    const before = s > 0 && !/\s$/.test(value.slice(0, s)) ? " " : "";
+    const after = !/^\s/.test(value.slice(end)) ? " " : "";
+    this.input.setRangeText(before + text + after, s, end, "end");
+    this.input.focus();
+    this.autosize();
   }
 
   setTitle(t) {
@@ -151,11 +336,11 @@ class SessionView {
     return el;
   }
   system(text) {
-    this.run = null;
+    this.flush();
     return this.append(h("div", { class: "msg system" }, text));
   }
   error(text) {
-    this.run = null;
+    this.flush();
     return this.append(h("div", { class: "msg error" }, text));
   }
 
@@ -213,8 +398,10 @@ class SessionView {
   pump() {
     if (this.busy || this.dead || !this.inbox.length) return;
     const m = this.inbox.shift();
-    const human = m.from === "user"; // sent by a person from the relay web GUI
-    this.runPrompt(m.prompt, bubble("relay", m.text, m.from), human);
+    // set by the broker for messages typed by a person in the relay GUI; a broker older than this app doesn't send it,
+    // then the reserved-for-people name decides. It only re-opens the relay budget: relay text never attaches files.
+    const human = m.human ?? m.from === "user";
+    this.runPrompt(m.prompt, bubble("relay", m.text, m.from), human ? "human" : "relay");
   }
 
   // --- streaming blocks
@@ -250,10 +437,12 @@ class SessionView {
     });
   }
   flush() {
-    // render the pending block synchronously before something else is appended
-    if (this.run && this.renderQueued) {
-      renderRun(this.run);
-    }
+    // Finish the current block before something else is appended. If a frame is still pending, render it now
+    // (final render, with links); if the last frame already rendered everything, only add the links, so
+    // the message is not parsed again and a text selection in it survives.
+    const r = this.run;
+    if (r && this.renderQueued) renderRun(r, true);
+    else if (r?.type === "agent") linkify(r.body, { codeOnly: true });
     this.run = null;
   }
 
@@ -318,11 +507,12 @@ class SessionView {
     t.name.textContent = d.title ?? "tool";
     t.body.replaceChildren(...this.toolBody(d));
     decoratePres(t.body);
+    linkify(t.body);
   }
 
   toolBody(d) {
     const out = [];
-    for (const loc of d.locations ?? []) out.push(h("div", { class: "diff-path" }, loc.path + (loc.line ? `:${loc.line}` : "")));
+    for (const loc of d.locations ?? []) out.push(h("div", { class: "diff-path path-link", "data-path": loc.path, title: "Open file" }, loc.path + (loc.line ? `:${loc.line}` : "")));
     for (const c of d.content ?? []) {
       if (c.type === "diff") {
         const lines = [];
@@ -330,7 +520,7 @@ class SessionView {
         for (const l of (c.newText ?? "").split("\n")) lines.push(h("span", { class: "add" }, `+ ${l}\n`));
         const pre = h("pre", { class: "diff" }, lines);
         pre._copy = c.newText ?? ""; // copying a diff gives the new file content
-        out.push(h("div", { class: "diff-path" }, c.path), pre);
+        out.push(h("div", { class: "diff-path path-link", "data-path": c.path, title: "Open file" }, c.path), pre);
       } else if (c.type === "content" && c.content?.type === "text") {
         out.push(h("pre", {}, c.content.text));
       }
@@ -376,6 +566,7 @@ class SessionView {
     );
     card.append(opts);
     decoratePres(card);
+    linkify(card);
     this.append(card);
     this.statusEl.textContent = "Waiting for your permission…";
   }
@@ -431,17 +622,18 @@ class SessionView {
     if (!text || this.busy || this.dead) return;
     this.input.value = "";
     this.autosize();
-    this.runPrompt(text, bubble("user", text), true);
+    this.runPrompt(text, bubble("user", text), "app");
   }
 
-  async runPrompt(text, bubble, human) {
+  /** @param {"app"|"human"|"relay"} source who wrote the prompt (decides the relay budget and image attachments) */
+  async runPrompt(text, bubble, source) {
     this.flush();
     this.append(bubble);
     this.log.scrollTop = this.log.scrollHeight;
     this.setBusy(true);
     this.prompting = true;
     try {
-      const stop = await api.prompt(this.sessionId, text, human);
+      const stop = await api.prompt(this.sessionId, text, source);
       this.flush();
       if (stop === "cancelled") this.system("Stopped.");
       else if (stop && stop !== "end_turn") this.system(`Turn ended: ${stop}`);
@@ -485,10 +677,11 @@ function permissionDetail(input) {
   return parts;
 }
 
-function renderRun(r) {
+function renderRun(r, final = false) {
   if (r.type === "agent") {
     r.body.innerHTML = md(r.text);
     decoratePres(r.body);
+    if (final) linkify(r.body, { codeOnly: true }); // marked already links plain URLs in Markdown text
   } else r.body.textContent = r.text;
   if (r.type === "user") r.el.hidden = !r.text.trim(); // replayed prompts can be empty (e.g. attachments only)
 }
@@ -645,6 +838,7 @@ async function openSettings() {
     `Leave empty to use "copilot" from PATH (or $COPILOT_PATH). Currently used: ${s.effective}\n` +
     `Set a full path if the app cannot find Copilot, e.g. ${example}\n` +
     `Find it with: ${s.platform === "win32" ? "where copilot" : "which copilot"}`;
+  renderStorage();
   $("#set-relay").checked = s.relay;
   $("#set-relay").disabled = !s.relayAvailable;
   $("#set-relay-hint").textContent = s.relayAvailable
@@ -652,6 +846,36 @@ async function openSettings() {
     : "relay-client.mjs is missing from this build, so the relay is not available.";
   $("#settings").showModal();
 }
+async function renderStorage(message = "") {
+  try {
+    const st = await api.storage();
+    $("#store-pastes").textContent = st.pastes.dir;
+    $("#store-pastes-info").textContent =
+      (message ? message + "\n" : "") +
+      `${st.pastes.count} pasted image(s), ${st.pastes.size}. ` +
+      "They stay until you delete them here (the system may also clean its temp folder, e.g. on restart).";
+    $("#store-clear").disabled = !st.pastes.count;
+    $("#store-settings").textContent = st.settingsFile;
+  } catch (err) {
+    $("#store-pastes-info").textContent = err.message;
+  }
+}
+$("#store-open").addEventListener("click", (e) => {
+  e.preventDefault();
+  api.openPastes().catch((err) => ($("#store-pastes-info").textContent = err.message));
+});
+$("#store-clear").addEventListener("click", async (e) => {
+  e.preventDefault();
+  if (!confirm("Delete all pasted images? Prompts that mention them will no longer find the files.")) return;
+  let message = "";
+  try {
+    message = `Deleted ${await api.clearPastes()} file(s).`;
+  } catch (err) {
+    message = err.message;
+  }
+  renderStorage(message);
+});
+
 $("#settings").addEventListener("close", async () => {
   if ($("#settings").returnValue !== "save") return;
   await api.setSettings({ copilotCommand: $("#set-command").value, relay: $("#set-relay").checked });
@@ -664,6 +888,7 @@ $("#settings").addEventListener("close", async () => {
 api.onUpdate(({ sessionId, update }) => views.get(sessionId)?.onUpdate(update));
 api.onPermission((p) => views.get(p.sessionId)?.permission(p));
 api.onExit((e) => views.get(e.sessionId)?.markDead(e));
+api.onNotice((n) => views.get(n.sessionId)?.system(n.text));
 
 // relay events can arrive before the view exists (right after session/new) – keep them until it does
 const early = new Map();
