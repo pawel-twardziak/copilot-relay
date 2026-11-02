@@ -78,6 +78,23 @@ describe("readSessionUsage", () => {
     assert.equal(u.linesAdded, null);
   });
 
+  test("memoizes by size+mtime so an unchanged file is not re-read", async () => {
+    const orig = fixture("events-basic.jsonl");
+    const id = put(orig);
+    const file = path.join(home, "session-state", id, "events.jsonl");
+    fs.utimesSync(file, 1_700_000_000, 1_700_000_000); // whole-second mtime so it can be restored exactly
+    const first = await readSessionUsage(id, { copilotHome: home });
+    const st = fs.statSync(file);
+    // same size and mtime, different content: only a cache hit returns the old value
+    fs.writeFileSync(file, orig.replaceAll('"totalPremiumRequests":1', '"totalPremiumRequests":7'));
+    fs.utimesSync(file, 1_700_000_000, 1_700_000_000);
+    assert.equal(fs.statSync(file).size, st.size);
+    assert.equal((await readSessionUsage(id, { copilotHome: home })).premiumRequests, first.premiumRequests);
+    // a real change (new size) invalidates
+    fs.appendFileSync(file, "\n");
+    assert.equal((await readSessionUsage(id, { copilotHome: home })).premiumRequests, 7);
+  });
+
   test("honours COPILOT_HOME", async () => {
     const id = put(fixture("events-basic.jsonl"));
     const prev = process.env.COPILOT_HOME;

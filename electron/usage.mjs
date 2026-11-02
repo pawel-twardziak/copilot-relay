@@ -1,18 +1,12 @@
 // Reads Copilot CLI usage figures (session credits/tokens, premium quota) from session-state/<id>/events.jsonl
 // and formats them for display. Pure Node built-ins, no Electron.
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
+import { copilotHome as copilotHomeDefault, isSessionId } from "./history.mjs";
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TAIL_BYTES = 2 * 1024 * 1024;
 const MAX_FULL_READ = 64 * 1024 * 1024;
 const QUOTA_FILES = 5;
-
-/** $COPILOT_HOME or ~/.copilot, resolved at call time (same default as history.mjs). */
-export function copilotHomeDefault() {
-  return process.env.COPILOT_HOME || path.join(os.homedir(), ".copilot");
-}
 
 /** Lines of the file's last 2 MiB, or of the whole file when `whole`; null if unreadable. Never includes a partial first line. */
 async function readLines(file, whole) {
@@ -92,14 +86,30 @@ function toSessionUsage(data) {
   };
 }
 
+// Per-file memo keyed by size+mtime, so an unchanged events.jsonl (e.g. > 2 MiB with no checkpoint in the
+// tail, which forces a whole-file scan) is not re-read on every push.
+const usageMemo = new Map(); // file -> { size, mtimeMs, usage }
+const USAGE_MEMO_MAX = 50;
+
 /** Usage from the session's last complete session.usage_checkpoint; null if the id is invalid or none exists. */
 export async function readSessionUsage(sessionId, { copilotHome } = {}) {
-  if (typeof sessionId !== "string" || !UUID.test(sessionId)) return null;
+  if (!isSessionId(sessionId)) return null;
   const file = path.join(copilotHome ?? copilotHomeDefault(), "session-state", sessionId, "events.jsonl");
+  const st = await fs.stat(file).catch(() => null);
+  if (!st) {
+    usageMemo.delete(file);
+    return null;
+  }
+  const memo = usageMemo.get(file);
+  if (memo && memo.size === st.size && memo.mtimeMs === st.mtimeMs) return memo.usage;
   const found = await scan(file, '"session.usage_checkpoint"', (e) =>
     e?.type === "session.usage_checkpoint" && e.data && typeof e.data === "object" ? e.data : null,
   );
-  return found ? toSessionUsage(found.hit) : null;
+  const usage = found ? toSessionUsage(found.hit) : null;
+  usageMemo.delete(file);
+  usageMemo.set(file, { size: st.size, mtimeMs: st.mtimeMs, usage });
+  if (usageMemo.size > USAGE_MEMO_MAX) usageMemo.delete(usageMemo.keys().next().value);
+  return usage;
 }
 
 /** A snapshot is usable if unlimited, or if every displayed field is present (never invent values). */
