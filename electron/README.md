@@ -40,6 +40,7 @@ It runs on Windows, macOS and Linux.
   error instead of changing anything.
 - Switch mode (Agent / Plan / Autopilot), model, reasoning effort and approval settings per session.
   The choices come from the CLI.
+- The header shows the context window use (`22.9k / 200k · 11%`) and Copilot usage (AI credits) of the session; hover for requests, tokens and changes. The latest premium quota line is shown at the bottom of the sidebar.
 - Several sessions can be open at once. Each runs in its own `copilot --acp` process with the session's folder as
   working directory, so the repo's `.github` agents, skills and MCP config apply as in the terminal.
 
@@ -50,7 +51,6 @@ here. The app does the extension's job itself. Every open session joins the rela
 identity it has in a terminal (`cli:<sessionId>`), so it keeps its relay name. It also gets the relay tools
 (`relay-list_sessions`, `relay-send_message`) as an MCP server, and these run without a permission prompt.
 
-- The header shows the context window use (`22.9k / 200k · 11%`) and Copilot usage (AI credits) of the session; hover for requests, tokens and changes. The latest premium quota line is shown at the bottom of the sidebar.
 - The header shows the session's relay name (e.g. `relay: swift-otter`). Click it to rename the session.
 - Messages from other sessions appear as purple "from …" bubbles. Each becomes a new turn as soon as the
   session is idle. Messages that arrive while it is working wait in a queue.

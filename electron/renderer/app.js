@@ -894,6 +894,7 @@ async function closeView(id) {
   if (!v) return;
   if (v.busy && !v.dead && !confirm("Copilot is still working in this session. Stop it and close?")) return;
   views.delete(id);
+  lastUsage.delete(id); // a re-opened session must not flash this stale snapshot
   v.el.remove();
   if (activeId === id) activate([...views.keys()].pop() ?? null);
   await api.closeSession(id).catch(() => {});
