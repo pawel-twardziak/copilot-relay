@@ -118,6 +118,7 @@ export class AcpConnection extends EventEmitter {
       this.pending.delete(msg.id);
       if (msg.error) {
         const e = new Error(msg.error.message ?? JSON.stringify(msg.error));
+        e.code = msg.error.code; // e.g. ACP's auth_required
         e.data = msg.error.data;
         p.reject(e);
       } else p.resolve(msg.result);

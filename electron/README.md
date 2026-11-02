@@ -22,9 +22,10 @@ It runs on Windows, macOS and Linux.
   than the limit (e.g. a full-screen Retina/4K screenshot), are scaled down to 2048 px and saved as PNG or JPEG so
   they fit. Other files stay as text mentions, and the agent reads them with its tools. Only prompts
   you type in this app attach images; relay messages never do, whoever sent them. `@~/…` paths work.
-- Pasted images are saved in the system temp folder: `%TEMP%\copilot-sessions\pastes` on Windows,
-  `$TMPDIR/copilot-sessions/pastes` on macOS, and `/tmp/copilot-sessions-<uid>/pastes` on Linux (private, mode 0700).
-  The app never deletes them by itself, but the system may clean its temp folder, e.g. `/tmp` on reboot.
+- Pasted images are saved in a private folder in the system temp folder (`%TEMP%` on Windows, `$TMPDIR` on macOS,
+  `/tmp` on Linux), named `copilot-sessions-<random>`. It is created once, readable only by you (mode 0700), and
+  remembered. The app never deletes the images by itself, but the system may clean its temp folder, e.g. `/tmp` on
+  reboot; a new folder is then created on the next paste.
   **⚙ Settings → Files** shows the exact folder, the number and size of the files, **Open folder** and
   **Delete pasted images**, plus the location of the settings file.
 - Copy anything. Hover a message, code block or tool output to show its **Copy** button; copying a diff gives the

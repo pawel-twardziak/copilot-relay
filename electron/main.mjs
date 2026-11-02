@@ -2,8 +2,8 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from "electron";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, statSync, writeFileSync } from "node:fs";
-import { lstat, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { constants as fsConstants, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { lstat, mkdtemp, open as openFile, readdir, readlink, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -55,9 +55,18 @@ function saveSettings(s) {
 }
 const copilotCommand = () => loadSettings().copilotCommand || process.env.COPILOT_PATH || "copilot";
 
+// Sign-in problems are recognized by ACP's auth_required error code, not by guessing from the wording (Copilot
+// uses other codes for other errors: -32002 resource not found, -32602 invalid params…).
+const ACP_AUTH_REQUIRED = -32000;
+const LOGIN_HINT = "Run `copilot login` in a terminal, then try again.";
+
+/** auth_required, or Copilot's own instruction to run `copilot login` (an exact phrase, not a guess from words). */
+const needsLogin = (err) => err?.code === ACP_AUTH_REQUIRED || /\bcopilot login\b/i.test(String(err?.message ?? err));
+
 function friendly(err) {
   const msg = String(err?.message ?? err);
-  if (/auth|login|unauthor/i.test(msg)) return `${msg}\n\nRun \`copilot login\` in a terminal, then try again.`;
+  if (err?.startFailure) return msg; // connect() already explained it
+  if (needsLogin(err) && !msg.includes(LOGIN_HINT)) return `${msg}\n\n${LOGIN_HINT}`;
   return msg;
 }
 
@@ -122,11 +131,19 @@ async function connect(cwd) {
     await conn.start();
   } catch (e) {
     conn.kill();
-    // installed but signed out: friendly() adds the login hint (the command path is left out of the test,
-    // so a missing /home/author/bin/copilot is still reported as "could not start")
-    if (/auth|login|unauthor/i.test(e.message.replaceAll(copilotCommand(), ""))) throw e;
-    // any other failure to start or initialize (not found, "command not found", missing interpreter, crash)
-    throw new Error(`Could not start "${copilotCommand()}": ${e.message}\n\nInstall GitHub Copilot CLI or set its full path in Settings.`);
+    // A start can fail because Copilot is missing (wrong path), crashed, or is signed out and quit; the error text
+    // doesn't reliably say which, so unless Copilot answered auth_required both remedies are shown.
+    const detail = String(e?.message ?? e);
+    const hint =
+      needsLogin(e)
+        ? LOGIN_HINT
+        : e?.code === "ENOENT" // spawn: no such program
+          ? "GitHub Copilot CLI was not found. Install it, or set its full path in Settings."
+          : "If GitHub Copilot CLI is installed, check that you are signed in (`copilot login` in a terminal). " +
+          "Otherwise install it, or set its full path in Settings.";
+    const err = new Error(`Could not start "${conn.command}": ${detail}\n\n${hint}`);
+    err.startFailure = true;
+    throw err;
   }
   return conn;
 }
@@ -254,51 +271,141 @@ const MAX_IMAGE_BYTES = Math.floor((5 * 1024 * 1024 * 3) / 4) - 64 * 1024; // �
 const MAX_TOTAL_IMAGE_BYTES = 12 * 1024 * 1024; // all images of one prompt together
 const MAX_IMAGE_SIDE = 2048; // pasted images larger than the byte limit are scaled down to this
 
-// Pasted images are saved here and an @path mention is put into the prompt. The temp dir is per-user on Windows
-// and macOS. On Linux /tmp is shared, so the folder name carries the user ID and the folder is private (0700).
-const PASTE_DIR = path.join(
-  os.tmpdir(),
-  process.platform === "win32" || process.platform === "darwin" ? "copilot-sessions" : `copilot-sessions-${process.getuid()}`,
-  "pastes",
-);
+// Pasted images are saved in the system temp folder (Copilot CLI may read it without asking) and an @path mention
+// is put into the prompt. The folder is created once with mkdtemp: a random name, created atomically with mode 0700,
+// so on a shared /tmp nobody can create or replace it beforehand. Its path is remembered in the settings; if the
+// system cleans its temp folder, a new one is created on the next paste.
+let pasteDirCache = null;
+let pasteDirPending = null;
 
-/** Refuse a paste folder (or its parent) that someone else created, that others can access, or that is a symlink. */
-async function assertPrivate() {
-  for (const dir of [path.dirname(PASTE_DIR), PASTE_DIR]) {
-    const st = await lstat(dir); // ENOENT if it doesn't exist yet
-    if (process.platform === "win32") continue;
-    if (!st.isDirectory() || st.isSymbolicLink() || st.uid !== process.getuid() || (st.mode & 0o077) !== 0)
-      throw new Error(`Refusing to use ${dir}: it is not a private folder owned by you. Delete it and try again.`);
-  }
-}
-
-/** The paste folder, created if needed (for saving). */
-async function pasteDir() {
-  await mkdir(PASTE_DIR, { recursive: true, mode: 0o700 });
-  await assertPrivate();
-  return PASTE_DIR;
-}
-
-/** The paste folder if it already exists (for listing / deleting), or null. Never follows a planted symlink. */
-async function existingPasteDir() {
+/** A real (non-symlink) folder owned by this user; with `private`, also not accessible to others (mode 0700). */
+async function ownDir(dir, { private: priv = false } = {}) {
   try {
-    await assertPrivate();
-  } catch (e) {
-    if (e.code === "ENOENT") return null;
-    throw e;
+    const st = await lstat(dir);
+    if (!st.isDirectory()) return false; // lstat: a symlink is never a directory here
+    if (process.platform === "win32") return true;
+    return st.uid === process.getuid() && (!priv || (st.mode & 0o077) === 0);
+  } catch {
+    return false;
   }
-  return PASTE_DIR;
+}
+const isPrivateDir = (dir) => ownDir(dir, { private: true });
+
+/** The paste folder, created if needed. Concurrent pastes share one creation (one folder, one settings write). */
+async function pasteDir() {
+  if (pasteDirCache && (await isPrivateDir(pasteDirCache))) return pasteDirCache;
+  pasteDirPending ??= (async () => {
+    const saved = loadSettings().pasteDir;
+    if (saved && (await isPrivateDir(saved))) return (pasteDirCache = saved);
+    const dir = await mkdtemp(path.join(os.tmpdir(), "copilot-sessions-"));
+    // re-read right before writing, so a Settings change (or another app window's folder) saved in the meantime is
+    // kept. Replaced folders are remembered (images left in them are still listed); folders that are gone are dropped.
+    const fresh = loadSettings();
+    const previous = [...new Set([...(fresh.previousPasteDirs ?? []), saved, fresh.pasteDir])].filter((d) => d && d !== dir && existsSync(d));
+    try {
+      saveSettings({ ...fresh, pasteDir: dir, previousPasteDirs: previous });
+    } catch (e) {
+      await rm(dir, { recursive: true, force: true }); // not recorded anywhere: don't leave it behind
+      throw e;
+    }
+    return (pasteDirCache = dir);
+  })().finally(() => (pasteDirPending = null));
+  return pasteDirPending;
 }
 
-/** Names of the pasted images (the same set is counted in Settings and deleted by "Delete pasted images"). */
+// v0.1.1 used a fixed name; images left there are still counted and deleted
+const LEGACY_PASTE_DIRS = [
+  path.join(os.tmpdir(), process.platform === "win32" || process.platform === "darwin" ? "copilot-sessions" : `copilot-sessions-${process.getuid()}`, "pastes"),
+];
+
+/** The current paste folder if it exists (without creating one), or null. */
+const currentPasteDir = async () => (await pasteFolders()).current;
+
+/** The current paste folder (or null) and the older ones that may still hold images: replaced folders, the saved
+ *  one when it is no longer private (it is replaced on the next paste), and the v0.1.1 fixed-name folder. */
+async function pasteFolders() {
+  const settings = loadSettings();
+  const saved = pasteDirCache ?? settings.pasteDir;
+  const current = saved && (await isPrivateDir(saved)) ? saved : null;
+  const older = [...new Set([settings.pasteDir, ...(settings.previousPasteDirs ?? []), ...LEGACY_PASTE_DIRS])].filter((d) => d && d !== current);
+  return { current, older };
+}
+
+/** Paths of the pasted images (the same set is counted in Settings and deleted by "Delete pasted images").
+ *  Older folders that aren't ours are skipped, never followed. */
 async function listPastes() {
-  if (!(await existingPasteDir())) return [];
-  return (await readdir(PASTE_DIR)).filter((f) => f.startsWith("paste-"));
+  const { current, older } = await pasteFolders();
+  const files = [];
+  for (const dir of [current, ...older]) {
+    if (!dir) continue;
+    // older folders: only if they are still ours (owner checked, never following a symlink); a mode change by the
+    // user doesn't hide them, someone else's folder is never touched
+    if (dir !== current && !(await isOwnPasteDir(dir))) continue;
+    for (const f of await readdir(dir).catch(() => [])) if (f.startsWith("paste-")) files.push(path.join(dir, f));
+  }
+  return { current, older, files };
+}
+
+/** An older paste folder we may list and empty: ours, and inside a parent that is ours or a sticky temp folder. */
+async function isOwnPasteDir(dir) {
+  if (!(await ownDir(dir))) return false;
+  if (process.platform === "win32") return true;
+  const parent = await lstat(path.dirname(dir)).catch(() => null);
+  // a sticky folder protects our entries only if root owns it (like /tmp); otherwise its owner could swap them
+  return Boolean(parent?.isDirectory() && (parent.uid === process.getuid() || (parent.mode & 0o1000 && parent.uid === 0)));
 }
 
 // `@path` / `@"path with spaces"` mentions. The terminal UI expands them itself; over ACP the agent only sees
 // the text, so images are attached here as ACP image blocks. Other files stay as text: the agent reads them with its tools.
 const MENTION_RE = /(?:^|\s)@(?:"([^"]+)"|(\S+))/g;
+
+// Open flags: non-blocking, so a FIFO swapped in for the image can't hang the prompt.
+const OPEN_FLAGS = process.platform === "win32" ? "r" : fsConstants.O_RDONLY | fsConstants.O_NONBLOCK;
+
+/**
+ * Read one mentioned image, all checks on what is actually read:
+ * stat the path first (devices, FIFOs and folders are never opened), open it, check the opened handle again,
+ * read at most `limit` bytes into a buffer sized to the file, and take the type from those bytes.
+ * Returns { block, bytes } or { problem }.
+ */
+async function readImage(file, limit) {
+  let fh;
+  try {
+    // like links: never touch a network path, also not through a symlink/junction (on Windows that alone sends the
+    // user's NTLM hash to the server). localRealpath reads every link without following it into the network.
+    if (isRemote(file)) return { problem: "is on a network path" };
+    const real = await localRealpath(file);
+    if (!real) return { problem: "was not found" };
+    if (!(await stat(real)).isFile()) return { problem: "is not a file" };
+    fh = await openFile(real, OPEN_FLAGS);
+    const st = await fh.stat();
+    if (!st.isFile()) return { problem: "is not a file" };
+    if (st.size > limit) return { problem: null, tooBig: st.size };
+    const buf = Buffer.allocUnsafe(st.size + 1); // +1: notices a file that grew since stat
+    let len = 0;
+    for (let n; len < buf.length && (n = (await fh.read(buf, len, buf.length - len, len)).bytesRead) > 0; ) len += n;
+    if (len > limit || len > st.size) return { problem: "changed while being read" };
+    const data = buf.subarray(0, len);
+    // the type comes from the bytes that are sent: a ".png" that is really a JPEG would fail the whole turn
+    const mimeType = sniffImage(data);
+    if (!mimeType) return { problem: "is not a PNG, JPEG, GIF or WebP image" };
+    return { bytes: len, block: { type: "image", mimeType, data: data.toString("base64"), uri: pathToFileURL(file).href } };
+  } catch (e) {
+    if (/^Network paths/.test(e.message)) return { problem: "leads to a network path through a link" };
+    return { problem: e.code === "ENOENT" || e.code === "ENOTDIR" ? "was not found" : `could not be read (${e.code ?? e.message})` };
+  } finally {
+    await fh?.close().catch(() => {}); // a failing close must not fail the whole prompt
+  }
+}
+
+/** Image type from the first bytes of the file (PNG, JPEG, GIF, WebP), or null. */
+function sniffImage(buf) {
+  if (buf.length >= 8 && buf.readUInt32BE(0) === 0x89504e47) return "image/png";
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return "image/jpeg";
+  if (buf.length >= 6 && /^GIF8[79]a$/.test(buf.toString("latin1", 0, 6))) return "image/gif";
+  if (buf.length >= 12 && buf.toString("latin1", 0, 4) === "RIFF" && buf.toString("latin1", 8, 12) === "WEBP") return "image/webp";
+  return null;
+}
 
 /** Build the ACP prompt. Returns the blocks plus notes about mentioned images that could not be attached. */
 async function promptBlocks(text, cwd, { attachImages, imagesSupported }) {
@@ -307,39 +414,35 @@ async function promptBlocks(text, cwd, { attachImages, imagesSupported }) {
   if (!attachImages) return { blocks, notes };
   const files = new Set();
   for (const m of text.matchAll(MENTION_RE)) {
-    const file = path.resolve(cwd, expandHome(m[1] ?? m[2].replace(/[.,;:!?)]+$/, "")));
-    if (IMAGE_TYPES[path.extname(file).slice(1).toLowerCase()]) files.add(file);
+    const raw = m[1] ?? m[2].replace(/[.,;:!?)]+$/, "");
+    if (!IMAGE_TYPES[path.extname(raw).slice(1).toLowerCase()]) continue;
+    // network paths are refused before resolving (on Linux path.resolve turns "//server/x" into "/server/x")
+    if (isRemote(raw)) {
+      notes.push(`${raw} is on a network path, so it was not attached.`);
+      continue;
+    }
+    files.add(path.resolve(cwd, expandHome(raw)));
   }
   if (files.size && !imagesSupported) {
     notes.push("This Copilot CLI does not accept images over ACP; image mentions were sent as text only.");
     return { blocks, notes };
   }
-  const NOT_FOUND = -1;
-  const NOT_A_FILE = -2;
-  const sizes = await Promise.all([...files].map((f) => stat(f).then((s) => (s.isFile() ? s.size : NOT_A_FILE), () => NOT_FOUND)));
-  const chosen = [];
+  // one file after another, so the total limit is enforced against what was actually read
   let total = 0;
-  [...files].forEach((file, i) => {
-    const size = sizes[i];
-    if (size === NOT_FOUND) return notes.push(`${file} was not found, so the image was not attached.`);
-    if (size === NOT_A_FILE) return notes.push(`${file} is not a file, so it was not attached.`);
-    if (size > MAX_IMAGE_BYTES) return notes.push(`${path.basename(file)} (${fmtBytes(size)}) is over the ${fmtBytes(MAX_IMAGE_BYTES)} image limit and was not attached.`);
-    if (total + size > MAX_TOTAL_IMAGE_BYTES) return notes.push(`${path.basename(file)} was not attached: the images of one prompt are limited to ${fmtBytes(MAX_TOTAL_IMAGE_BYTES)} together.`);
-    total += size;
-    chosen.push(file);
-  });
-  const read = await Promise.all(
-    chosen.map(async (file) => {
-      try {
-        const mimeType = IMAGE_TYPES[path.extname(file).slice(1).toLowerCase()];
-        return { type: "image", mimeType, data: (await readFile(file)).toString("base64"), uri: pathToFileURL(file).href };
-      } catch (e) {
-        notes.push(`${path.basename(file)} could not be read (${e.code ?? e.message}), so it was not attached.`);
-        return null;
-      }
-    }),
-  );
-  blocks.push(...read.filter(Boolean));
+  for (const file of files) {
+    const name = path.basename(file);
+    const room = Math.min(MAX_IMAGE_BYTES, MAX_TOTAL_IMAGE_BYTES - total);
+    const r = await readImage(file, Math.max(room, 0)); // still checked when the total is used up: a typo is reported as such
+    // "not found" shows the resolved path (it may have been resolved against an unexpected folder)
+    if (r.problem) notes.push(`${r.problem === "was not found" ? file : name} ${r.problem}, so it was not attached.`);
+    else if (r.tooBig && r.tooBig > MAX_IMAGE_BYTES)
+      notes.push(`${name} (${fmtBytes(r.tooBig)}) is over the ${fmtBytes(MAX_IMAGE_BYTES)} image limit and was not attached.`);
+    else if (r.tooBig) notes.push(`${name} was not attached: the images of one prompt are limited to ${fmtBytes(MAX_TOTAL_IMAGE_BYTES)} together.`);
+    else {
+      total += r.bytes;
+      blocks.push(r.block);
+    }
+  }
   return { blocks, notes };
 }
 
@@ -430,8 +533,10 @@ const SAFE_TO_OPEN = new Set(
     // Deliberately small. Not here: source code and scripts (an installed interpreter may run them: .py, .lua, .mjs…),
     // html/svg/xml (script in the browser), Office/RTF/OpenDocument (macros, OLE/DDE). Those are revealed instead.
     "txt text md markdown rst adoc log csv tsv json jsonc json5 ndjson yaml yml toml diff patch " +
-    "png jpg jpeg gif webp bmp ico tif tiff avif heic pdf"
-  ).split(" "),
+    "bmp ico tif tiff avif heic pdf"
+  )
+    .split(" ")
+    .concat(Object.keys(IMAGE_TYPES)), // every attachable image type can also be opened
 );
 
 // folders with these extensions are app/plugin packages that the OS launches instead of browsing
@@ -449,7 +554,7 @@ function isRemote(p) {
 }
 
 /** Resolve a link target from agent output to an existing local path: file:// URL, absolute or relative to the session folder. */
-function resolveTarget(cwd, target) {
+async function resolveTarget(cwd, target) {
   const raw = String(target ?? "").trim();
   let candidates;
   if (/^file:/i.test(raw)) {
@@ -465,15 +570,18 @@ function resolveTarget(cwd, target) {
     try {
       decoded = decodeURIComponent(raw);
     } catch {}
-    candidates = [...new Set([raw, noLine(raw), decoded, noLine(decoded)])];
+    // "README.md#usage": strip a "#anchor" after "name.ext", except a bare number ("v1.2#3"); tried after the literal
+    // name, so "C#note.md" still opens
+    const noFragment = (x) => x.replace(/(\.[A-Za-z0-9]+)#(?!\d+$)[^\s\\/#]+$/u, "$1");
+    candidates = [...new Set([raw, noLine(raw), decoded, noLine(decoded), noFragment(decoded), noFragment(noLine(decoded))])];
   }
   const abs = candidates.map((c) => path.resolve(cwd || os.homedir(), expandHome(c)));
   if (candidates.some(isRemote) || abs.some(isRemote)) throw new Error(`Network paths are not opened: ${raw}`);
   for (const c of abs) {
-    const real = localRealpath(c);
+    const real = await localRealpath(c);
     if (real) return real;
   }
-  throw new Error(`File not found: ${abs[1] ?? abs[0]}`);
+  throw new Error(`File not found: ${abs[0]}`); // the path as clicked
 }
 
 /**
@@ -481,7 +589,7 @@ function resolveTarget(cwd, target) {
  * and refused if it points to a UNC / network path, before anything follows it. (fs.realpath or existsSync would
  * already open the SMB connection, which leaks the user's NTLM hash on Windows.) Returns null if the path doesn't exist.
  */
-function localRealpath(p, depth = 0) {
+async function localRealpath(p, depth = 0) {
   if (depth > 32) throw new Error(`Too many symbolic links: ${p}`);
   const { root } = path.parse(p);
   let cur = root;
@@ -489,7 +597,7 @@ function localRealpath(p, depth = 0) {
     const next = path.join(cur, part);
     let st;
     try {
-      st = lstatSync(next);
+      st = await lstat(next); // async: a slow mount must not freeze the main process
     } catch {
       return null;
     }
@@ -497,12 +605,12 @@ function localRealpath(p, depth = 0) {
       cur = next;
       continue;
     }
-    let target = readlinkSync(next);
+    let target = await readlink(next);
     if (/^\\\\\?\\UNC\\/i.test(target)) throw new Error(`Network paths are not opened: ${next} → ${target}`);
     target = target.replace(/^\\\\\?\\/, ""); // \\?\C:\x (Windows long-path form) is local
     const resolved = path.resolve(cur, target);
     if (isRemote(target) || isRemote(resolved)) throw new Error(`Network paths are not opened: ${next} → ${target}`);
-    cur = localRealpath(resolved, depth + 1);
+    cur = await localRealpath(resolved, depth + 1);
     if (!cur) return null;
   }
   return cur;
@@ -514,15 +622,15 @@ handle("open:link", async (cwd, target) => {
   if (WEB_LINK.test(t)) return void (await shell.openExternal(t));
   // other URI schemes are refused; "main.mjs:42" (file:line) and "C:\\x" (drive) are paths, not schemes
   if (/^[a-z][a-z0-9+.-]*:(?!\d)/i.test(t) && !/^file:/i.test(t) && !/^[a-z]:[\\/]/i.test(t)) throw new Error(`Unsupported link: ${t}`);
-  // decide on the real target: a symlink named notes.txt may point at an app or a program
   // resolveTarget returns the real local path: symlinks resolved (a "notes.txt" link may point at an app), none remote
-  const file = resolveTarget(cwd, t);
-  const st = statSync(file);
+  const file = await resolveTarget(cwd, t);
+  const st = await stat(file);
   // Windows ignores trailing dots and spaces ("payload.exe." runs payload.exe), so drop them before reading the extension
   const name = process.platform === "win32" ? path.basename(file).replace(/[. ]+$/, "") : path.basename(file);
   const ext = path.extname(name).slice(1).toLowerCase();
   let safe;
-  if (st.isDirectory()) safe = !PACKAGE_DIRS.has(ext); // "v1.2" or "conf.d" open; "Tool.app" would launch
+  // "v1.2" or "conf.d" open; "Tool.app" would launch, and on Windows "x.{GUID}" is a shell object, not a folder
+  if (st.isDirectory()) safe = !PACKAGE_DIRS.has(ext) && !ext.startsWith("{");
   else if (ext) safe = SAFE_TO_OPEN.has(ext);
   else safe = false; // no extension: the OS would pick a handler by sniffing the content (.desktop, scripts…)
   if (!safe) {
@@ -547,9 +655,9 @@ handle("paste:saveImage", async (bytes, mime) => {
 });
 
 async function pasteStats() {
-  const files = await listPastes();
-  const sizes = await Promise.all(files.map((f) => stat(path.join(PASTE_DIR, f)).then((s) => s.size, () => 0)));
-  return { dir: PASTE_DIR, count: files.length, size: fmtBytes(sizes.reduce((a, b) => a + b, 0)) };
+  const { current: dir, files } = await listPastes();
+  const sizes = await Promise.all(files.map((f) => stat(f).then((s) => s.size, () => 0)));
+  return { dir: dir ?? `${path.join(os.tmpdir(), "copilot-sessions-…")} (created on the first paste)`, count: files.length, size: fmtBytes(sizes.reduce((a, b) => a + b, 0)) };
 }
 
 handle("images:config", async () => ({ mimes: Object.keys(EXT_FOR_MIME), maxBytes: MAX_IMAGE_BYTES, maxSide: MAX_IMAGE_SIDE }));
@@ -557,14 +665,25 @@ handle("images:config", async () => ({ mimes: Object.keys(EXT_FOR_MIME), maxByte
 handle("storage:get", async () => ({ pastes: await pasteStats(), settingsFile: settingsFile() }));
 
 handle("storage:openPastes", async () => {
-  const err = await shell.openPath(await pasteDir());
+  const dir = await currentPasteDir(); // viewing must not create a folder
+  if (!dir) throw new Error("There is no paste folder right now (none yet, or the system cleaned it). It is created on the next paste.");
+  const err = await shell.openPath(dir);
   if (err) throw new Error(err);
 });
 
 handle("storage:clearPastes", async () => {
-  const files = await listPastes();
-  const results = await Promise.allSettled(files.map((f) => rm(path.join(PASTE_DIR, f), { force: true })));
+  const { older, files } = await listPastes();
+  const results = await Promise.allSettled(files.map((f) => rm(f, { force: true })));
   const failed = results.filter((r) => r.status === "rejected");
+  // older folders that are now empty are removed (rmdir only removes empty ones) and forgotten; for the legacy
+  // fixed-name folder its "copilot-sessions-<uid>" parent too
+  for (const d of older) {
+    if (!(await isOwnPasteDir(d))) continue;
+    await rmdir(d).catch(() => {});
+    if (LEGACY_PASTE_DIRS.includes(d)) await rmdir(path.dirname(d)).catch(() => {});
+  }
+  // (folders removed here drop out of previousPasteDirs the next time a paste folder is saved; rewriting the
+  // settings here could race with that save)
   if (failed.length) throw new Error(`${failed.length} of ${files.length} file(s) could not be deleted: ${failed[0].reason?.message}`);
   return files.length;
 });
@@ -630,13 +749,24 @@ function killAll() {
   lister?.kill();
 }
 
-fixPath();
-app.whenReady().then(() => {
-  createWindow();
-  app.on("activate", () => BrowserWindow.getAllWindows().length === 0 && createWindow());
-});
-app.on("window-all-closed", () => {
-  killAll();
-  if (process.platform !== "darwin") app.quit();
-});
-app.on("before-quit", killAll);
+// One instance at a time: two would share (and clean up) the same paste folder and settings file.
+// Starting the app again focuses the open window instead.
+if (!app.requestSingleInstanceLock()) {
+  app.quit(); // and nothing else: no login-shell PATH lookup, no window
+} else {
+  app.on("second-instance", () => {
+    if (!win) return app.isReady() && createWindow(); // e.g. macOS with the window closed but the app running
+    if (win.isMinimized()) win.restore();
+    win.focus();
+  });
+  fixPath();
+  app.whenReady().then(() => {
+    createWindow();
+    app.on("activate", () => BrowserWindow.getAllWindows().length === 0 && createWindow());
+  });
+  app.on("window-all-closed", () => {
+    killAll();
+    if (process.platform !== "darwin") app.quit();
+  });
+  app.on("before-quit", killAll);
+}
