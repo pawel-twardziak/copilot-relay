@@ -49,6 +49,7 @@ contextBridge.exposeInMainWorld("api", {
   onUpdate: on("acp:update"),
   onPermission: on("acp:permission"),
   onExit: on("acp:exit"),
+  onUsage: on("usage:update"),
   onNotice: on("acp:notice"),
   onRelayMessage: on("relay:message"),
   onRelayStatus: on("relay:status"),

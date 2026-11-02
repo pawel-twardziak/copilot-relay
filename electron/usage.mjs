@@ -199,3 +199,60 @@ export function summarize({ context = null, session = null, quota = null } = {})
   }
   return { context: contextView(context), credits, tooltip: parts.join(" · "), quota: quotaLine(quota) };
 }
+
+/**
+ * Debounced per-session pusher: remembers the latest context numbers, reads the session's usage and the
+ * (cached) quota, and calls send(sessionId, UsageView). Reader failures degrade to a view without those parts.
+ */
+export function createUsagePusher({
+  send,
+  readSession = readSessionUsage,
+  readQuota: readQuotaFn = readQuota,
+  debounceMs = 300,
+  quotaTtlMs = 60_000,
+  now = Date.now,
+}) {
+  const states = new Map(); // sessionId -> { context, timer }
+  let quotaCache = null; // { at, value }
+
+  async function quota() {
+    if (quotaCache && now() - quotaCache.at < quotaTtlMs) return quotaCache.value;
+    const value = await Promise.resolve().then(() => readQuotaFn()).catch(() => null);
+    quotaCache = { at: now(), value };
+    return value;
+  }
+
+  async function push(sessionId, state) {
+    const [session, q] = await Promise.all([
+      Promise.resolve().then(() => readSession(sessionId)).catch(() => null),
+      quota(),
+    ]);
+    if (states.get(sessionId) !== state) return; // forgotten while reading
+    send(sessionId, summarize({ context: state.context, session, quota: q }));
+  }
+
+  function schedule(sessionId) {
+    let state = states.get(sessionId);
+    if (!state) states.set(sessionId, (state = { context: null, timer: null }));
+    clearTimeout(state.timer);
+    const s = state;
+    s.timer = setTimeout(() => {
+      s.timer = null;
+      push(sessionId, s).catch(() => {});
+    }, debounceMs);
+    return s;
+  }
+
+  return {
+    context(sessionId, { used, size }) {
+      schedule(sessionId).context = { used, size };
+    },
+    refresh(sessionId) {
+      schedule(sessionId);
+    },
+    forget(sessionId) {
+      clearTimeout(states.get(sessionId)?.timer);
+      states.delete(sessionId);
+    },
+  };
+}

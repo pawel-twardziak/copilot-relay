@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { formatTokens, readQuota, readSessionUsage, summarize } from "../usage.mjs";
+import { createUsagePusher, formatTokens, readQuota, readSessionUsage, summarize } from "../usage.mjs";
 
 const FIX = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "usage");
 let root;
@@ -180,5 +180,91 @@ describe("summarize", () => {
 
   test("nothing", () => {
     assert.deepEqual(summarize({}), { context: null, credits: null, tooltip: "", quota: null });
+  });
+});
+
+describe("createUsagePusher", () => {
+  function make(t, over = {}) {
+    t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+    const sent = [];
+    const calls = { session: 0, quota: 0 };
+    const pusher = createUsagePusher({
+      send: (id, view) => sent.push({ id, view }),
+      readSession: async () => (calls.session++, null),
+      readQuota: async () => (calls.quota++, null),
+      ...over,
+    });
+    // timers fire synchronously on tick; let the async readers settle afterwards
+    const tick = async (ms) => {
+      t.mock.timers.tick(ms);
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+    };
+    return { sent, calls, pusher, tick };
+  }
+
+  test("pusher debounces bursts into one send", async (t) => {
+    const { sent, pusher, tick } = make(t);
+    for (let i = 1; i <= 5; i++) {
+      pusher.context("s1", { used: i * 1000, size: 200000 });
+      await tick(20);
+    }
+    await tick(300);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].view.context.label, summarize({ context: { used: 5000, size: 200000 } }).context.label);
+  });
+
+  test("pusher keeps the latest context across refreshes", async (t) => {
+    const { sent, pusher, tick } = make(t);
+    pusher.context("s1", { used: 22899, size: 200000 });
+    await tick(300);
+    pusher.refresh("s1");
+    await tick(300);
+    assert.equal(sent.length, 2);
+    assert.equal(sent[1].view.context.pct, 11);
+  });
+
+  test("pusher caches quota for 60 s", async (t) => {
+    const { calls, pusher, tick } = make(t);
+    pusher.refresh("s1");
+    await tick(300);
+    await tick(10_000);
+    pusher.refresh("s1");
+    await tick(300);
+    assert.equal(calls.quota, 1);
+    await tick(61_000);
+    pusher.refresh("s1");
+    await tick(300);
+    assert.equal(calls.quota, 2);
+  });
+
+  test("forget cancels pending sends", async (t) => {
+    const { sent, pusher, tick } = make(t);
+    pusher.refresh("s1");
+    pusher.forget("s1");
+    await tick(1000);
+    assert.equal(sent.length, 0);
+  });
+
+  test("forget during an in-flight read sends nothing", async (t) => {
+    let release;
+    const { sent, pusher, tick } = make(t, { readSession: () => new Promise((r) => (release = r)) });
+    pusher.refresh("s1");
+    await tick(300);
+    pusher.forget("s1");
+    release(null);
+    await tick(10);
+    assert.equal(sent.length, 0);
+  });
+
+  test("a failing reader yields a view, not an exception", async (t) => {
+    const { sent, pusher, tick } = make(t, {
+      readSession: async () => {
+        throw new Error("boom");
+      },
+    });
+    pusher.refresh("s1");
+    await tick(300);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].view.credits, null);
   });
 });
