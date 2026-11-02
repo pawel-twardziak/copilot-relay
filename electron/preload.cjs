@@ -26,6 +26,7 @@ contextBridge.exposeInMainWorld("api", {
   getSettings: () => call("settings:get"),
   setSettings: (s) => call("settings:set", s),
   openPath: (p) => call("shell:openPath", p),
+  copy: (text) => call("clipboard:write", text),
   onUpdate: on("acp:update"),
   onPermission: on("acp:permission"),
   onExit: on("acp:exit"),

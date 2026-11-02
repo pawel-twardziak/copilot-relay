@@ -1,5 +1,5 @@
 // Electron main process: owns the `copilot --acp` processes and bridges them to the window over IPC.
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from "electron";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -290,6 +290,8 @@ handle("settings:set", async (s) => {
   return true;
 });
 
+handle("clipboard:write", async (text) => clipboard.writeText(String(text ?? "")));
+
 handle("shell:openPath", async (p) => {
   requireDir(p);
   return shell.openPath(p);
@@ -324,6 +326,16 @@ function createWindow() {
       e.preventDefault();
       if (/^https?:/i.test(url)) shell.openExternal(url);
     }
+  });
+  // Electron has no context menu of its own: offer the usual edit actions for the selection / text fields
+  win.webContents.on("context-menu", (_e, p) => {
+    const items = [];
+    if (p.isEditable) items.push({ role: "cut", enabled: p.editFlags.canCut });
+    if (p.selectionText || p.isEditable) items.push({ role: "copy", enabled: p.editFlags.canCopy });
+    if (p.isEditable) items.push({ role: "paste", enabled: p.editFlags.canPaste });
+    if (p.linkURL && /^https?:/i.test(p.linkURL)) items.push({ label: "Copy link", click: () => clipboard.writeText(p.linkURL) });
+    items.push({ type: "separator" }, { role: "selectAll" });
+    Menu.buildFromTemplate(items).popup({ window: win });
   });
   win.loadFile(path.join(here, "renderer", "index.html"));
   win.on("closed", () => (win = null));

@@ -8,6 +8,8 @@ It runs on Windows, macOS and Linux.
 - **Start** a new session in any folder: use **+ New session**, `Ctrl/Cmd+N`, or the `+` next to a folder in the list.
 - Chat with streamed answers, collapsible thinking and tool calls, file diffs and permission prompts.
   Press **Stop** (or `Esc`) to cancel a turn.
+- Copy anything. Hover a message, code block or tool output to show its **Copy** button; copying a diff gives the
+  new file content. **Copy thread** copies the whole conversation as Markdown. Right-click shows Copy / Select All.
 - Switch mode (Agent / Plan / Autopilot), model, reasoning effort and approval settings per session.
   The choices come from the CLI.
 - Several sessions can be open at once. Each runs in its own `copilot --acp` process with the session's folder as

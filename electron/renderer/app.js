@@ -17,6 +17,43 @@ function h(tag, attrs = {}, ...children) {
   return el;
 }
 
+// ---------------------------------------------------------------------------
+// copying
+
+/** Small "Copy" button; getText is called on click. */
+function copyBtn(getText, label = "Copy") {
+  const b = h("button", { class: "copy", title: "Copy to clipboard" }, label);
+  b.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    e.preventDefault();
+    try {
+      await api.copy(String(getText() ?? ""));
+      b.textContent = "Copied";
+    } catch {
+      b.textContent = "Failed";
+    }
+    setTimeout(() => (b.textContent = label), 1200);
+  });
+  return b;
+}
+
+/** Give every <pre> inside `root` its own copy button (pre._copy overrides the copied text, e.g. a diff's new file). */
+function decoratePres(root) {
+  for (const pre of root.querySelectorAll("pre")) {
+    if (pre.parentElement?.classList.contains("codewrap")) continue;
+    const wrap = h("div", { class: "codewrap" });
+    pre.replaceWith(wrap);
+    wrap.append(pre, copyBtn(() => pre._copy ?? (pre.querySelector("code") ?? pre).textContent));
+  }
+}
+
+/** A finished chat bubble (user prompt or relay message) with a copy button and a Markdown export. */
+function bubble(cls, text, from) {
+  const el = h("div", { class: `msg ${cls}` }, from && h("div", { class: "from" }, `from ${from}`), h("div", { class: "body" }, text), copyBtn(() => text));
+  el._md = () => `**${from ? `from ${from}` : "You"}:**\n\n${text}`;
+  return el;
+}
+
 marked.use({ gfm: true, breaks: false });
 const md = (text) => DOMPurify.sanitize(marked.parse(text ?? ""), { ADD_ATTR: ["target"] });
 
@@ -74,6 +111,7 @@ class SessionView {
         h("div", { class: "title" }, this.titleEl, h("a", { title: "Open folder", onclick: () => api.openPath(this.cwd).catch((e) => this.error(e.message)) }, cwd)),
         this.relayChip,
         this.selects,
+        h("button", { title: "Copy the whole conversation as Markdown", onclick: (e) => this.copyThread(e.currentTarget) }, "Copy thread"),
         h("button", { class: "danger", title: "Close this session in the app (it stays resumable)", onclick: () => closeView(this.sessionId) }, "Close"),
       ),
       this.log,
@@ -176,7 +214,7 @@ class SessionView {
     if (this.busy || this.dead || !this.inbox.length) return;
     const m = this.inbox.shift();
     const human = m.from === "user"; // sent by a person from the relay web GUI
-    this.runPrompt(m.prompt, h("div", { class: "msg relay" }, h("div", { class: "from" }, `from ${m.from}`), m.text), human);
+    this.runPrompt(m.prompt, bubble("relay", m.text, m.from), human);
   }
 
   // --- streaming blocks
@@ -184,12 +222,17 @@ class SessionView {
     // a different messageId means a new message even if the type is the same
     if (!this.run || this.run.type !== type || ((messageId || this.run.messageId) && messageId !== this.run.messageId)) {
       this.flush();
+      const body = h("div", { class: type === "agent" ? "md" : "body" });
+      const run = { type, body, text: "", messageId };
       let el;
-      if (type === "agent") el = h("div", { class: "msg agent" });
-      else if (type === "user") el = h("div", { class: "msg user" });
-      else el = h("details", { class: "thought" }, h("summary", {}, "Thinking"), h("div"));
+      if (type === "thought") el = h("details", { class: "thought" }, h("summary", {}, "Thinking"), body);
+      else {
+        el = h("div", { class: `msg ${type}` }, body, copyBtn(() => run.text));
+        el._md = () => (!run.text.trim() ? null : type === "user" ? `**You:**\n\n${run.text}` : run.text);
+      }
+      run.el = el;
       this.append(el);
-      this.run = { type, el, text: "", messageId };
+      this.run = run;
     }
     this.run.text += text;
     this.queueRender();
@@ -202,19 +245,14 @@ class SessionView {
       const r = this.run;
       if (!r) return;
       const stick = this.nearBottom();
-      if (r.type === "agent") r.el.innerHTML = md(r.text);
-      else if (r.type === "user") r.el.textContent = r.text;
-      else r.el.lastChild.textContent = r.text;
+      renderRun(r);
       if (stick) this.log.scrollTop = this.log.scrollHeight;
     });
   }
   flush() {
     // render the pending block synchronously before something else is appended
     if (this.run && this.renderQueued) {
-      const r = this.run;
-      if (r.type === "agent") r.el.innerHTML = md(r.text);
-      else if (r.type === "user") r.el.textContent = r.text;
-      else r.el.lastChild.textContent = r.text;
+      renderRun(this.run);
     }
     this.run = null;
   }
@@ -267,6 +305,7 @@ class SessionView {
       const body = h("div", { class: "body" });
       const el = h("details", { class: "tool" }, h("summary", {}, st, kind, name), body);
       t = { el, st, name, kind, body, data: {} };
+      el._md = () => `*Tool: ${t.data.title ?? "tool"} (${t.data.status ?? "pending"})*`;
       this.tools.set(u.toolCallId, t);
       this.append(el);
     }
@@ -278,6 +317,7 @@ class SessionView {
     t.kind.textContent = d.kind && d.kind !== "other" ? d.kind : "";
     t.name.textContent = d.title ?? "tool";
     t.body.replaceChildren(...this.toolBody(d));
+    decoratePres(t.body);
   }
 
   toolBody(d) {
@@ -288,7 +328,9 @@ class SessionView {
         const lines = [];
         for (const l of (c.oldText ?? "").split("\n")) if (c.oldText != null) lines.push(h("span", { class: "del" }, `- ${l}\n`));
         for (const l of (c.newText ?? "").split("\n")) lines.push(h("span", { class: "add" }, `+ ${l}\n`));
-        out.push(h("div", { class: "diff-path" }, c.path), h("pre", { class: "diff" }, lines));
+        const pre = h("pre", { class: "diff" }, lines);
+        pre._copy = c.newText ?? ""; // copying a diff gives the new file content
+        out.push(h("div", { class: "diff-path" }, c.path), pre);
       } else if (c.type === "content" && c.content?.type === "text") {
         out.push(h("pre", {}, c.content.text));
       }
@@ -301,8 +343,10 @@ class SessionView {
 
   plan(entries) {
     const list = h("ul", {}, entries.map((e) => h("li", { class: e.status }, e.content)));
+    const asMd = () => "**Plan:**\n" + entries.map((e) => `- [${e.status === "completed" ? "x" : " "}] ${e.content}`).join("\n");
     if (this.planEl && this.log.lastElementChild === this.planEl) this.planEl.replaceChildren(h("b", {}, "Plan"), list);
     else this.planEl = this.append(h("div", { class: "plan" }, h("b", {}, "Plan"), list));
+    this.planEl._md = asMd;
   }
 
   permission({ reqId, toolCall, options }) {
@@ -331,6 +375,7 @@ class SessionView {
       ),
     );
     card.append(opts);
+    decoratePres(card);
     this.append(card);
     this.statusEl.textContent = "Waiting for your permission…";
   }
@@ -367,12 +412,26 @@ class SessionView {
     );
   }
 
+  /** Whole conversation as Markdown: prompts, relay messages, answers, tool calls and plans (not thinking). */
+  async copyThread(btn) {
+    this.flush();
+    const parts = [`# ${this.title ? shortTitle(this.title) : "Copilot session"}`, `_${this.cwd} · ${this.sessionId}_`];
+    for (const el of this.log.children) {
+      const t = el._md?.();
+      if (t && t.trim()) parts.push(t.trim());
+    }
+    await api.copy(parts.join("\n\n"));
+    const old = btn.textContent;
+    btn.textContent = "Copied";
+    setTimeout(() => (btn.textContent = old), 1200);
+  }
+
   send() {
     const text = this.input.value.trim();
     if (!text || this.busy || this.dead) return;
     this.input.value = "";
     this.autosize();
-    this.runPrompt(text, h("div", { class: "msg user" }, text), true);
+    this.runPrompt(text, bubble("user", text), true);
   }
 
   async runPrompt(text, bubble, human) {
@@ -424,6 +483,14 @@ function permissionDetail(input) {
     }
   }
   return parts;
+}
+
+function renderRun(r) {
+  if (r.type === "agent") {
+    r.body.innerHTML = md(r.text);
+    decoratePres(r.body);
+  } else r.body.textContent = r.text;
+  if (r.type === "user") r.el.hidden = !r.text.trim(); // replayed prompts can be empty (e.g. attachments only)
 }
 
 // ---------------------------------------------------------------------------
