@@ -103,6 +103,23 @@ describe("readQuota", () => {
     });
   });
 
+  test("does not look beyond the tail of a large file", async () => {
+    const filler = JSON.stringify({ type: "assistant.message", data: { content: "x".repeat(1000) } }) + "\n";
+    put(fixture("events-quota.jsonl") + filler.repeat(3 * 1024));
+    assert.equal(await readQuota({ copilotHome: home }), null);
+  });
+
+  test("ignores snapshots with missing fields", async () => {
+    const snap = (q) => JSON.stringify({ type: "model.model_call_success", data: { quotaSnapshots: { premium_interactions: q } } }) + "\n";
+    put(snap({ isUnlimitedEntitlement: false, usedRequests: 5 }));
+    assert.equal(await readQuota({ copilotHome: home }), null);
+    // an older complete snapshot is used when the newest is incomplete
+    put(fixture("events-quota.jsonl") + snap({ isUnlimitedEntitlement: false }));
+    assert.equal((await readQuota({ copilotHome: home })).used, 109);
+    put(snap({ isUnlimitedEntitlement: true }).replace("{", '{"timestamp":"2027-01-01T00:00:00Z",'));
+    assert.equal((await readQuota({ copilotHome: home })).unlimited, true);
+  });
+
   test("returns null when no session has a snapshot", async () => {
     put(fixture("events-basic.jsonl"));
     assert.equal(await readQuota({ copilotHome: home }), null);
@@ -129,6 +146,8 @@ describe("summarize", () => {
       pct: 11,
       level: "ok",
     });
+    assert.equal(summarize({ context: { used: 152000, size: 200000 } }).context.level, "ok");
+    assert.equal(summarize({ context: { used: 188000, size: 200000 } }).context.level, "warn");
     assert.equal(summarize({ context: { used: 160000, size: 200000 } }).context.level, "warn");
     assert.equal(summarize({ context: { used: 190000, size: 200000 } }).context.level, "full");
     const over = summarize({ context: { used: 210000, size: 200000 } }).context;

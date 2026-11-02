@@ -56,11 +56,11 @@ function lastMatch(lines, marker, pick) {
 }
 
 /** Tail scan first; if nothing is found and the file is bigger than the tail, scan the whole file (bounded). */
-async function scan(file, marker, pick) {
+async function scan(file, marker, pick, { tailOnly = false } = {}) {
   const tail = await readLines(file, false);
   if (!tail) return null;
   const found = lastMatch(tail.lines, marker, pick);
-  if (found || !tail.truncated) return found;
+  if (found || !tail.truncated || tailOnly) return found;
   const all = await readLines(file, true);
   return all ? lastMatch(all.lines, marker, pick) : null;
 }
@@ -102,6 +102,19 @@ export async function readSessionUsage(sessionId, { copilotHome } = {}) {
   return found ? toSessionUsage(found.hit) : null;
 }
 
+/** A snapshot is usable if unlimited, or if every displayed field is present (never invent values). */
+function validQuota(q) {
+  if (!q || typeof q !== "object") return false;
+  if (q.isUnlimitedEntitlement === true) return true;
+  return (
+    num(q.usedRequests) !== null &&
+    num(q.entitlementRequests) !== null &&
+    num(q.remainingPercentage) !== null &&
+    typeof q.resetDate === "string" &&
+    q.resetDate !== ""
+  );
+}
+
 /** Newest premium_interactions quota snapshot from the 5 most recently modified sessions; null if none. */
 export async function readQuota({ copilotHome } = {}) {
   const dir = path.join(copilotHome ?? copilotHomeDefault(), "session-state");
@@ -125,8 +138,8 @@ export async function readQuota({ copilotHome } = {}) {
   for (const { file } of files.slice(0, QUOTA_FILES)) {
     const found = await scan(file, '"quotaSnapshots"', (e) => {
       const q = e?.data?.quotaSnapshots?.premium_interactions;
-      return q && typeof q === "object" ? q : null;
-    });
+      return validQuota(q) ? q : null;
+    }, { tailOnly: true });
     if (!found) continue;
     const ts = Date.parse(found.e.timestamp) || 0;
     if (!best || ts > best.ts) best = { ts, q: found.hit };
@@ -155,7 +168,7 @@ function contextView(context) {
   return {
     label: `${formatTokens(context.used)} / ${formatTokens(context.size)} · ${pct}%`,
     pct,
-    level: pct >= 90 ? "full" : pct >= 75 ? "warn" : "ok",
+    level: pct >= 95 ? "full" : pct >= 80 ? "warn" : "ok",
   };
 }
 
