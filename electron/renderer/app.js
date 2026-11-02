@@ -218,7 +218,7 @@ class SessionView {
     this.selects = h("span", { class: "selects" });
     this.relayChip = h("button", { class: "relay-chip", hidden: true, onclick: () => this.renameRelay() });
     this.usageFill = h("span", { class: "fill" });
-    this.usageLabel = h("span", { class: "label" });
+    this.usageLabel = h("span", { class: "label" }, "context: —");
     this.usageChip = h("span", { class: "usage-chip" }, h("span", { class: "meter" }, this.usageFill), this.usageLabel);
     this.log = h("div", { class: "log" });
     this.input = h("textarea", { rows: 2, placeholder: "Message Copilot…  (Enter to send, Shift+Enter for a new line, Esc to stop)" });
