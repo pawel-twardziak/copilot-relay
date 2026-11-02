@@ -4,7 +4,7 @@ import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { AcpAgent } from "./src/acp-agent.mjs";
-import { Registry, sanitizeName } from "./src/registry.mjs";
+import { isReservedName, Registry, sanitizeName } from "./src/registry.mjs";
 import { createMcpHandler } from "./src/mcp.mjs";
 import { NameStore, randomName } from "./src/name-store.mjs";
 
@@ -70,6 +70,7 @@ function introPrompt(meta) {
 async function createAcpSession({ name, role = "", cwd, model }) {
   const wanted = sanitizeName(name);
   if (!name || registry.getByName(wanted)) throw new HttpError(409, `Name "${wanted}" is missing or taken.`);
+  if (isReservedName(wanted)) throw new HttpError(409, `Name "${wanted}" is reserved.`);
   const dir = cwd ? path.resolve(DEFAULT_CWD, cwd) : DEFAULT_CWD;
   if (!(await stat(dir).catch(() => null))?.isDirectory()) throw new HttpError(400, `Not a directory: ${dir}`);
 
@@ -169,9 +170,33 @@ const json = (res, code, obj) => res.writeHead(code, { "content-type": "applicat
 const sse = (res) =>
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
 
+// The broker has no login, so it must not be usable from web pages in the user's browser:
+// - Host must be the loopback address (blocks DNS rebinding),
+// - a browser Origin, if sent, must be the broker itself (cross-site fetch/XHR/form posts, "null" origins),
+// - Sec-Fetch-Site must be same-origin or none: browsers send it on every request, also on GETs without an
+//   Origin header such as <img src="http://127.0.0.1:7777/api/peer/stream?...">. Opening the GUI page itself
+//   (GET / from a link or bookmark) stays allowed,
+// - POST bodies must be JSON (a cross-site form or no-cors fetch cannot send application/json without a preflight).
+// Node clients (extension, desktop app, MCP clients) send none of these browser headers, so they are unaffected.
+const SELF_HOSTS = new Set(
+  ["127.0.0.1", "localhost", "[::1]"].flatMap((h) => (PORT === 80 ? [h, `${h}:80`] : [`${h}:${PORT}`])),
+);
+function rejectForeign(req, pathname) {
+  if (!SELF_HOSTS.has(String(req.headers.host ?? "").toLowerCase())) return "bad Host";
+  const origin = req.headers.origin;
+  if (origin && !SELF_HOSTS.has(origin.replace(/^https?:\/\//i, "").toLowerCase())) return "cross-origin request";
+  const site = req.headers["sec-fetch-site"];
+  const page = req.method === "GET" && (pathname === "/" || pathname === "/health");
+  if (site && site !== "same-origin" && site !== "none" && !page) return `${site} request`;
+  if (req.method === "POST" && !/^application\/json\b/i.test(String(req.headers["content-type"] ?? ""))) return "POST body must be application/json";
+  return null;
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${HOST}`);
   const q = url.searchParams;
+  const foreign = rejectForeign(req, url.pathname);
+  if (foreign) return json(res, 403, { error: `Forbidden: ${foreign}` });
   try {
     if (url.pathname === "/mcp") {
       const body = req.method === "POST" ? await readBody(req) : undefined;

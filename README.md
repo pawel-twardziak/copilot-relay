@@ -47,7 +47,7 @@ http://127.0.0.1:7777 shows the session. If not, run `grep -i extension ~/.copil
 
 ### Session names
 
-Each terminal session gets a random name (e.g. `swift-otter`) the first time it connects. The broker stores
+The name `user` is reserved for messages typed by a person in the GUI. Each terminal session gets a random name (e.g. `swift-otter`) the first time it connects. The broker stores
 the name per Copilot session ID in `names.json` (paths in the table below), so it survives broker restarts
 and `copilot --resume`. To change it:
 
@@ -226,4 +226,7 @@ session, whether in a terminal (detected by the extension's `onUserPromptSubmitt
 - `/clear` in a terminal reloads the extension, which then registers as a new peer.
 - Copilot CLI extensions and ACP are preview features (tested against CLI 1.0.95-3).
 - Every delivered message is a new agent turn and consumes premium requests.
-- No authentication on the local port. Any local process can read and send messages.
+- No authentication on the local port. Any local process can read and send messages. Web pages can't: the broker
+  rejects requests with a foreign `Origin` or `Host`, cross-site requests (`Sec-Fetch-Site`, which also covers
+  `<img src>`-style GETs), and POSTs that aren't `application/json`. Only opening the GUI page itself is allowed
+  from a link.

@@ -8,6 +8,9 @@
 import { EventEmitter } from "node:events";
 
 const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+// "user" is how messages from a person (relay GUI) are labelled; a session must not be able to pose as one
+const RESERVED = new Set(["user"]);
+export const isReservedName = (name) => RESERVED.has(sanitizeName(name));
 const OFFLINE_GRACE_MS = Number(process.env.COPILOT_RELAY_OFFLINE_GRACE_MS ?? 30_000);
 
 export function sanitizeName(s) {
@@ -31,7 +34,8 @@ export class Registry extends EventEmitter {
 
   /** Pick a free name based on `wanted` (adds -2, -3… on collision). */
   freeName(wanted, key) {
-    const base = sanitizeName(wanted);
+    let base = sanitizeName(wanted);
+    if (RESERVED.has(base)) base = `${base}-session`;
     let name = base;
     for (let i = 2; this.byName.has(name) && this.byName.get(name).key !== key; i++) name = `${base.slice(0, 28)}-${i}`;
     return name;
@@ -64,6 +68,7 @@ export class Registry extends EventEmitter {
     const peer = this.byKey.get(key);
     if (!peer) throw new Error("unknown peer");
     const wantedClean = sanitizeName(wanted);
+    if (RESERVED.has(wantedClean)) throw new Error(`Name "${wantedClean}" is reserved.`);
     if (this.byName.has(wantedClean) && this.byName.get(wantedClean) !== peer)
       throw new Error(`Name "${wantedClean}" is taken.`);
     const old = peer.name;
@@ -145,6 +150,7 @@ export class Registry extends EventEmitter {
     this.emit("message", { from: from.name, to: to.name, fromKey: from.key, toKey: to.key, text, budget: this.budget });
     this.#deliver(to, {
       from: from.name,
+      human: false,
       text,
       prompt:
         `[from ${from.name}]\n${text}\n\n` +
@@ -161,7 +167,7 @@ export class Registry extends EventEmitter {
     if (!to) return false;
     this.humanPrompt();
     this.emit("message", { from: "user", to: to.name, toKey: to.key, text });
-    this.#deliver(to, { from: "user", text, prompt: text });
+    this.#deliver(to, { from: "user", human: true, text, prompt: text });
     return true;
   }
 
@@ -197,7 +203,7 @@ export class Registry extends EventEmitter {
         /* fall through to inbox */
       }
     }
-    peer.inbox.push({ from: msg.from, text: msg.text, prompt: msg.prompt, ts: Date.now() });
+    peer.inbox.push({ from: msg.from, human: msg.human === true, text: msg.text, prompt: msg.prompt, ts: Date.now() });
     this.emit("peer_updated", this.describe(peer));
     for (const w of peer.waiters.splice(0)) w();
   }
