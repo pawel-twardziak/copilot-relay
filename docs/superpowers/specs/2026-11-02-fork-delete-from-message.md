@@ -74,7 +74,7 @@ built-ins only. No new dependencies.
 
 ```
 Run app:   npm run app                     (repo root)
-Tests:     node --test electron/test/      (new, node:test, no deps)
+Tests:     node --test 'electron/test/*.test.mjs'     (new, node:test, no deps)
 Package:   npm --prefix electron run dist:linux
 ```
 
@@ -122,7 +122,7 @@ export function cutIndex(events, { ordinal, text, where }) { … }
 3. Delete from user message N / reply N → after reopen the view and the model's context end at the cut.
 4. The forked session appears in the list as `Fork of …` and survives an app restart.
 5. Mismatched bubble → error, no files changed.
-6. `node --test electron/test/` passes.
+6. `node --test 'electron/test/*.test.mjs'` passes.
 
 ## Assumptions / Open Questions
 

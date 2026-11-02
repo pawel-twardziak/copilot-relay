@@ -52,7 +52,7 @@ T1/T2 are built test-first together; T3 depends on T1; T4 and T5 are sequential 
   - Cases: four cut kinds; afterReply on last turn = EOF; beforeReply on last turn; text mismatch → unique fallback;
     ambiguous/absent → throws; fork dir has new id in first event + `workspace.yaml`, original byte-identical;
     truncate writes `.bak`, result parses; invalid id / symlinked dir / missing dir → throws.
-  - Verify: `node --test electron/test/` green.
+  - Verify: `node --test 'electron/test/*.test.mjs'` green.
   - Files: `electron/test/history.test.mjs`
 - [ ] **T3 – IPC**
   - `main.mjs`: extract `closeEntry(sessionId)` from `sessions:close`; add `sessions:fork(sessionId, target)` and
