@@ -27,8 +27,15 @@ npm run install-extension     # → ~/.copilot/extensions/copilot-relay (respect
 npm start                     # optional: the extension auto-starts the broker if it isn't running
 ```
 
-Then start `copilot` in any terminal. `/env` should list the `copilot-relay` extension, and the session shows
-`copilot-relay: connected as "<dir-name>"`. GUI: http://127.0.0.1:7777.
+Copilot CLI extensions are an **experimental** feature (CLI 1.0.106). Without experimental mode the CLI
+does not even launch them, and an unapproved extension is denied:
+
+1. Enable experimental mode once: run `/experimental on` inside `copilot`, or start with `copilot --experimental`.
+2. Start a **new** `copilot` session and **approve** the `copilot-relay` extension when prompted (`/extensions` manages it later).
+   In `-p` (prompt) mode nobody can approve it, so it is denied (`Extension "user:copilot-relay" was denied permission access`).
+
+The session then shows `copilot-relay: connected as "<dir-name>"`, `/env` lists the extension, and the GUI at
+http://127.0.0.1:7777 shows the session. If not, run `grep -i extension ~/.copilot/logs/process-*.log | tail`.
 
 - `npm run install-extension -- --no-autostart` installs without broker autostart.
 - `npm run uninstall-extension` removes the extension.
