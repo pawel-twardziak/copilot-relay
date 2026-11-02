@@ -228,6 +228,11 @@ class SessionView {
     this.agentOption = undefined; // latest ACP "agent" config option
     this.agentPicker = h("select", { class: "agent-picker", hidden: true });
     this.agentPicker.addEventListener("change", () => this.chooseAgent(this.agentPicker.value));
+    this.commands = []; // Copilot's availableCommands
+    this.cmdMatches = [];
+    this.cmdIndex = 0;
+    this.cmdToken = null;
+    this.cmdPopup = h("div", { class: "cmd-popup", role: "listbox", hidden: true });
 
     this.el = h(
       "section",
@@ -243,16 +248,37 @@ class SessionView {
         h("button", { class: "danger", title: "Close this session in the app (it stays resumable)", onclick: () => closeView(this.sessionId) }, "Close"),
       ),
       this.log,
-      h("div", { class: "composer" }, this.input, this.agentPicker, h("div", { class: "btns" }, this.sendBtn, this.stopBtn)),
+      h("div", { class: "composer" }, this.cmdPopup, this.input, this.agentPicker, h("div", { class: "btns" }, this.sendBtn, this.stopBtn)),
       this.statusEl,
     );
+    // registered before the Enter/Esc handler below; consumes keys only while the popup is visible
+    this.input.addEventListener("keydown", (e) => {
+      if (this.cmdPopup.hidden || e.isComposing) return;
+      const n = this.cmdMatches.length;
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        this.cmdIndex = (this.cmdIndex + (e.key === "ArrowDown" ? 1 : n - 1)) % n;
+        this.renderPopup();
+      } else if (e.key === "Tab" || e.key === "Enter") this.insertCommandAt(this.cmdIndex);
+      else if (e.key === "Escape") this.hidePopup();
+      else return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    });
+    this.input.addEventListener("keyup", (e) => {
+      if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) this.updatePopup();
+    });
+    this.input.addEventListener("click", () => this.updatePopup());
+    this.input.addEventListener("blur", () => this.hidePopup());
     this.input.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
         e.preventDefault();
         this.send();
       } else if (e.key === "Escape" && this.busy) this.cancel();
     });
-    this.input.addEventListener("input", () => this.autosize());
+    this.input.addEventListener("input", () => {
+      this.autosize();
+      this.updatePopup();
+    });
     this.input.addEventListener("paste", (e) => this.onFiles(e, e.clipboardData));
     this.input.addEventListener("dragover", (e) => e.preventDefault());
     this.input.addEventListener("drop", (e) => this.onFiles(e, e.dataTransfer));
@@ -363,6 +389,67 @@ class SessionView {
     input.addEventListener("blur", () => done(false));
     this.titleEl.replaceWith(input);
     input.select();
+  }
+
+  setCommands(list) {
+    this.commands = Array.isArray(list) ? list : [];
+    if (!this.cmdPopup.hidden) this.updatePopup();
+  }
+
+  hidePopup() {
+    this.cmdPopup.hidden = true;
+    this.cmdToken = null;
+  }
+
+  updatePopup() {
+    const token = SlashCommands.commandToken(this.input.value, this.input.selectionStart);
+    if (token === null) return this.hidePopup();
+    const own = this.agentAvailable()
+      ? [{ name: "agent", description: "Choose the custom agent for this session", input: { hint: "name" } }]
+      : [];
+    const matches = SlashCommands.filterCommands([...own, ...this.commands], token);
+    if (!matches.length) return this.hidePopup();
+    this.cmdIndex = token === this.cmdToken ? Math.min(this.cmdIndex, matches.length - 1) : 0;
+    this.cmdToken = token;
+    this.cmdMatches = matches;
+    this.renderPopup();
+    this.cmdPopup.hidden = false;
+    this.cmdPopup.querySelector(".active")?.scrollIntoView({ block: "nearest" });
+  }
+
+  renderPopup() {
+    this.cmdPopup.replaceChildren(
+      ...this.cmdMatches.map((c, i) =>
+        h(
+          "div",
+          {
+            class: "cmd-row" + (i === this.cmdIndex ? " active" : ""),
+            role: "option",
+            "aria-selected": i === this.cmdIndex ? "true" : "false",
+            title: c.description ?? "",
+            // keep focus in the textarea
+            onmousedown: (e) => {
+              e.preventDefault();
+              this.insertCommandAt(i);
+            },
+          },
+          h("span", { class: "cmd-name" }, "/" + c.name),
+          c.input?.hint ? h("span", { class: "cmd-hint" }, c.input.hint) : null,
+          h("span", { class: "cmd-desc" }, c.description ?? ""),
+        ),
+      ),
+    );
+    this.cmdPopup.querySelector(".active")?.scrollIntoView({ block: "nearest" });
+  }
+
+  insertCommandAt(i) {
+    const c = this.cmdMatches[i];
+    if (!c) return;
+    const r = SlashCommands.insertCommand(this.input.value, c.name);
+    this.input.value = r.text;
+    this.input.setSelectionRange(r.caret, r.caret);
+    this.autosize();
+    this.hidePopup();
   }
 
   autosize() {
@@ -664,8 +751,11 @@ class SessionView {
       case "config_option_update":
         if (u.configOptions) this.setConfig(u.configOptions);
         break;
+      case "available_commands_update":
+        this.setCommands(u.availableCommands ?? []);
+        break;
       default:
-        break; // available_commands_update, current_mode_update, usage_update…
+        break; // current_mode_update, usage_update…
     }
   }
 
@@ -991,6 +1081,7 @@ async function closeView(id) {
   if (!v) return;
   if (v.busy && !v.dead && !confirm("Copilot is still working in this session. Stop it and close?")) return;
   views.delete(id);
+  lastCommands.delete(id);
   lastUsage.delete(id); // a re-opened session must not flash this stale snapshot
   v.el.remove();
   if (activeId === id) activate([...views.keys()].pop() ?? null);
@@ -1128,7 +1219,11 @@ $("#settings").addEventListener("close", async () => {
 // ---------------------------------------------------------------------------
 // wiring
 
-api.onUpdate(({ sessionId, update }) => views.get(sessionId)?.onUpdate(update));
+const lastCommands = new Map(); // latest availableCommands per session (updates can precede the view)
+api.onUpdate(({ sessionId, update }) => {
+  if (update?.sessionUpdate === "available_commands_update") lastCommands.set(sessionId, update.availableCommands ?? []);
+  views.get(sessionId)?.onUpdate(update);
+});
 api.onPermission((p) => views.get(p.sessionId)?.permission(p));
 api.onExit((e) => views.get(e.sessionId)?.markDead(e));
 api.onNotice((n) => views.get(n.sessionId)?.system(n.text));
@@ -1143,6 +1238,7 @@ const forView = (sessionId, fn) => {
 };
 function flushEarly(v) {
   if (lastUsage.has(v.sessionId)) v.usage(lastUsage.get(v.sessionId));
+  if (lastCommands.has(v.sessionId)) v.setCommands(lastCommands.get(v.sessionId));
   for (const fn of early.get(v.sessionId) ?? []) fn(v);
   early.delete(v.sessionId);
 }
