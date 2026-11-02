@@ -85,6 +85,7 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberat
 .head .title a:hover { text-decoration: underline; }
 .head .selects { display: flex; flex-wrap: nowrap; gap: 6px; flex-shrink: 0; }
 .head select { max-width: 120px; }
+.composer .agent-picker { align-self: flex-end; max-width: 150px; }
 .head button { white-space: nowrap; flex-shrink: 0; }
 .log { flex: 1; overflow-y: auto; padding: 16px 18px 24px; display: flex; flex-direction: column; gap: 10px; }
 .msg { max-width: 920px; line-height: 1.5; overflow-wrap: anywhere; }

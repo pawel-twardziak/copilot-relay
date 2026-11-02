@@ -225,6 +225,9 @@ class SessionView {
     this.sendBtn = h("button", { class: "primary", onclick: () => this.send() }, "Send");
     this.stopBtn = h("button", { onclick: () => this.cancel(), disabled: true }, "Stop");
     this.statusEl = h("div", { class: "status-line" });
+    this.agentOption = undefined; // latest ACP "agent" config option
+    this.agentPicker = h("select", { class: "agent-picker", hidden: true });
+    this.agentPicker.addEventListener("change", () => this.chooseAgent(this.agentPicker.value));
 
     this.el = h(
       "section",
@@ -240,7 +243,7 @@ class SessionView {
         h("button", { class: "danger", title: "Close this session in the app (it stays resumable)", onclick: () => closeView(this.sessionId) }, "Close"),
       ),
       this.log,
-      h("div", { class: "composer" }, this.input, h("div", { class: "btns" }, this.sendBtn, this.stopBtn)),
+      h("div", { class: "composer" }, this.input, this.agentPicker, h("div", { class: "btns" }, this.sendBtn, this.stopBtn)),
       this.statusEl,
     );
     this.input.addEventListener("keydown", (e) => {
@@ -516,6 +519,7 @@ class SessionView {
     this.sendBtn.disabled = b || this.dead;
     this.stopBtn.disabled = !b || this.dead;
     this.input.disabled = this.dead;
+    this.agentPicker.disabled = b || this.dead;
     this.statusEl.textContent = b ? "Working…" : this.dead ? "Copilot process ended" : this.inbox.length ? `${this.inbox.length} relay message(s) waiting` : "";
     renderList();
     if (!b) queueMicrotask(() => this.pump());
@@ -753,9 +757,10 @@ class SessionView {
 
   setConfig(configOptions) {
     if (!Array.isArray(configOptions)) return;
+    this.setAgent(configOptions.find((c) => c.id === "agent"));
     this.selects.replaceChildren(
       ...configOptions
-        .filter((c) => c.type === "select" && Array.isArray(c.options))
+        .filter((c) => c.id !== "agent" && c.type === "select" && Array.isArray(c.options))
         .map((c) => {
           const seen = new Set();
           const opts = c.options.filter((o) => !seen.has(o.value) && seen.add(o.value));
@@ -783,6 +788,46 @@ class SessionView {
     );
   }
 
+  setAgent(option) {
+    this.agentOption = option;
+    const model = SlashCommands.agentPickerModel(option);
+    this.agentPicker.hidden = !model.show;
+    this.agentPicker.replaceChildren(
+      ...model.entries.map((e) => {
+        const opt = h("option", { value: e.value, title: e.description }, e.name);
+        if (e.missing) opt.disabled = true;
+        return opt;
+      }),
+    );
+    this.agentPicker.value = model.current;
+    this.agentPicker.title = model.entries.find((e) => e.value === model.current)?.description || "Agent";
+    this.agentPicker.disabled = this.busy || this.dead;
+  }
+
+  agentAvailable() {
+    return SlashCommands.agentPickerModel(this.agentOption).show;
+  }
+
+  async chooseAgent(value) {
+    if (this.busy) {
+      this.statusEl.textContent = "Wait until Copilot finishes this turn.";
+      this.setAgent(this.agentOption);
+      return false;
+    }
+    const previous = this.agentOption;
+    try {
+      const updated = await api.setConfig(this.sessionId, "agent", value);
+      if (updated) this.setConfig(updated);
+      const entry = SlashCommands.agentPickerModel(this.agentOption).entries.find((e) => e.value === value);
+      this.system("Agent: " + (entry?.name ?? (value || "Copilot")));
+      return true;
+    } catch (e) {
+      this.setAgent(previous);
+      this.statusEl.textContent = "Agent change failed: " + e.message;
+      return false;
+    }
+  }
+
   /** Whole conversation as Markdown: prompts, relay messages, answers, tool calls and plans (not thinking). */
   async copyThread(btn) {
     this.flush();
@@ -802,6 +847,23 @@ class SessionView {
     if (!text || this.busy || this.dead) return;
     this.input.value = "";
     this.autosize();
+    const cmd = this.agentAvailable() ? SlashCommands.parseAgentCommand(text) : null;
+    if (cmd) {
+      if (cmd.arg === "") {
+        this.agentPicker.focus();
+        this.agentPicker.showPicker?.();
+        return;
+      }
+      const entries = SlashCommands.agentPickerModel(this.agentOption).entries.filter((e) => !e.missing);
+      const hit = SlashCommands.matchAgent(entries, cmd.arg);
+      if (hit) this.chooseAgent(hit.value);
+      else {
+        this.input.value = text;
+        this.autosize();
+        this.statusEl.textContent = `Unknown agent "${cmd.arg}". Available: ${entries.map((e) => e.name).join(", ")}`;
+      }
+      return;
+    }
     this.runPrompt(text, bubble("user", text), "app");
   }
 
