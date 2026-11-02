@@ -30,6 +30,14 @@ It runs on Windows, macOS and Linux.
   **Delete pasted images**, plus the location of the settings file.
 - Copy anything. Hover a message, code block or tool output to show its **Copy** button; copying a diff gives the
   new file content. **Copy thread** copies the whole conversation as Markdown. Right-click shows Copy / Select All.
+- **Fork** or **Delete** from any message (hover a prompt, relay message or the start of an answer).
+  Fork on a prompt starts a new session with the history before it and puts the prompt in the message box to edit;
+  Fork on an answer starts a new session that ends with that answer. Delete removes the message (or answer) and
+  everything after it. Copilot's ACP has no API for this, so the app edits Copilot's session files
+  (`~/.copilot/session-state/<id>/events.jsonl`): a fork is a copy named `Fork of …`, a delete keeps the previous
+  history as `events.jsonl.bak`. Files the agent changed are not reverted, and a session that is also open in a
+  terminal Copilot CLI should not be edited. A future Copilot CLI may change the file format; the app then shows an
+  error instead of changing anything.
 - Switch mode (Agent / Plan / Autopilot), model, reasoning effort and approval settings per session.
   The choices come from the CLI.
 - Several sessions can be open at once. Each runs in its own `copilot --acp` process with the session's folder as

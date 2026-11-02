@@ -161,6 +161,8 @@ dialog label { display: flex; flex-direction: column; gap: 6px; }
 .act { font-size: 11px; padding: 1px 7px; background: var(--panel-2); color: var(--muted); }
 .act:hover { color: var(--text); }
 .acts.inline { position: static; flex: none; }
+/* on messages the bar floats over the top edge, so it doesn't cover the first line of short bubbles */
+.msg > .acts { top: -13px; right: 8px; padding: 2px; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; }
 .session-view.busy .act { pointer-events: none; opacity: .4; }
 .msg.agent { padding-right: 56px; }
 .msg.user, .msg.relay { padding-right: 56px; }

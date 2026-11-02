@@ -392,7 +392,7 @@ class SessionView {
     this.historyOp = true;
     try {
       if (action === "fork") await this.forkFrom(target);
-      else await this.deleteFrom(target, el._kind === "user" ? "this message" : "this reply");
+      else await this.deleteFrom(target, el._kind);
     } finally {
       this.historyOp = false;
     }
@@ -419,7 +419,7 @@ class SessionView {
     }
   }
 
-  async deleteFrom(target, what) {
+  async deleteFrom(target, kind) {
     let count;
     try {
       count = await api.countFrom(this.sessionId, target);
@@ -429,7 +429,13 @@ class SessionView {
     }
     const n = count.removedUserMessages;
     const ok = confirm(
-      `Delete ${what} and everything after it? (${n} message${n === 1 ? "" : "s"})\n\n` +
+      // a reply's own user message stays, so n counts only the later messages
+      (kind === "reply"
+        ? n
+          ? `Delete this reply and the ${n} later message${n === 1 ? "" : "s"}?`
+          : "Delete this reply?"
+        : `Delete this message${n > 1 ? ` and the ${n - 1} later message${n === 2 ? "" : "s"}` : ""}?`) +
+        "\n\n" +
         "This cannot be undone in the app (a backup is kept as events.jsonl.bak). Files changed by the agent are not reverted. " +
         "Don't use this while the session is open in a terminal Copilot CLI.",
     );
