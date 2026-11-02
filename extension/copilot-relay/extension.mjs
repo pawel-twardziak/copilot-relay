@@ -15,6 +15,18 @@ try {
 } catch {
   /* defaults */
 }
+// session.workspacePath is Copilot's per-session state dir (~/.copilot/session-state/<id>);
+// the real working directory is recorded in its workspace.yaml.
+function sessionCwd(workspacePath) {
+  try {
+    const m = readFileSync(path.join(workspacePath, "workspace.yaml"), "utf8").match(/^cwd:\s*(.+)$/m);
+    if (m) return m[1].trim().replace(/^["']|["']$/g, "");
+  } catch {
+    /* fall through */
+  }
+  return process.cwd();
+}
+
 const BROKER_URL = process.env.COPILOT_RELAY_URL ?? cfg.url ?? "http://127.0.0.1:7777";
 
 if (process.env.COPILOT_RELAY_MANAGED || process.env.COPILOT_RELAY_DISABLED) {
@@ -71,6 +83,41 @@ if (process.env.COPILOT_RELAY_MANAGED || process.env.COPILOT_RELAY_DISABLED) {
         },
       },
     ],
+    commands: [
+      {
+        name: "relay-name",
+        description: "copilot-relay: show or set this session's relay name — /relay-name [new-name] [| role]",
+        handler: async ({ args }) => {
+          const [rawName, role] = String(args ?? "").split("|").map((s) => s.trim());
+          if (!rawName) {
+            await session.log(`copilot-relay: this session is "${client.name ?? "(not connected)"}". Change it with /relay-name <new-name>`);
+            return;
+          }
+          try {
+            const n = await client.rename(rawName, role || undefined);
+            await session.log(`copilot-relay: renamed to "${n}" (kept across --resume)`);
+          } catch (e) {
+            await session.log(`copilot-relay: ${e.message}`, { level: "error" });
+          }
+        },
+      },
+      {
+        name: "relay",
+        description: "copilot-relay: show connection status and the other sessions",
+        handler: async () => {
+          try {
+            const peers = await client.list();
+            const lines = peers.map((p) => `  ${p.name} [${p.kind}${p.online ? "" : ", offline"}]${p.role ? ` — ${p.role}` : ""}`);
+            await session.log(
+              `copilot-relay: you are "${client.name}" (${client.connected ? "connected" : "disconnected"})\n` +
+                (lines.length ? lines.join("\n") : "  (no other sessions)"),
+            );
+          } catch (e) {
+            await session.log(`copilot-relay: broker unreachable (${e.message})`, { level: "error" });
+          }
+        },
+      },
+    ],
     hooks: {
       onUserPromptSubmitted: async (input) => {
         // a real human prompt (not one we injected) re-opens the agent-to-agent message budget
@@ -82,11 +129,12 @@ if (process.env.COPILOT_RELAY_MANAGED || process.env.COPILOT_RELAY_DISABLED) {
   client = new RelayClient({
     url: BROKER_URL,
     key: `cli:${session.sessionId}`,
-    cwd: session.workspacePath ?? process.cwd(),
+    cwd: sessionCwd(session.workspacePath),
     name: process.env.COPILOT_RELAY_NAME,
     brokerScript: cfg.brokerScript,
     log: (m) => session.log(m, { ephemeral: true }).catch(() => {}),
-    onRegistered: (name) => session.log(`copilot-relay: connected as "${name}"`, { ephemeral: true }).catch(() => {}),
+    onRegistered: (name) => session.log(`copilot-relay: connected as "${name}" (change with /relay-name)`, { ephemeral: true }).catch(() => {}),
+    onRenamed: (name) => session.log(`copilot-relay: this session was renamed to "${name}"`).catch(() => {}),
     onMessage: (m) => {
       session.send({ prompt: m.prompt, mode: "enqueue" }).catch((e) => session.log(`copilot-relay: delivery failed: ${e.message}`, { level: "error" }));
     },

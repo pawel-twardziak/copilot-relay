@@ -39,8 +39,20 @@ http://127.0.0.1:7777 shows the session. If not, run `grep -i extension ~/.copil
 
 - `npm run install-extension -- --no-autostart` installs without broker autostart.
 - `npm run uninstall-extension` removes the extension.
-- `COPILOT_RELAY_NAME=backend copilot` sets the session's relay name up front. You can also ask the agent to call `relay_set_name`.
 - `COPILOT_RELAY_DISABLED=1 copilot` starts a session that stays out of the relay.
+
+### Session names
+
+Each terminal session gets a random name (e.g. `swift-otter`) the first time it connects. The broker stores
+the name per Copilot session ID in `~/.local/state/copilot-relay/names.json`, so it survives broker restarts
+and `copilot --resume`. To change it:
+
+- type `/relay-name new-name` in the session (`/relay-name new-name | role text` also sets a role, and `/relay-name` alone shows the current name);
+- click the session name in the GUI;
+- start with `COPILOT_RELAY_NAME=backend copilot`, which wins over the stored name;
+- or ask the agent to call `relay_set_name`.
+
+`/relay` shows your name and the other sessions. `/clear` starts a new Copilot session, which gets a new name.
 
 ### Tools available to the agent
 

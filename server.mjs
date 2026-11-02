@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { AcpAgent } from "./src/acp-agent.mjs";
 import { Registry, sanitizeName } from "./src/registry.mjs";
 import { createMcpHandler } from "./src/mcp.mjs";
+import { NameStore, randomName } from "./src/name-store.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const configPath = process.argv[2] ?? path.join(ROOT, "relay.config.json");
@@ -19,6 +20,23 @@ const DEFAULT_CWD = path.resolve(path.dirname(configPath), config.cwd ?? ".");
 
 const registry = new Registry({ maxAgentMessages: config.maxAgentMessagesPerUserTurn ?? 12 });
 const handleMcp = createMcpHandler(registry);
+const names = new NameStore(process.env.COPILOT_RELAY_NAMES_FILE || undefined);
+
+// Persist names/roles of terminal sessions (key = Copilot sessionId, stable across --resume).
+const persist = (p) => p.key?.startsWith("cli:") && names.set(p.key, p.name, p.role);
+registry.on("peer_renamed", persist);
+registry.on("peer_updated", persist);
+
+function pickName(key, explicit) {
+  if (explicit) return explicit;
+  const stored = names.get(key)?.name;
+  if (stored) return stored;
+  for (let i = 0; i < 50; i++) {
+    const n = randomName();
+    if (!registry.getByName(n) && !names.isTakenByOther(n, key)) return n;
+  }
+  return `${randomName()}-${Math.random().toString(36).slice(2, 5)}`;
+}
 
 // ---------- SSE to GUI ----------
 const guiClients = new Set();
@@ -91,7 +109,7 @@ function closeAcpSession(key) {
   const agent = acpAgents.get(key);
   acpAgents.delete(key);
   agent?.stop();
-  return registry.remove(key);
+  return registry.remove(key, "user");
 }
 
 function wireAcp(key, agent) {
@@ -99,34 +117,34 @@ function wireAcp(key, agent) {
   agent.on("update", (u) => {
     switch (u.sessionUpdate) {
       case "agent_message_chunk":
-        if (u.content?.type === "text") broadcast("chunk", { agent: name(), kind: "text", text: u.content.text });
+        if (u.content?.type === "text") broadcast("chunk", { key, agent: name(), kind: "text", text: u.content.text });
         break;
       case "agent_thought_chunk":
-        if (u.content?.type === "text") broadcast("chunk", { agent: name(), kind: "thought", text: u.content.text });
+        if (u.content?.type === "text") broadcast("chunk", { key, agent: name(), kind: "thought", text: u.content.text });
         break;
       case "tool_call":
-        broadcast("tool", { agent: name(), id: u.toolCallId, title: u.title, status: u.status ?? "pending" });
+        broadcast("tool", { key, agent: name(), id: u.toolCallId, title: u.title, status: u.status ?? "pending" });
         break;
       case "tool_call_update":
-        broadcast("tool", { agent: name(), id: u.toolCallId, title: u.title, status: u.status });
+        broadcast("tool", { key, agent: name(), id: u.toolCallId, title: u.title, status: u.status });
         break;
     }
   });
   agent.on("status", (st) => {
-    broadcast("status", { agent: name(), ...st });
+    broadcast("status", { key, agent: name(), ...st });
     if (st.state === "exited" && acpAgents.get(key) === agent) closeAcpSession(key);
   });
-  agent.on("queue", (n) => broadcast("queue", { agent: name(), n }));
-  agent.on("turn_end", (r) => broadcast("turn_end", { agent: name(), stopReason: r }));
+  agent.on("queue", (n) => broadcast("queue", { key, agent: name(), n }));
+  agent.on("turn_end", (r) => broadcast("turn_end", { key, agent: name(), stopReason: r }));
   agent.on("permission", (p) => {
     const title = p.toolCall?.title ?? "";
     if (AUTO_APPROVE.some((t) => title === t || title === `relay-${t}`)) {
       const opt = p.options?.find((o) => o.kind === "allow_once") ?? p.options?.[0];
       if (opt) return agent.answerPermission(p.reqId, opt.optionId);
     }
-    broadcast("permission", { agent: name(), ...p });
+    broadcast("permission", { key, agent: name(), ...p });
   });
-  agent.on("error", (e) => broadcast("system", { agent: name(), text: `${name()}: ${e.message}` }));
+  agent.on("error", (e) => broadcast("system", { key, agent: name(), text: `${name()}: ${e.message}` }));
   agent.on("log", (l) => process.env.RELAY_DEBUG && process.stderr.write(`[${name()}] ${l}`));
 }
 
@@ -186,7 +204,7 @@ const server = http.createServer(async (req, res) => {
         const p = registry.getByName(q.get("name"));
         if (!p) return res.writeHead(404).end();
         if (acpAgents.has(p.key)) closeAcpSession(p.key);
-        else registry.remove(p.key); // terminal/MCP peers: just forget them (they re-register on reconnect)
+        else registry.remove(p.key, "user"); // terminal/MCP peers: just forget them (they re-register on reconnect)
         return res.writeHead(204).end();
       }
 
@@ -195,6 +213,15 @@ const server = http.createServer(async (req, res) => {
         const targets = to === "*" ? registry.list().map((p) => p.name) : [to];
         for (const t of targets) registry.sendFromUser(t, text);
         return res.writeHead(204).end();
+      }
+
+      case "POST /api/rename": {
+        const { name, newName, role } = (await readBody(req)) ?? {};
+        const p = registry.getByName(name);
+        if (!p) return json(res, 404, { error: `No session "${name}"` });
+        const n = newName ? registry.rename(p.key, newName) : p.name;
+        if (role != null) registry.setRole(p.key, role);
+        return json(res, 200, { name: n });
       }
 
       case "POST /api/permission": {
@@ -216,17 +243,31 @@ const server = http.createServer(async (req, res) => {
         if (!key) return json(res, 400, { error: "key required" });
         sse(res);
         const write = (event, data) => !res.destroyed && res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+        const onRenamed = (ev) => ev.key === key && write("renamed", { name: ev.name });
+        registry.on("peer_renamed", onRenamed);
         const peer = registry.upsert({
           key,
-          name: q.get("name") || path.basename(q.get("cwd") || "") || "cli",
+          name: pickName(key, q.get("name")),
           kind: "cli",
           cwd: q.get("cwd") ?? "",
+          role: names.get(key)?.role ?? "",
           push: (m) => write("message", m),
         });
+        // explicit name (COPILOT_RELAY_NAME) on a fresh start wins even if the peer is still known
+        const explicit = q.get("name");
+        if (explicit && peer.name !== sanitizeName(explicit)) {
+          try {
+            registry.rename(key, explicit);
+          } catch {
+            /* taken by an online session → keep the current name */
+          }
+        }
+        persist(peer);
         write("registered", { name: peer.name });
         const ping = setInterval(() => res.write(": ping\n\n"), 25_000);
         req.on("close", () => {
           clearInterval(ping);
+          registry.off("peer_renamed", onRenamed);
           if (registry.get(key)?.push) registry.disconnect(key);
         });
         return;

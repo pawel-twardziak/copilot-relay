@@ -8,7 +8,7 @@
 import { EventEmitter } from "node:events";
 
 const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
-const OFFLINE_GRACE_MS = 30_000;
+const OFFLINE_GRACE_MS = Number(process.env.COPILOT_RELAY_OFFLINE_GRACE_MS ?? 30_000);
 
 export function sanitizeName(s) {
   const n = String(s ?? "")
@@ -87,17 +87,18 @@ export class Registry extends EventEmitter {
     peer.online = false;
     peer.push = null;
     this.emit("peer_updated", this.describe(peer));
-    peer.offlineTimer = setTimeout(() => this.remove(key), OFFLINE_GRACE_MS);
+    peer.offlineTimer = setTimeout(() => this.remove(key, "timeout"), OFFLINE_GRACE_MS);
   }
 
-  remove(key) {
+  /** @param {"user"|"timeout"|"exited"|"closed"} [reason] */
+  remove(key, reason = "closed") {
     const peer = this.byKey.get(key);
     if (!peer) return false;
     clearTimeout(peer.offlineTimer);
     this.byKey.delete(key);
     if (this.byName.get(peer.name) === peer) this.byName.delete(peer.name);
     for (const w of peer.waiters) w(null);
-    this.emit("peer_removed", { name: peer.name, key });
+    this.emit("peer_removed", { name: peer.name, key, kind: peer.kind, reason });
     return true;
   }
 
@@ -132,7 +133,7 @@ export class Registry extends EventEmitter {
       return "Not delivered: the relay message budget is exhausted. Finish your work and report to the user.";
     }
     this.budget--;
-    this.emit("message", { from: from.name, to: to.name, text, budget: this.budget });
+    this.emit("message", { from: from.name, to: to.name, fromKey: from.key, toKey: to.key, text, budget: this.budget });
     this.#deliver(to, {
       from: from.name,
       text,
@@ -150,7 +151,7 @@ export class Registry extends EventEmitter {
     const to = this.byName.get(toName);
     if (!to) return false;
     this.humanPrompt();
-    this.emit("message", { from: "user", to: to.name, text });
+    this.emit("message", { from: "user", to: to.name, toKey: to.key, text });
     this.#deliver(to, { from: "user", text, prompt: text });
     return true;
   }

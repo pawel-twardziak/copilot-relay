@@ -33,6 +33,8 @@
   .perm { border:1px solid var(--warn); padding:6px; margin:0 0 8px; border-radius:4px; }
   .perm button { margin:4px 4px 0 0; }
   .sys { color:var(--err); font-size:11px; margin:0 0 6px; }
+  .col.gone { opacity:.55; }
+  .peer { color:inherit; }
   form { display:flex; border-top:1px solid var(--line); }
   textarea { flex:1; resize:none; height:56px; background:#11141a; color:var(--fg); border:0; padding:8px; font:inherit; }
   button { background:#222836; color:var(--fg); border:1px solid var(--line); cursor:pointer; font:inherit; padding:4px 10px; }
@@ -56,59 +58,95 @@
 <main id="cols"></main>
 <form id="bcast"><input placeholder="Wiadomość do wszystkich sesji…"><button>Wyślij do *</button></form>
 <script>
+// Everything is keyed by the broker's stable peer key; names are only labels and can change.
 const cols = document.getElementById("cols");
-const ui = {};            // agent -> {log, state, q, cur:{text,thought}}
-const tools = {};         // agent:toolId -> element
+const ui = {};        // key -> column state
+const names = {};     // key -> current display name
+const tools = {};     // key:toolId -> element
 
 function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
 function scroll(log) { if (log.scrollHeight - log.scrollTop - log.clientHeight < 120) log.scrollTop = log.scrollHeight; }
-async function post(url, body) { await fetch(url, { method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify(body) }); }
+async function post(url, body) { return fetch(url, { method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify(body) }); }
+const keyOfName = (n) => Object.keys(names).find((k) => names[k] === n);
+
+/** A peer label that follows renames: <span data-key> updated in place. */
+function who(key, fallback) {
+  const span = el("span", "peer", key ? (names[key] ?? fallback) : fallback);
+  if (key) span.dataset.key = key;
+  return span;
+}
+function relabel(key) {
+  for (const e of document.querySelectorAll(`span.peer[data-key="${CSS.escape(key)}"]`)) e.textContent = names[key];
+}
 
 const KIND = { acp: "GUI", cli: "terminal", mcp: "MCP" };
 function infoText(p) { return `${KIND[p.kind] ?? p.kind}${p.role ? " · " + p.role : ""} · ${p.cwd || "?"}${p.model ? " · " + p.model : ""}`; }
 
+function emptyCheck() {
+  document.getElementById("empty")?.remove();
+  if (!Object.keys(ui).length) {
+    const d = el("div"); d.id = "empty";
+    d.innerHTML = 'Brak sesji. Dodaj sesję przyciskiem „+ sesja” albo uruchom <code>copilot</code> w terminalu z zainstalowanym rozszerzeniem.';
+    cols.append(d);
+  }
+}
+
 function makeCol(p) {
-  const { name, kind } = p;
-  if (ui[name]) return updateCol(p);
+  const { key, kind } = p;
+  names[key] = p.name;
+  if (ui[key]) return updateCol(p);
   document.getElementById("empty")?.remove();
   const col = el("section", "col");
-  const h = el("h2"); const title = el("span", null, name); h.append(title);
-  const state = el("span", "state", kind === "acp" ? "start…" : (p.online ? "online" : "offline")); const q = el("span", "q");
+  const h = el("h2"); const title = who(key, p.name); h.append(title);
+  if (kind !== "mcp") {
+    title.style.cursor = "pointer"; title.title = "kliknij, aby zmienić nazwę";
+    title.onclick = async () => {
+      const cur = names[key]; const n = prompt(`Nowa nazwa dla „${cur}” (a-z, 0-9, -, _):`, cur);
+      if (!n || n === cur) return;
+      const r = await post("/api/rename", { name: cur, newName: n });
+      if (!r.ok) alert((await r.json().catch(() => ({}))).error ?? r.statusText);
+    };
+  }
+  const state = el("span", "state"); const q = el("span", "q");
   const stop = el("button", null, "stop"); stop.style.marginLeft = "auto"; stop.title = "session/cancel";
-  stop.onclick = () => post("/api/cancel", { agent: col.dataset.name });
+  stop.onclick = () => post("/api/cancel", { agent: names[key] });
   if (kind !== "acp") stop.style.visibility = "hidden";
-  const close = el("button", null, "×"); close.title = kind === "acp" ? "zamknij sesję" : "usuń z relay (sesja w terminalu działa dalej)";
-  close.onclick = () => { const n = col.dataset.name; if (confirm(kind === "acp" ? `Zamknąć sesję ${n}?` : `Usunąć ${n} z relay?`)) fetch(`/api/sessions?name=${encodeURIComponent(n)}`, { method:"DELETE" }); };
-  h.append(state, q, stop, close); h.title = p.role || "";
-  const info = el("div", "cwd", infoText(p)); info.title = info.textContent;
+  const close = el("button", null, "×");
+  close.title = kind === "acp" ? "zamknij sesję" : "usuń z relay (sesja w terminalu działa dalej)";
+  close.onclick = () => {
+    const u = ui[key];
+    if (u?.gone) { removeCol(key); return; } // already gone from the broker → just hide the column
+    const n = names[key];
+    if (confirm(kind === "acp" ? `Zamknąć sesję ${n}?` : `Usunąć ${n} z relay?`)) fetch(`/api/sessions?name=${encodeURIComponent(n)}`, { method:"DELETE" });
+  };
+  h.append(state, q, stop, close);
+  const info = el("div", "cwd");
   const log = el("div", "log");
-  const form = el("form"); const ta = el("textarea"); ta.placeholder = `Wiadomość do ${name} (Enter wysyła, Shift+Enter = nowa linia)`;
+  const form = el("form"); const ta = el("textarea");
   const btn = el("button", null, "→"); form.append(ta, btn);
   ta.onkeydown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); } };
-  form.onsubmit = (e) => { e.preventDefault(); const text = ta.value.trim(); if (!text) return; ta.value = ""; post("/api/send", { to: col.dataset.name, text }); };
-  col.dataset.name = name;
+  form.onsubmit = (e) => { e.preventDefault(); const text = ta.value.trim(); if (!text) return; ta.value = ""; post("/api/send", { to: names[key], text }); };
   col.append(h, info, log, form); cols.append(col);
-  ui[name] = { col, log, state, q, title, info, kind, cur: null };
+  ui[key] = { col, log, state, q, info, ta, kind, cur: null, gone: false };
   if (kind !== "acp") log.append(el("div", "tool", kind === "cli" ? "Sesja w terminalu: widać tu tylko wiadomości relay." : "Klient MCP: wiadomości trafiają do jego skrzynki."));
+  updateCol(p);
 }
 
 function updateCol(p) {
-  const u = ui[p.name]; if (!u) return makeCol(p);
+  const u = ui[p.key]; if (!u) return makeCol(p);
+  names[p.key] = p.name; relabel(p.key);
+  u.gone = false; u.col.classList.remove("gone");
   u.info.textContent = u.info.title = infoText(p);
-  if (u.kind !== "acp") { u.state.textContent = p.online ? "online" : "offline"; u.state.className = "state " + (p.online ? "idle" : "exited"); }
+  u.ta.placeholder = `Wiadomość do ${p.name} (Enter wysyła, Shift+Enter = nowa linia)`;
+  if (u.kind !== "acp") setState(u, p.online ? "online" : "offline", p.online ? "idle" : "exited");
+  else if (!u.state.textContent) setState(u, "start…", "");
 }
 
-function renameCol(old, p) {
-  const u = ui[old]; if (!u) return makeCol(p);
-  delete ui[old]; ui[p.name] = u; u.col.dataset.name = p.name; u.title.textContent = p.name; updateCol(p);
-}
+function setState(u, text, cls) { u.state.textContent = text; u.state.className = "state " + cls; }
 
-function emptyCheck() {
-  if (!Object.keys(ui).length) cols.innerHTML = '<div id="empty">Brak sesji. Dodaj sesję przyciskiem „+ sesja” albo uruchom <code>copilot</code> w terminalu z zainstalowanym rozszerzeniem.</div>';
-}
+function removeCol(key) { ui[key]?.col.remove(); delete ui[key]; emptyCheck(); }
 
-function chunk(agent, kind, text) {
-  const u = ui[agent]; if (!u) return;
+function chunk(u, kind, text) {
   if (!u.cur || u.cur.kind !== kind) {
     const e = el("div", "m " + (kind === "thought" ? "thought" : "out"));
     u.log.append(e); u.cur = { kind, e };
@@ -116,53 +154,63 @@ function chunk(agent, kind, text) {
   u.cur.e.textContent += text; scroll(u.log);
 }
 
+function colFor(ev) { return ui[ev.key] ?? ui[keyOfName(ev.agent)]; }
+
 function handle(ev) {
-  const u = ui[ev.agent];
   switch (ev.type) {
-    case "chunk": chunk(ev.agent, ev.kind, ev.text); break;
+    case "peer_added": makeCol(ev); break;
+    case "peer_updated": updateCol(ev); break;
+    case "peer_renamed": names[ev.key] = ev.name; updateCol(ev); break;
+    case "peer_removed": {
+      // closed by the user (×) → drop the column; dropped after a timeout / exit → keep the history, grey it out
+      if (ev.reason === "user" || ev.kind === "mcp") { removeCol(ev.key); break; }
+      const u = ui[ev.key]; if (!u) break;
+      u.gone = true; u.col.classList.add("gone"); setState(u, "zakończona", "exited");
+      break;
+    }
     case "message": {
-      const dst = ui[ev.to]; if (!dst) break;
-      dst.cur = null;
-      const e = el("div", "m in"); e.append(el("span", "who", `← ${ev.from}`), document.createTextNode(ev.text));
-      dst.log.append(e); scroll(dst.log);
-      if (ev.from !== "user" && ui[ev.from]) {
-        const s = el("div", "tool completed", `→ ${ev.to}: ${ev.text.slice(0, 120)}${ev.text.length > 120 ? "…" : ""}`);
-        ui[ev.from].log.append(s); ui[ev.from].cur = null;
+      const dst = ui[ev.toKey] ?? ui[keyOfName(ev.to)];
+      if (dst) {
+        dst.cur = null;
+        const e = el("div", "m in"); const w = el("span", "who", "← "); w.append(who(ev.fromKey, ev.from));
+        e.append(w, document.createTextNode(ev.text)); dst.log.append(e); scroll(dst.log);
+      }
+      const src = ev.fromKey ? ui[ev.fromKey] : null;
+      if (src) {
+        const s = el("div", "tool completed", "→ "); s.append(who(ev.toKey, ev.to), document.createTextNode(`: ${ev.text.slice(0, 120)}${ev.text.length > 120 ? "…" : ""}`));
+        src.log.append(s); src.cur = null; scroll(src.log);
       }
       if (ev.budget != null) document.getElementById("budget").textContent = `budżet wiadomości agent→agent: ${ev.budget}`;
       break;
     }
+    case "chunk": { const u = colFor(ev); if (u) chunk(u, ev.kind, ev.text); break; }
     case "tool": {
-      if (!u) break;
-      const key = ev.agent + ":" + ev.id; let e = tools[key];
-      if (!e) { e = el("div", "tool"); tools[key] = e; u.log.append(e); u.cur = null; }
+      const u = colFor(ev); if (!u) break;
+      const k = (ev.key ?? ev.agent) + ":" + ev.id; let e = tools[k];
+      if (!e) { e = el("div", "tool"); tools[k] = e; u.log.append(e); u.cur = null; }
       if (ev.title) e.dataset.title = ev.title;
       e.textContent = e.dataset.title || ev.id; e.className = "tool " + (ev.status || "pending"); scroll(u.log);
       break;
     }
-    case "status": if (u) { u.state.textContent = ev.state; u.state.className = "state " + ev.state; } break;
-    case "queue": if (u) u.q.textContent = ev.n ? `kolejka: ${ev.n}` : ""; break;
-    case "turn_end": if (u) u.cur = null; break;
+    case "status": { const u = colFor(ev); if (u) setState(u, ev.state, ev.state); break; }
+    case "queue": { const u = colFor(ev); if (u) u.q.textContent = ev.n ? `kolejka: ${ev.n}` : ""; break; }
+    case "turn_end": { const u = colFor(ev); if (u) u.cur = null; break; }
     case "permission": {
-      if (!u) break;
+      const u = colFor(ev); if (!u) break;
       const box = el("div", "perm"); box.id = "perm-" + ev.reqId;
       box.append(el("div", null, `Uprawnienie: ${ev.toolCall?.title ?? ev.toolCall?.toolCallId ?? "?"}`));
       for (const o of ev.options ?? []) {
-        const b = el("button", null, o.name); b.onclick = () => post("/api/permission", { agent: ev.agent, reqId: ev.reqId, optionId: o.optionId });
+        const b = el("button", null, o.name); b.onclick = () => post("/api/permission", { agent: names[ev.key] ?? ev.agent, reqId: ev.reqId, optionId: o.optionId });
         box.append(b);
       }
-      const c = el("button", null, "Anuluj"); c.onclick = () => post("/api/permission", { agent: ev.agent, reqId: ev.reqId, optionId: null });
+      const c = el("button", null, "Anuluj"); c.onclick = () => post("/api/permission", { agent: names[ev.key] ?? ev.agent, reqId: ev.reqId, optionId: null });
       box.append(c); u.log.append(box); u.cur = null; scroll(u.log);
       break;
     }
-    case "peer_added": makeCol(ev); break;
-    case "peer_updated": updateCol(ev); break;
-    case "peer_renamed": renameCol(ev.old, ev); break;
-    case "peer_removed": ui[ev.name]?.col.remove(); delete ui[ev.name]; emptyCheck(); break;
     case "permission_done": document.getElementById("perm-" + ev.reqId)?.remove(); break;
     case "system": {
-      const targets = ev.agent && ui[ev.agent] ? [ui[ev.agent]] : Object.values(ui);
-      for (const x of targets) { x.log.append(el("div", "sys", ev.text)); x.cur = null; }
+      const one = colFor(ev);
+      for (const x of one ? [one] : Object.values(ui)) { x.log.append(el("div", "sys", ev.text)); x.cur = null; }
       break;
     }
   }
@@ -176,7 +224,7 @@ document.getElementById("bcast").onsubmit = (e) => {
 document.getElementById("newSess").onsubmit = async (e) => {
   e.preventDefault(); const f = e.target; const err = document.getElementById("err"); err.textContent = "uruchamiam…";
   const body = Object.fromEntries([...new FormData(f)].filter(([, v]) => v.trim()));
-  const r = await fetch("/api/sessions", { method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify(body) });
+  const r = await post("/api/sessions", body);
   if (r.ok) { f.reset(); err.textContent = ""; } else err.textContent = (await r.json().catch(() => ({}))).error ?? r.statusText;
 };
 
@@ -186,9 +234,10 @@ es.onerror = () => document.getElementById("conn").textContent = "rozłączono �
 es.onmessage = (m) => {
   const ev = JSON.parse(m.data);
   if (ev.type === "hello") {
-    cols.innerHTML = ""; for (const k in ui) delete ui[k]; for (const k in tools) delete tools[k];
-    // replay full history (sessions appear/disappear in order), then make sure live ones exist
-    ev.history.forEach(handle); ev.peers.forEach(makeCol); emptyCheck();
+    cols.innerHTML = ""; for (const o of [ui, names, tools]) for (const k in o) delete o[k];
+    ev.history.forEach(handle);
+    ev.peers.forEach(makeCol);          // live peers (also fixes labels to current names)
+    emptyCheck();
   } else handle(ev);
 };
 </script>

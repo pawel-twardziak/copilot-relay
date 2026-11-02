@@ -12,11 +12,15 @@ export class RelayClient {
    * @param {string} [o.brokerScript] path to server.mjs – auto-started if the broker is down
    * @param {(m:{from:string,text:string,prompt:string})=>void} o.onMessage
    * @param {(name:string)=>void} [o.onRegistered]
+   * @param {(name:string)=>void} [o.onRenamed]   renamed elsewhere (GUI)
    * @param {(msg:string)=>void} [o.log]
    */
   constructor(o) {
     Object.assign(this, o);
     this.name = o.name ?? null;
+    // explicitly requested name (env) is sent only on the first connection; afterwards the broker's
+    // persistent store is the source of truth (so a rename from the GUI survives reconnects)
+    this.requestedName = o.name ?? null;
     this.log ??= () => {};
     this.stopped = false;
     this.connected = false;
@@ -43,10 +47,11 @@ export class RelayClient {
   }
 
   async rename(name, role) {
-    const r = await this.#post("/api/peer/rename", { key: this.key, name, role });
+    this.selfRenaming = true; // the broker echoes a "renamed" event back to us; don't report it twice
+    const r = await this.#post("/api/peer/rename", { key: this.key, name, role }).finally(() => (this.selfRenaming = false));
     const j = await r.json();
     if (!r.ok) throw new Error(j.error ?? r.statusText);
-    this.name = j.name;
+    this.name = j.name; // set before any late "renamed" echo arrives → it is ignored as unchanged
     return j.name;
   }
 
@@ -91,7 +96,7 @@ export class RelayClient {
   async #connectOnce() {
     this.abort = new AbortController();
     const qs = new URLSearchParams({ key: this.key, cwd: this.cwd ?? "" });
-    if (this.name) qs.set("name", this.name);
+    if (this.requestedName) qs.set("name", this.requestedName);
     const res = await this.#fetch(`/api/peer/stream?${qs}`, { signal: this.abort.signal, headers: { accept: "text/event-stream" } });
     if (!res.ok || !res.body) throw new Error(`broker answered ${res.status}`);
     this.connected = true;
@@ -114,7 +119,12 @@ export class RelayClient {
         const payload = JSON.parse(data);
         if (event === "registered") {
           this.name = payload.name;
+          this.requestedName = null;
           this.onRegistered?.(payload.name);
+        } else if (event === "renamed") {
+          const changed = payload.name !== this.name;
+          this.name = payload.name;
+          if (changed && !this.selfRenaming) this.onRenamed?.(payload.name);
         } else if (event === "message") {
           this.onMessage(payload);
         }
