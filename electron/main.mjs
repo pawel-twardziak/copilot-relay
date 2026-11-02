@@ -168,7 +168,7 @@ function attach(sessionId, conn, cwd, relay) {
     if (method !== "session/update" || params?.sessionId !== sessionId) return;
     const u = params.update;
     if (u?.sessionUpdate === "tool_call" && u.title) entry.toolTitles.set(u.toolCallId, u.title);
-    if (u?.sessionUpdate === "usage_update") usage.context(sessionId, { used: u.used, size: u.size });
+    if (u?.sessionUpdate === "usage_update" && open.get(sessionId) === entry) usage.context(sessionId, { used: u.used, size: u.size });
     send("acp:update", { sessionId, update: u });
   });
   conn.on("request:session/request_permission", (rpcId, params) => {
@@ -251,7 +251,7 @@ handle("sessions:open", async (sessionId, cwd) => {
   const entry = attach(sessionId, conn, cwd, relay);
   try {
     const res = await conn.request("session/load", { sessionId, cwd, mcpServers: relay.mcpServers });
-    usage.refresh(sessionId);
+    if (open.get(sessionId) === entry) usage.refresh(sessionId);
     return { sessionId, cwd, configOptions: res?.configOptions ?? [] };
   } catch (e) {
     entry.relay?.stop();
@@ -477,7 +477,7 @@ handle("sessions:prompt", async (sessionId, text, source = "relay") => {
     return res?.stopReason ?? "end_turn";
   } finally {
     entry.prompting = false;
-    usage.refresh(sessionId);
+    if (open.get(sessionId) === entry) usage.refresh(sessionId); // not after a close/truncate mid-turn
   }
 });
 
