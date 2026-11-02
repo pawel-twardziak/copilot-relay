@@ -1,0 +1,71 @@
+{
+  "name": "copilot-relay-desktop",
+  "version": "0.1.0",
+  "description": "Desktop GUI for GitHub Copilot CLI sessions over ACP: resume existing sessions, start new ones in any folder",
+  "main": "main.mjs",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "copy-relay": "node -e \"require('fs').copyFileSync('../extension/copilot-relay/relay-client.mjs','relay-client.mjs')\"",
+    "prestart": "npm run copy-relay",
+    "start": "electron .",
+    "predist": "npm run copy-relay",
+    "dist": "electron-builder --publish never",
+    "dist:win": "npm run dist -- --win",
+    "dist:linux": "npm run dist -- --linux"
+  },
+  "dependencies": {
+    "dompurify": "^3.4.17",
+    "marked": "^18.1.2"
+  },
+  "devDependencies": {
+    "electron": "^45.2.1",
+    "electron-builder": "^26.18.0"
+  },
+  "author": "Paweł Twardziak",
+  "homepage": "https://github.com/pawel-twardziak/copilot-relay",
+  "build": {
+    "appId": "io.github.pawel-twardziak.copilot-sessions",
+    "productName": "Copilot Sessions",
+    "files": [
+      "main.mjs",
+      "acp.mjs",
+      "relay-client.mjs",
+      "preload.cjs",
+      "renderer/**",
+      "package.json",
+      "build/icon.png"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "artifactName": "Copilot-Sessions-Setup-${version}.${ext}",
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "portable": {
+      "artifactName": "Copilot-Sessions-Portable-${version}.${ext}"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Development",
+      "executableName": "copilot-sessions",
+      "maintainer": "Paweł Twardziak <https://github.com/pawel-twardziak>",
+      "artifactName": "Copilot-Sessions-${version}-${arch}.${ext}",
+      "syncDesktopName": true
+    },
+    "icon": "build/icon.png"
+  },
+  "desktopName": "copilot-sessions.desktop"
+}

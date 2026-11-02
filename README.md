@@ -72,6 +72,17 @@ MCP clients get `list_sessions`, `send_message`, `set_name`, `read_inbox` and `w
 Don't add this MCP server to `~/.copilot/mcp-config.json` if the extension is installed: Copilot CLI sessions
 would then have two sets of relay tools.
 
+## Desktop app (Electron)
+
+[`electron/`](electron/README.md) contains a standalone desktop app for Windows, macOS and Linux. It resumes any
+existing Copilot CLI session, or starts a new one in a chosen folder, over ACP. Copilot doesn't load extensions in
+ACP mode, so the app connects its sessions to the broker itself, with the same names and the same tools.
+
+```bash
+npm run app:install   # once
+npm run app
+```
+
 ## Installing on a company laptop (Windows / macOS)
 
 ### 1. Prerequisites
@@ -199,7 +210,7 @@ session, whether in a terminal (detected by the extension's `onUserPromptSubmitt
 | `POST /api/send` `{ to: "x" \| "*", text }` | human message to a peer |
 | `POST /api/permission`, `POST /api/cancel` | ACP permission answers / cancel |
 | `GET /events` | GUI SSE stream (with history replay) |
-| `GET /api/peer/stream?key=&name=&cwd=` | extension: register + receive pushes (SSE) |
+| `GET /api/peer/stream?key=&name=&cwd=&alias=` | extension / desktop app: register + receive pushes (SSE); `alias` maps an MCP `?peer=` token to `key` |
 | `POST /api/peer/send` / `rename` / `human`, `GET /api/peer/list` | extension calls |
 | `/mcp` | MCP endpoint (stateful; `?peer=<key>` is used internally for ACP sessions) |
 

@@ -7,7 +7,9 @@
     "start": "node server.mjs",
     "debug": "RELAY_DEBUG=1 node server.mjs",
     "install-extension": "node scripts/install-extension.mjs",
-    "uninstall-extension": "node scripts/install-extension.mjs --uninstall"
+    "uninstall-extension": "node scripts/install-extension.mjs --uninstall",
+    "app:install": "npm --prefix electron install",
+    "app": "npm --prefix electron start"
   },
   "keywords": [],
   "author": "",

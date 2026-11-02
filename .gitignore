@@ -2,3 +2,5 @@ node_modules/
 workspace/*
 !workspace/.gitkeep
 .idea/
+electron/dist/
+electron/relay-client.mjs

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:"
+    />
+    <title>Copilot Sessions</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <aside id="sidebar">
+      <div class="side-actions">
+        <button id="btn-new" class="primary" title="Start a new session in a folder">+ New session</button>
+        <button id="btn-refresh" title="Reload the session list">↻</button>
+        <button id="btn-settings" title="Settings">⚙</button>
+      </div>
+      <input id="search" type="search" placeholder="Filter by title or folder…" />
+      <div id="session-list"></div>
+      <div id="side-status"></div>
+    </aside>
+
+    <main id="main">
+      <div id="empty" class="empty">
+        <h1>Copilot Sessions</h1>
+        <p>Pick a session on the left to resume it, or start a new one in any folder.</p>
+        <button id="btn-new-2" class="primary">+ New session</button>
+      </div>
+      <!-- one .session-view per open session is inserted here -->
+    </main>
+
+    <dialog id="settings">
+      <form method="dialog">
+        <h2>Settings</h2>
+        <label>
+          Copilot CLI command
+          <input id="set-command" placeholder="copilot" spellcheck="false" />
+        </label>
+        <p class="hint" id="set-hint"></p>
+        <label class="check">
+          <span><input id="set-relay" type="checkbox" /> Connect sessions to copilot-relay</span>
+        </label>
+        <p class="hint" id="set-relay-hint"></p>
+        <div class="dialog-actions">
+          <button value="cancel">Cancel</button>
+          <button id="set-save" value="save" class="primary">Save</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="../node_modules/marked/lib/marked.umd.js"></script>
+    <script src="../node_modules/dompurify/dist/purify.min.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
