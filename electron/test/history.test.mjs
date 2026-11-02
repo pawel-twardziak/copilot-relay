@@ -363,7 +363,8 @@ describe("truncateSession", () => {
     assert.ok(text.endsWith("\n"));
     assert.deepEqual(readLines(file), lines.slice(0, 9));
     assert.equal(readEvents(dir).events.length, 9);
-    assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+    // Windows has no POSIX modes (stat reports 0o666), so only check them elsewhere.
+    if (process.platform !== "win32") assert.equal(fs.statSync(file).mode & 0o777, 0o600);
     assert.deepEqual(fs.readdirSync(dir).filter((f) => f.startsWith("events.jsonl")).sort(), ["events.jsonl", "events.jsonl.bak"]);
   });
 
