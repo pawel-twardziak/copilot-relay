@@ -151,6 +151,17 @@ dialog label { display: flex; flex-direction: column; gap: 6px; }
 }
 .msg:hover > .copy, .codewrap:hover > .copy { opacity: 1; }
 .copy:hover { color: var(--text); }
+/* fork / delete actions: in a bar with the Copy button, same look, revealed on hover */
+.acts {
+  position: absolute; top: 4px; right: 4px; display: flex; gap: 4px; opacity: 0; transition: opacity .1s; z-index: 1;
+  user-select: none;
+}
+.acts > .copy { position: static; opacity: 1; }
+.msg:hover > .acts, .tool:hover .acts { opacity: 1; }
+.act { font-size: 11px; padding: 1px 7px; background: var(--panel-2); color: var(--muted); }
+.act:hover { color: var(--text); }
+.acts.inline { position: static; flex: none; }
+.session-view.busy .act { pointer-events: none; opacity: .4; }
 .msg.agent { padding-right: 56px; }
 .msg.user, .msg.relay { padding-right: 56px; }
 .codewrap > pre { margin-top: 0; }

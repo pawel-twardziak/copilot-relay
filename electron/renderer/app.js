@@ -97,6 +97,7 @@ function bubble(cls, text, from) {
   const el = h("div", { class: `msg ${cls}` }, from && h("div", { class: "from" }, `from ${from}`), h("div", { class: "body" }, text), copyBtn(() => text));
   linkify(el);
   el._md = () => `**${from ? `from ${from}` : "You"}:**\n\n${text}`;
+  el._matchText = () => text; // what fork/delete look for in the session history
   return el;
 }
 
@@ -208,6 +209,10 @@ class SessionView {
     this.renderQueued = false;
     this.inbox = []; // relay messages waiting for the session to be idle
     this.relayName = null;
+    this.turn = 0; // user/relay messages so far = the turn ordinal of the latest one (see append)
+    this.turnText = null; // getter for the latest user message's text
+    this.turnReplied = false; // the latest turn's reply already has fork/delete actions
+    this.historyOp = false; // a fork/delete is running
 
     this.titleEl = h("b");
     this.selects = h("span", { class: "selects" });
@@ -330,11 +335,129 @@ class SessionView {
     return this.log.scrollHeight - this.log.scrollTop - this.log.clientHeight < 80;
   }
   append(el) {
+    this.markTurn(el);
     const stick = this.nearBottom();
     this.log.append(el);
     if (stick) this.log.scrollTop = this.log.scrollHeight;
     return el;
   }
+  /** Number user/relay messages (turn ordinals, as in events.jsonl) and give them and the first reply block of
+   *  their turn the fork/delete actions. Elements before the first user message get none. */
+  markTurn(el) {
+    const c = el.classList;
+    if (c.contains("msg") && (c.contains("user") || c.contains("relay"))) {
+      this.turn++;
+      this.turnText = el._matchText ?? (() => "");
+      this.turnReplied = false;
+      Object.assign(el, { _turn: this.turn, _kind: "user" });
+    } else if (this.turn > 0 && !this.turnReplied && ((c.contains("msg") && c.contains("agent")) || (el.tagName === "DETAILS" && c.contains("tool")))) {
+      this.turnReplied = true;
+      // cuts are anchored on user messages: a reply is found through its turn's user message
+      Object.assign(el, { _turn: this.turn, _kind: "reply", _matchText: this.turnText });
+    } else return;
+    this.addActions(el);
+  }
+
+  /** "Fork" / "Delete" buttons next to the element's Copy button (in a tool card: in its summary line). */
+  addActions(el) {
+    const user = el._kind === "user";
+    const act = (label, title, action) => {
+      const b = h("button", { class: "act", title }, label);
+      b.addEventListener("click", (e) => {
+        e.stopPropagation();
+        e.preventDefault(); // inside a <summary> a click would toggle the tool card
+        this.historyAction(el, action);
+      });
+      return b;
+    };
+    const fork = act("Fork", user ? "Start a new session from before this message" : "Start a new session that ends with this reply", "fork");
+    const del = act("Delete", user ? "Delete this message and everything after it" : "Delete this reply and everything after it", "delete");
+    if (el.tagName === "DETAILS") {
+      el.querySelector("summary").append(h("span", { class: "acts inline" }, fork, del));
+      return;
+    }
+    const copy = [...el.children].find((c) => c.classList.contains("copy"));
+    const bar = h("div", { class: "acts" }, fork, del);
+    if (copy) {
+      copy.replaceWith(bar);
+      bar.append(copy);
+    } else el.append(bar);
+  }
+
+  /** Fork a new session from, or delete the history from, a marked message (see markTurn). */
+  async historyAction(el, action) {
+    if (this.busy || this.dead || this.historyOp) return;
+    const where = el._kind === "user" ? "beforeUser" : action === "fork" ? "afterReply" : "beforeReply";
+    const target = { ordinal: el._turn, text: String(el._matchText?.() ?? ""), where };
+    this.historyOp = true;
+    try {
+      if (action === "fork") await this.forkFrom(target);
+      else await this.deleteFrom(target, el._kind === "user" ? "this message" : "this reply");
+    } finally {
+      this.historyOp = false;
+    }
+  }
+
+  async forkFrom(target) {
+    this.statusEl.textContent = "Creating a fork…";
+    let res;
+    try {
+      res = await api.forkSession(this.sessionId, target);
+    } catch (e) {
+      this.error(`Could not fork: ${e.message}`);
+      return;
+    } finally {
+      if (!this.busy && !this.dead) this.setBusy(false); // restores the status line
+    }
+    await refresh(); // the list has to contain the fork before it is opened
+    await openSession({ sessionId: res.sessionId, cwd: res.cwd ?? this.cwd, title: res.name });
+    const v = views.get(res.sessionId);
+    if (v && res.prefill) {
+      v.input.value = res.prefill;
+      v.autosize();
+      v.input.focus();
+    }
+  }
+
+  async deleteFrom(target, what) {
+    let count;
+    try {
+      count = await api.countFrom(this.sessionId, target);
+    } catch (e) {
+      this.error(`Could not delete: ${e.message}`);
+      return;
+    }
+    const n = count.removedUserMessages;
+    const ok = confirm(
+      `Delete ${what} and everything after it? (${n} message${n === 1 ? "" : "s"})\n\n` +
+        "This cannot be undone in the app (a backup is kept as events.jsonl.bak). Files changed by the agent are not reverted. " +
+        "Don't use this while the session is open in a terminal Copilot CLI.",
+    );
+    if (!ok || this.busy || this.dead) return;
+    const { sessionId, cwd, title, inbox } = this;
+    this.setBusy(true);
+    this.statusEl.textContent = "Deleting…";
+    let failure = null;
+    try {
+      await api.truncateSession(sessionId, target); // main closes the session first
+    } catch (e) {
+      failure = e;
+      // it may have failed before or after main closed the session: close it for sure, the reopen replays it
+      await api.closeSession(sessionId).catch(() => {});
+    }
+    // rebuild the view from the replay (not closeView: the session is already closed)
+    views.delete(sessionId);
+    this.el.remove();
+    await openSession({ sessionId, cwd, title });
+    const v = views.get(sessionId);
+    if (!v) return;
+    if (failure) v.error(`Could not delete: ${failure.message}`);
+    if (inbox.length) {
+      v.inbox.push(...inbox); // relay messages that were waiting in the old view
+      v.pump();
+    }
+  }
+
   system(text) {
     this.flush();
     return this.append(h("div", { class: "msg system" }, text));
@@ -346,6 +469,7 @@ class SessionView {
 
   setBusy(b) {
     this.busy = b;
+    this.el.classList.toggle("busy", b || this.dead); // disables the fork/delete actions
     this.sendBtn.disabled = b || this.dead;
     this.stopBtn.disabled = !b || this.dead;
     this.input.disabled = this.dead;
@@ -416,6 +540,7 @@ class SessionView {
       else {
         el = h("div", { class: `msg ${type}` }, body, copyBtn(() => run.text));
         el._md = () => (!run.text.trim() ? null : type === "user" ? `**You:**\n\n${run.text}` : run.text);
+        if (type === "user") el._matchText = () => run.text; // replayed text arrives after append
       }
       run.el = el;
       this.append(el);
