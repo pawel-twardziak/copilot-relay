@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { AcpConnection } from "./acp.mjs";
-import { describeCut, forkSession, truncateSession } from "./history.mjs";
+import { countUserMessages, describeCut, forkSession, truncateSession } from "./history.mjs";
 import { createUsagePusher } from "./usage.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -482,6 +482,9 @@ handle("sessions:prompt", async (sessionId, text, source = "relay") => {
     if (open.get(sessionId) === entry) usage.refresh(sessionId); // not after a close/truncate mid-turn
   }
 });
+
+// Count of user messages Copilot recorded in events.jsonl (0 before the first turn).
+handle("sessions:userMessages", async (sessionId) => countUserMessages(sessionId));
 
 // Copilot's own /rename command: it runs no model turn and isn't stored in the history, so turn numbers
 // used by fork/delete stay right. Copilot saves the name in workspace.yaml (user_named: true).

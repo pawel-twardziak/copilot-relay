@@ -7,6 +7,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
 import {
   countFrom,
+  countUserMessages,
   cutIndex,
   describeCut,
   forkSession,
@@ -416,5 +417,31 @@ describe("truncateSession", () => {
     } finally {
       fs.rmSync(outside, { recursive: true, force: true });
     }
+  });
+});
+
+describe("countUserMessages", () => {
+  test("counts user.message events", () => {
+    const id = randomUUID();
+    makeSession({
+      id,
+      events: [
+        ev("session.start", { sessionId: id }),
+        ev("user.message", { content: "one" }),
+        ev("assistant.message", { content: "reply" }),
+        ev("assistant.turn_end"), // index 3 is rewritten by makeSession, so it must not be a user message
+        ev("user.message", { content: "two" }),
+        ev("assistant.message", { content: "reply" }),
+      ],
+    });
+    assert.equal(countUserMessages(id), 2);
+  });
+
+  test("is 0 without events.jsonl", () => {
+    const id = randomUUID();
+    const dir = path.join(home, "session-state", id);
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, "workspace.yaml"), WORKSPACE(id), { mode: 0o600 });
+    assert.equal(countUserMessages(id), 0);
   });
 });
