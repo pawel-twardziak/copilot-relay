@@ -154,8 +154,9 @@ export class Registry extends EventEmitter {
       text,
       prompt:
         `[from ${from.name}]\n${text}\n\n` +
-        `(Relay note: ${from.name} cannot see your chat output. If a reply is needed, ` +
-        `send it with the relay send_message tool (relay_send_message), to: "${from.name}".)`,
+        `(Relay note: ${from.name} cannot see your chat output — only your user can. ` +
+        `If this message asks you something or expects an answer, reply with the relay send_message tool ` +
+        `(relay_send_message), to: "${from.name}"; a summary in your chat does not reach them.)`,
     });
     const how = to.kind === "mcp" ? "placed in their inbox" : to.online ? "delivered" : "queued (recipient briefly offline)";
     return `Message to ${to.name} ${how}. Their reply will arrive as a new message — do not wait for it.`;
