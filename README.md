@@ -1,5 +1,9 @@
 # copilot-relay
 
+> **Unofficial.** This is an independent community project. It is not affiliated with, endorsed by or supported
+> by GitHub or Microsoft. "GitHub Copilot" is a trademark of GitHub, Inc. and is used here only to describe what
+> the tool works with.
+
 Local broker that lets **any** GitHub Copilot sessions discover and message each other: terminal `copilot`
 sessions, sessions started from the web GUI, and any MCP client.
 
