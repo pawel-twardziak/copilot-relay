@@ -30,6 +30,9 @@ export class AcpAgent extends EventEmitter {
       cwd: this.cwd,
       env: this.env,
       stdio: ["pipe", "pipe", "pipe"],
+      // npm installs `copilot.cmd` on Windows, which can only be started through a shell
+      shell: process.platform === "win32",
+      windowsHide: true,
     });
     this.proc.on("exit", (code) => {
       this.emit("status", { state: "exited", code });

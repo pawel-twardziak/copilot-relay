@@ -1,6 +1,7 @@
 // Broker client used by the copilot-relay extension. No dependencies (Node >= 18).
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import path from "node:path";
 
 export class RelayClient {
   /**
@@ -10,6 +11,7 @@ export class RelayClient {
    * @param {string} o.cwd
    * @param {string} [o.name]     preferred name
    * @param {string} [o.brokerScript] path to server.mjs – auto-started if the broker is down
+   * @param {string} [o.nodePath]  Node executable used to start the broker
    * @param {(m:{from:string,text:string,prompt:string})=>void} o.onMessage
    * @param {(name:string)=>void} [o.onRegistered]
    * @param {(name:string)=>void} [o.onRenamed]   renamed elsewhere (GUI)
@@ -88,7 +90,15 @@ export class RelayClient {
   #autostart() {
     this.autostarted = true;
     if (!existsSync(this.brokerScript)) return this.log(`relay: broker script not found: ${this.brokerScript}`);
-    const child = spawn(process.execPath, [this.brokerScript], { detached: true, stdio: "ignore" });
+    // inside Copilot, process.execPath is the copilot binary – use the recorded Node (or `node` from PATH)
+    const node = this.nodePath || "node";
+    const child = spawn(node, [this.brokerScript], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+      cwd: path.dirname(this.brokerScript),
+    });
+    child.on("error", (e) => this.log(`relay: could not start the broker with ${node}: ${e.message}`));
     child.unref();
     this.log("relay: broker was not running — started it in the background");
   }

@@ -21,8 +21,18 @@ for (const f of ["extension.mjs", "relay-client.mjs"]) cpSync(path.join(root, "e
 const noAutostart = process.argv.includes("--no-autostart");
 writeFileSync(
   path.join(dest, "config.json"),
-  JSON.stringify({ url: `http://127.0.0.1:${port}`, brokerScript: noAutostart ? null : path.join(root, "server.mjs") }, null, 2) + "\n",
+  JSON.stringify(
+    {
+      url: `http://127.0.0.1:${port}`,
+      brokerScript: noAutostart ? null : path.join(root, "server.mjs"),
+      // Extensions run inside the `copilot` binary (process.execPath = copilot, not node),
+      // so remember the Node that ran this installer to start the broker with.
+      nodePath: process.execPath,
+    },
+    null,
+    2,
+  ) + "\n",
 );
 console.log(`Installed copilot-relay extension → ${dest}`);
-console.log(noAutostart ? "Broker autostart: off (run `npm start` yourself)" : `Broker autostart: ${path.join(root, "server.mjs")}`);
+console.log(noAutostart ? "Broker autostart: off (run `npm start` yourself)" : `Broker autostart: ${process.execPath} ${path.join(root, "server.mjs")}`);
 console.log("Start a new `copilot` session (or /clear in a running one) to load it. Check with /env.");

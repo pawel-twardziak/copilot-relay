@@ -44,7 +44,7 @@ http://127.0.0.1:7777 shows the session. If not, run `grep -i extension ~/.copil
 ### Session names
 
 Each terminal session gets a random name (e.g. `swift-otter`) the first time it connects. The broker stores
-the name per Copilot session ID in `~/.local/state/copilot-relay/names.json`, so it survives broker restarts
+the name per Copilot session ID in `names.json` (paths in the table below), so it survives broker restarts
 and `copilot --resume`. To change it:
 
 - type `/relay-name new-name` in the session (`/relay-name new-name | role text` also sets a role, and `/relay-name` alone shows the current name);
@@ -67,6 +67,118 @@ MCP clients get `list_sessions`, `send_message`, `set_name`, `read_inbox` and `w
 
 Don't add this MCP server to `~/.copilot/mcp-config.json` if the extension is installed: Copilot CLI sessions
 would then have two sets of relay tools.
+
+## Installing on a company laptop (Windows / macOS)
+
+### 1. Prerequisites
+
+- **Copilot CLI** installed and signed in (`copilot --version`, `copilot login`). On Business/Enterprise plans
+  an admin must have Copilot CLI enabled in the organization's policies.
+- **Node.js 18+** (22 LTS recommended) and **Git**. Check with `node -v`.
+- Access to the npm registry. Behind a corporate proxy, run
+  `npm config set proxy http://proxy:port` and `npm config set https-proxy http://proxy:port`, or point npm at the
+  company registry with `npm config set registry <url>`.
+
+### 2. Get the code
+
+The repo has no shared remote. Either push it to a GitHub repo you can reach from the laptop and `git clone` it,
+or carry it over as a single file:
+
+```bash
+# on the machine that has the repo
+git bundle create copilot-relay.bundle --all
+# on the laptop
+git clone copilot-relay.bundle copilot-relay
+```
+
+### 3. Install
+
+```bash
+cd copilot-relay
+npm install
+npm run install-extension
+```
+
+`install-extension` writes absolute paths (repo location and the current `node` executable) into the installed
+extension's `config.json`. **Run it again after you move the repo or switch Node versions** (nvm, nvm-windows,
+fnm, Homebrew upgrade). Otherwise the broker autostart points at a path that no longer exists.
+
+### 4. Enable it in Copilot
+
+1. Inside `copilot`, run `/experimental on` once, because extensions are an experimental feature.
+2. Start a **new** `copilot` session and approve the `copilot-relay` extension when asked.
+3. Check that it works: `/relay` shows your name and the other sessions, `/env` lists the extension, and
+   http://127.0.0.1:7777 shows the GUI. The first session starts the broker automatically.
+
+Setting a name at startup:
+
+| shell | command |
+|---|---|
+| macOS (zsh/bash) | `COPILOT_RELAY_NAME=backend copilot` |
+| Windows PowerShell | `$env:COPILOT_RELAY_NAME="backend"; copilot` (stays set for that PowerShell window) |
+| Windows cmd | `set COPILOT_RELAY_NAME=backend && copilot` |
+
+You can also just use `/relay-name backend` inside the session.
+
+### 5. Where things live
+
+| | macOS | Windows |
+|---|---|---|
+| installed extension | `~/.copilot/extensions/copilot-relay/` | `%USERPROFILE%\.copilot\extensions\copilot-relay\` |
+| session names | `~/Library/Application Support/copilot-relay/names.json` | `%LOCALAPPDATA%\copilot-relay\names.json` |
+| Copilot logs | `~/.copilot/logs/` | `%USERPROFILE%\.copilot\logs\` |
+| managed policy | `/etc/github-copilot/policy.d/*.json` | `C:\ProgramData\GitHub\Copilot\policy.d\*.json`, registry `HKLM\Software\Policies\GitHub\Copilot` |
+
+`$COPILOT_HOME`, if set, replaces `~/.copilot` and `%USERPROFILE%\.copilot`.
+
+### 6. If it doesn't work
+
+- **`Unknown command: /relay-name`** means an old extension version is installed or the session started before
+  the install. Run `npm run install-extension` and start a new session.
+- **The extension is not listed in `/env`** means experimental mode is off, or a managed policy disables extensions or hooks.
+  Look in the policy locations above, or ask IT.
+- **`Extension "user:copilot-relay" was denied permission access`** means the extension was never approved. It is always
+  denied in `copilot -p` (prompt mode). Approve it in an interactive session.
+- **The broker doesn't start by itself.** Start it manually with `npm start` and check that `nodePath` in the installed
+  `config.json` points at an existing `node`.
+- To read the logs:
+  - macOS: `grep -h -i -E "extension|relay" ~/.copilot/logs/process-*.log | tail -20`
+  - Windows PowerShell:
+    `Select-String -Path "$env:USERPROFILE\.copilot\logs\process-*.log" -Pattern "extension|relay" | Select-Object -Last 20`
+- The broker listens on `127.0.0.1` only. If a firewall dialog appears for `node`, you can deny network access,
+  because loopback connections still work.
+
+### 7. Optional: start the broker at login
+
+Not required, since the first `copilot` session starts it. Only useful if you want the GUI available before that.
+
+**macOS** (`~/Library/LaunchAgents/com.copilot-relay.plist`, then
+`launchctl load ~/Library/LaunchAgents/com.copilot-relay.plist`):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.copilot-relay</string>
+  <key>ProgramArguments</key>
+  <array><string>/usr/local/bin/node</string><string>/Users/YOU/copilot-relay/server.mjs</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+</dict></plist>
+```
+
+(Use the output of `which node` and your repo path.)
+
+**Windows** (PowerShell, once):
+
+```powershell
+$node = (Get-Command node).Source
+$action = New-ScheduledTaskAction -Execute $node -Argument "`"$PWD\server.mjs`"" -WorkingDirectory $PWD
+$trigger = New-ScheduledTaskTrigger -AtLogOn
+Register-ScheduledTask -TaskName "copilot-relay" -Action $action -Trigger $trigger -Settings (New-ScheduledTaskSettingsSet -Hidden)
+```
+
+Run this from the repo directory. To remove it: `Unregister-ScheduledTask -TaskName copilot-relay`.
 
 ## Loop protection
 

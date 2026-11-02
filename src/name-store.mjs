@@ -61,6 +61,12 @@ export class NameStore {
 }
 
 function defaultFile() {
-  const base = process.env.XDG_STATE_HOME ?? path.join(os.homedir(), ".local", "state");
+  const home = os.homedir();
+  const base =
+    process.platform === "win32"
+      ? process.env.LOCALAPPDATA ?? path.join(home, "AppData", "Local")
+      : process.platform === "darwin"
+        ? path.join(home, "Library", "Application Support")
+        : process.env.XDG_STATE_HOME ?? path.join(home, ".local", "state");
   return path.join(base, "copilot-relay", "names.json");
 }

@@ -132,6 +132,7 @@ if (process.env.COPILOT_RELAY_MANAGED || process.env.COPILOT_RELAY_DISABLED) {
     cwd: sessionCwd(session.workspacePath),
     name: process.env.COPILOT_RELAY_NAME,
     brokerScript: cfg.brokerScript,
+    nodePath: cfg.nodePath,
     log: (m) => session.log(m, { ephemeral: true }).catch(() => {}),
     onRegistered: (name) => session.log(`copilot-relay: connected as "${name}" (change with /relay-name)`, { ephemeral: true }).catch(() => {}),
     onRenamed: (name) => session.log(`copilot-relay: this session was renamed to "${name}"`).catch(() => {}),
