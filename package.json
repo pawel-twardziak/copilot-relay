@@ -1,0 +1,20 @@
+{
+  "name": "copilot-relay",
+  "version": "1.0.0",
+  "description": "GUI relay letting multiple Copilot CLI (ACP) sessions talk to each other",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs",
+    "debug": "RELAY_DEBUG=1 node server.mjs",
+    "install-extension": "node scripts/install-extension.mjs",
+    "uninstall-extension": "node scripts/install-extension.mjs --uninstall"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
+  }
+}
