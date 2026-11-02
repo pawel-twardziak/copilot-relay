@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="pl">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <title>copilot-relay</title>
@@ -45,18 +45,18 @@
 </head>
 <body>
 <header>
-  <b>copilot-relay</b><span id="conn">łączenie…</span>
+  <b>copilot-relay</b><span id="conn">connecting…</span>
   <form id="newSess">
-    <input name="name" placeholder="nazwa*" required pattern="[a-z0-9][a-z0-9_-]{0,31}" size="10">
-    <input name="role" placeholder="rola (opcjonalnie)" size="28">
-    <input name="cwd" placeholder="katalog (domyślny)" size="22">
-    <input name="model" placeholder="model (domyślny)" size="14">
-    <button>+ sesja</button>
+    <input name="name" placeholder="name*" required pattern="[a-z0-9][a-z0-9_-]{0,31}" size="10">
+    <input name="role" placeholder="role (optional)" size="28">
+    <input name="cwd" placeholder="directory (default)" size="22">
+    <input name="model" placeholder="model (default)" size="14">
+    <button>+ session</button>
   </form>
   <span id="err"></span><span id="budget"></span>
 </header>
 <main id="cols"></main>
-<form id="bcast"><input placeholder="Wiadomość do wszystkich sesji…"><button>Wyślij do *</button></form>
+<form id="bcast"><input placeholder="Message to all sessions…"><button>Send to *</button></form>
 <script>
 // Everything is keyed by the broker's stable peer key; names are only labels and can change.
 const cols = document.getElementById("cols");
@@ -86,7 +86,7 @@ function emptyCheck() {
   document.getElementById("empty")?.remove();
   if (!Object.keys(ui).length) {
     const d = el("div"); d.id = "empty";
-    d.innerHTML = 'Brak sesji. Dodaj sesję przyciskiem „+ sesja” albo uruchom <code>copilot</code> w terminalu z zainstalowanym rozszerzeniem.';
+    d.innerHTML = 'No sessions yet. Add one with “+ session” or start <code>copilot</code> in a terminal with the extension installed.';
     cols.append(d);
   }
 }
@@ -99,9 +99,9 @@ function makeCol(p) {
   const col = el("section", "col");
   const h = el("h2"); const title = who(key, p.name); h.append(title);
   if (kind !== "mcp") {
-    title.style.cursor = "pointer"; title.title = "kliknij, aby zmienić nazwę";
+    title.style.cursor = "pointer"; title.title = "click to rename";
     title.onclick = async () => {
-      const cur = names[key]; const n = prompt(`Nowa nazwa dla „${cur}” (a-z, 0-9, -, _):`, cur);
+      const cur = names[key]; const n = prompt(`New name for “${cur}” (a-z, 0-9, -, _):`, cur);
       if (!n || n === cur) return;
       const r = await post("/api/rename", { name: cur, newName: n });
       if (!r.ok) alert((await r.json().catch(() => ({}))).error ?? r.statusText);
@@ -112,12 +112,12 @@ function makeCol(p) {
   stop.onclick = () => post("/api/cancel", { agent: names[key] });
   if (kind !== "acp") stop.style.visibility = "hidden";
   const close = el("button", null, "×");
-  close.title = kind === "acp" ? "zamknij sesję" : "usuń z relay (sesja w terminalu działa dalej)";
+  close.title = kind === "acp" ? "close session" : "remove from relay (the terminal session keeps running)";
   close.onclick = () => {
     const u = ui[key];
     if (u?.gone) { removeCol(key); return; } // already gone from the broker → just hide the column
     const n = names[key];
-    if (confirm(kind === "acp" ? `Zamknąć sesję ${n}?` : `Usunąć ${n} z relay?`)) fetch(`/api/sessions?name=${encodeURIComponent(n)}`, { method:"DELETE" });
+    if (confirm(kind === "acp" ? `Close session ${n}?` : `Remove ${n} from the relay?`)) fetch(`/api/sessions?name=${encodeURIComponent(n)}`, { method:"DELETE" });
   };
   h.append(state, q, stop, close);
   const info = el("div", "cwd");
@@ -128,7 +128,7 @@ function makeCol(p) {
   form.onsubmit = (e) => { e.preventDefault(); const text = ta.value.trim(); if (!text) return; ta.value = ""; post("/api/send", { to: names[key], text }); };
   col.append(h, info, log, form); cols.append(col);
   ui[key] = { col, log, state, q, info, ta, kind, cur: null, gone: false };
-  if (kind !== "acp") log.append(el("div", "tool", kind === "cli" ? "Sesja w terminalu: widać tu tylko wiadomości relay." : "Klient MCP: wiadomości trafiają do jego skrzynki."));
+  if (kind !== "acp") log.append(el("div", "tool", kind === "cli" ? "Terminal session: only relay messages are shown here." : "MCP client: messages go to its inbox."));
   updateCol(p);
 }
 
@@ -137,7 +137,7 @@ function updateCol(p) {
   names[p.key] = p.name; relabel(p.key);
   u.gone = false; u.col.classList.remove("gone");
   u.info.textContent = u.info.title = infoText(p);
-  u.ta.placeholder = `Wiadomość do ${p.name} (Enter wysyła, Shift+Enter = nowa linia)`;
+  u.ta.placeholder = `Message to ${p.name} (Enter sends, Shift+Enter = new line)`;
   if (u.kind !== "acp") setState(u, p.online ? "online" : "offline", p.online ? "idle" : "exited");
   else if (!u.state.textContent) setState(u, "start…", "");
 }
@@ -165,7 +165,7 @@ function handle(ev) {
       // closed by the user (×) → drop the column; dropped after a timeout / exit → keep the history, grey it out
       if (ev.reason === "user" || ev.kind === "mcp") { removeCol(ev.key); break; }
       const u = ui[ev.key]; if (!u) break;
-      u.gone = true; u.col.classList.add("gone"); setState(u, "zakończona", "exited");
+      u.gone = true; u.col.classList.add("gone"); setState(u, "ended", "exited");
       break;
     }
     case "message": {
@@ -180,7 +180,7 @@ function handle(ev) {
         const s = el("div", "tool completed", "→ "); s.append(who(ev.toKey, ev.to), document.createTextNode(`: ${ev.text.slice(0, 120)}${ev.text.length > 120 ? "…" : ""}`));
         src.log.append(s); src.cur = null; scroll(src.log);
       }
-      if (ev.budget != null) document.getElementById("budget").textContent = `budżet wiadomości agent→agent: ${ev.budget}`;
+      if (ev.budget != null) document.getElementById("budget").textContent = `agent→agent message budget: ${ev.budget}`;
       break;
     }
     case "chunk": { const u = colFor(ev); if (u) chunk(u, ev.kind, ev.text); break; }
@@ -193,17 +193,17 @@ function handle(ev) {
       break;
     }
     case "status": { const u = colFor(ev); if (u) setState(u, ev.state, ev.state); break; }
-    case "queue": { const u = colFor(ev); if (u) u.q.textContent = ev.n ? `kolejka: ${ev.n}` : ""; break; }
+    case "queue": { const u = colFor(ev); if (u) u.q.textContent = ev.n ? `queued: ${ev.n}` : ""; break; }
     case "turn_end": { const u = colFor(ev); if (u) u.cur = null; break; }
     case "permission": {
       const u = colFor(ev); if (!u) break;
       const box = el("div", "perm"); box.id = "perm-" + ev.reqId;
-      box.append(el("div", null, `Uprawnienie: ${ev.toolCall?.title ?? ev.toolCall?.toolCallId ?? "?"}`));
+      box.append(el("div", null, `Permission: ${ev.toolCall?.title ?? ev.toolCall?.toolCallId ?? "?"}`));
       for (const o of ev.options ?? []) {
         const b = el("button", null, o.name); b.onclick = () => post("/api/permission", { agent: names[ev.key] ?? ev.agent, reqId: ev.reqId, optionId: o.optionId });
         box.append(b);
       }
-      const c = el("button", null, "Anuluj"); c.onclick = () => post("/api/permission", { agent: names[ev.key] ?? ev.agent, reqId: ev.reqId, optionId: null });
+      const c = el("button", null, "Cancel"); c.onclick = () => post("/api/permission", { agent: names[ev.key] ?? ev.agent, reqId: ev.reqId, optionId: null });
       box.append(c); u.log.append(box); u.cur = null; scroll(u.log);
       break;
     }
@@ -222,15 +222,15 @@ document.getElementById("bcast").onsubmit = (e) => {
 };
 
 document.getElementById("newSess").onsubmit = async (e) => {
-  e.preventDefault(); const f = e.target; const err = document.getElementById("err"); err.textContent = "uruchamiam…";
+  e.preventDefault(); const f = e.target; const err = document.getElementById("err"); err.textContent = "starting…";
   const body = Object.fromEntries([...new FormData(f)].filter(([, v]) => v.trim()));
   const r = await post("/api/sessions", body);
   if (r.ok) { f.reset(); err.textContent = ""; } else err.textContent = (await r.json().catch(() => ({}))).error ?? r.statusText;
 };
 
 const es = new EventSource("/events");
-es.onopen = () => document.getElementById("conn").textContent = "połączono";
-es.onerror = () => document.getElementById("conn").textContent = "rozłączono — ponawiam…";
+es.onopen = () => document.getElementById("conn").textContent = "connected";
+es.onerror = () => document.getElementById("conn").textContent = "disconnected — retrying…";
 es.onmessage = (m) => {
   const ev = JSON.parse(m.data);
   if (ev.type === "hello") {
