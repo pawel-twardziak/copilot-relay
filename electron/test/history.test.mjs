@@ -286,6 +286,16 @@ describe("forkSession", () => {
     assert.deepEqual(snapshot(dir), before);
   });
 
+  test("fork does not copy the original's delete backup or temp files", () => {
+    const { id, dir } = makeSession();
+    fs.writeFileSync(path.join(dir, "events.jsonl.bak"), "old");
+    fs.writeFileSync(path.join(dir, ".events.jsonl.x.tmp"), "tmp");
+    const res = forkSession(id, { ordinal: 2, text: "", where: "beforeUser" }, now);
+    const files = fs.readdirSync(path.join(home, "session-state", res.sessionId));
+    assert.ok(!files.includes("events.jsonl.bak") && !files.includes(".events.jsonl.x.tmp"));
+    assert.ok(files.includes("checkpoints"));
+  });
+
   test("fork afterReply on the last turn keeps everything", () => {
     const { id, lines } = makeSession();
     const res = forkSession(id, { ordinal: 3, text: "Last question", where: "afterReply" }, now);
