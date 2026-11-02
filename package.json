@@ -9,7 +9,8 @@
     "install-extension": "node scripts/install-extension.mjs",
     "uninstall-extension": "node scripts/install-extension.mjs --uninstall",
     "app:install": "npm --prefix electron install",
-    "app": "npm --prefix electron start"
+    "app": "npm --prefix electron start",
+    "test": "node --test \"electron/test/*.test.mjs\""
   },
   "keywords": [],
   "author": "",
