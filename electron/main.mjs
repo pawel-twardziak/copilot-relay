@@ -9,6 +9,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { AcpConnection } from "./acp.mjs";
 import { describeCut, forkSession, truncateSession } from "./history.mjs";
+import { createUsagePusher } from "./usage.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 let win = null;
@@ -156,6 +157,9 @@ async function getLister() {
   return lister;
 }
 
+// context/credits/quota figures for the window, debounced per session
+const usage = createUsagePusher({ send: (sessionId, view) => send("usage:update", { sessionId, view }) });
+
 /** Wire a session's connection to the window. */
 function attach(sessionId, conn, cwd, relay) {
   const entry = { conn, cwd, permissions: new Map(), relay: relayStart(sessionId, cwd, relay), toolTitles: new Map() };
@@ -164,6 +168,7 @@ function attach(sessionId, conn, cwd, relay) {
     if (method !== "session/update" || params?.sessionId !== sessionId) return;
     const u = params.update;
     if (u?.sessionUpdate === "tool_call" && u.title) entry.toolTitles.set(u.toolCallId, u.title);
+    if (u?.sessionUpdate === "usage_update" && open.get(sessionId) === entry) usage.context(sessionId, { used: u.used, size: u.size });
     // /rename answers with a chat line ("Session renamed to: …"); the new title arrives as session_info_update
     if (entry.renaming && u?.sessionUpdate === "agent_message_chunk") return;
     send("acp:update", { sessionId, update: u });
@@ -184,6 +189,7 @@ function attach(sessionId, conn, cwd, relay) {
     entry.relay?.stop();
     if (open.get(sessionId)?.conn !== conn) return;
     open.delete(sessionId);
+    usage.forget(sessionId);
     send("acp:exit", { sessionId, code, signal, stderr: stderr?.trim().slice(-800) });
   });
   return entry;
@@ -230,6 +236,7 @@ handle("sessions:new", async (cwd) => {
   try {
     const res = await conn.request("session/new", { cwd, mcpServers: relay.mcpServers });
     attach(res.sessionId, conn, cwd, relay);
+    usage.refresh(res.sessionId);
     return { sessionId: res.sessionId, cwd, configOptions: res.configOptions ?? [] };
   } catch (e) {
     conn.kill();
@@ -246,10 +253,12 @@ handle("sessions:open", async (sessionId, cwd) => {
   const entry = attach(sessionId, conn, cwd, relay);
   try {
     const res = await conn.request("session/load", { sessionId, cwd, mcpServers: relay.mcpServers });
+    if (open.get(sessionId) === entry) usage.refresh(sessionId);
     return { sessionId, cwd, configOptions: res?.configOptions ?? [] };
   } catch (e) {
     entry.relay?.stop();
     open.delete(sessionId);
+    usage.forget(sessionId);
     conn.kill();
     throw e;
   }
@@ -470,6 +479,7 @@ handle("sessions:prompt", async (sessionId, text, source = "relay") => {
     return res?.stopReason ?? "end_turn";
   } finally {
     entry.prompting = false;
+    if (open.get(sessionId) === entry) usage.refresh(sessionId); // not after a close/truncate mid-turn
   }
 });
 
@@ -504,6 +514,7 @@ async function closeEntry(sessionId) {
   if (!e) return;
   // removed from `open` first, so the connection's exit handler stays silent (no acp:exit)
   open.delete(sessionId);
+  usage.forget(sessionId);
   e.relay?.stop();
   await Promise.race([e.conn.request("session/close", { sessionId }).catch(() => {}), new Promise((r) => setTimeout(r, 2000))]);
   e.conn.kill();

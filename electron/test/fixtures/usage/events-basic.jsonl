@@ -1,0 +1,4 @@
+{"type":"session.start","data":{"sessionId":"x"},"timestamp":"2026-11-01T10:00:00.000Z"}
+{"type":"session.usage_checkpoint","data":{"totalNanoAiu":1000000000,"totalPremiumRequests":0},"timestamp":"2026-11-01T10:01:00.000Z"}
+{"type":"session.usage_checkpoint","data":{"totalNanoAiu":3863730000,"totalPremiumRequests":1,"accountingSnapshot":{"modelMetrics":{"claude-sonnet-5.5":{"usage":{"inputTokens":31081,"outputTokens":4,"cacheReadTokens":16293,"cacheWriteTokens":14784,"reasoningTokens":0}}},"codeChanges":{"linesAdded":12,"linesRemoved":3}}},"timestamp":"2026-11-01T10:02:00.000Z"}
+{"type":"session.usage_chec

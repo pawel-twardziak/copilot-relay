@@ -217,6 +217,9 @@ class SessionView {
     this.titleEl = h("b", { class: "renamable", onclick: () => this.renameSession() });
     this.selects = h("span", { class: "selects" });
     this.relayChip = h("button", { class: "relay-chip", hidden: true, onclick: () => this.renameRelay() });
+    this.usageFill = h("span", { class: "fill" });
+    this.usageLabel = h("span", { class: "label" }, "context: —");
+    this.usageChip = h("span", { class: "usage-chip" }, h("span", { class: "meter" }, this.usageFill), this.usageLabel);
     this.log = h("div", { class: "log" });
     this.input = h("textarea", { rows: 2, placeholder: "Message Copilot…  (Enter to send, Shift+Enter for a new line, Esc to stop)" });
     this.sendBtn = h("button", { class: "primary", onclick: () => this.send() }, "Send");
@@ -231,6 +234,7 @@ class SessionView {
         { class: "head" },
         h("div", { class: "title" }, this.titleEl, h("a", { title: "Open folder", onclick: () => api.openPath(this.cwd).catch((e) => this.error(e.message)) }, cwd)),
         this.relayChip,
+        this.usageChip,
         this.selects,
         h("button", { title: "Copy the whole conversation as Markdown", onclick: (e) => this.copyThread(e.currentTarget) }, "Copy thread"),
         h("button", { class: "danger", title: "Close this session in the app (it stays resumable)", onclick: () => closeView(this.sessionId) }, "Close"),
@@ -515,6 +519,16 @@ class SessionView {
     this.statusEl.textContent = b ? "Working…" : this.dead ? "Copilot process ended" : this.inbox.length ? `${this.inbox.length} relay message(s) waiting` : "";
     renderList();
     if (!b) queueMicrotask(() => this.pump());
+  }
+
+  // --- context window and usage
+  usage(view) {
+    const ctx = view?.context ?? null;
+    this.usageChip.classList.remove("ok", "warn", "full");
+    if (ctx) this.usageChip.classList.add(ctx.level);
+    this.usageFill.style.width = `${ctx ? Math.max(0, Math.min(100, ctx.pct)) : 0}%`;
+    this.usageLabel.textContent = (ctx ? ctx.label : "context: —") + (view?.credits ? ` · ${view.credits}` : "");
+    this.usageChip.title = view ? [view.tooltip, view.quota].filter(Boolean).join("\n") : "";
   }
 
   // --- copilot-relay
@@ -915,6 +929,7 @@ async function closeView(id) {
   if (!v) return;
   if (v.busy && !v.dead && !confirm("Copilot is still working in this session. Stop it and close?")) return;
   views.delete(id);
+  lastUsage.delete(id); // a re-opened session must not flash this stale snapshot
   v.el.remove();
   if (activeId === id) activate([...views.keys()].pop() ?? null);
   await api.closeSession(id).catch(() => {});
@@ -1065,11 +1080,26 @@ const forView = (sessionId, fn) => {
   early.get(sessionId).push(fn);
 };
 function flushEarly(v) {
+  if (lastUsage.has(v.sessionId)) v.usage(lastUsage.get(v.sessionId));
   for (const fn of early.get(v.sessionId) ?? []) fn(v);
   early.delete(v.sessionId);
 }
 api.onRelayMessage((m) => forView(m.sessionId, (v) => v.incoming(m)));
 api.onRelayStatus((s) => forView(s.sessionId, (v) => v.relayStatus(s)));
+
+// latest usage per session, so a re-opened/replaced view starts with it; sidebar shows the latest quota line
+const lastUsage = new Map();
+let lastQuota = null;
+api.onUsage(({ sessionId, view }) => {
+  lastUsage.set(sessionId, view);
+  if (view?.quota) {
+    lastQuota = view.quota;
+    const q = $("#side-quota");
+    q.textContent = lastQuota;
+    q.hidden = false;
+  }
+  forView(sessionId, (v) => v.usage(view));
+});
 
 $("#btn-new").addEventListener("click", () => newSession());
 $("#btn-new-2").addEventListener("click", () => newSession());

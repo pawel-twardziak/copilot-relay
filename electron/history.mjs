@@ -9,15 +9,24 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const FORMAT_ERROR = "Unrecognized session history format";
 const NOT_FOUND = "Could not find this message in the session history";
 
-/** $COPILOT_HOME/session-state, resolved at call time (same default as relayConfig in main.mjs). */
+/** $COPILOT_HOME or ~/.copilot, resolved at call time (same default as relayConfig in main.mjs). */
+export function copilotHome() {
+  return process.env.COPILOT_HOME || path.join(os.homedir(), ".copilot");
+}
+
+/** True if `id` looks like a Copilot session id (UUID). */
+export function isSessionId(id) {
+  return typeof id === "string" && UUID.test(id);
+}
+
+/** $COPILOT_HOME/session-state, resolved at call time. */
 export function sessionStateDir() {
-  const home = process.env.COPILOT_HOME || path.join(os.homedir(), ".copilot");
-  return path.join(home, "session-state");
+  return path.join(copilotHome(), "session-state");
 }
 
 /** Real path of a session's dir; throws unless `id` is a UUID naming a real directory directly in session-state. */
 export function sessionDir(id) {
-  if (typeof id !== "string" || !UUID.test(id)) throw new Error(`Invalid session id: ${id}`);
+  if (!isSessionId(id)) throw new Error(`Invalid session id: ${id}`);
   let root;
   let st;
   try {

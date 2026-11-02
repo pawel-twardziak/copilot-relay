@@ -43,6 +43,7 @@ It runs on Windows, macOS and Linux.
   error instead of changing anything.
 - Switch mode (Agent / Plan / Autopilot), model, reasoning effort and approval settings per session.
   The choices come from the CLI.
+- The header shows the context window use (`22.9k / 200k · 11%`) and Copilot usage (AI credits) of the session; hover for requests, tokens and changes. The latest premium quota line is shown at the bottom of the sidebar.
 - Several sessions can be open at once. Each runs in its own `copilot --acp` process with the session's folder as
   working directory, so the repo's `.github` agents, skills and MCP config apply as in the terminal.
 
