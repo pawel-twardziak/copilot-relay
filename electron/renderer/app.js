@@ -233,7 +233,7 @@ class SessionView {
     this.cmdMatches = [];
     this.cmdIndex = 0;
     this.cmdToken = null;
-    this.cmdPopup = h("div", { class: "cmd-popup", role: "listbox", hidden: true });
+    this.cmdPopup = h("div", { class: "cmd-popup", role: "listbox", hidden: true, onmousedown: (e) => e.preventDefault() });
 
     this.el = h(
       "section",
@@ -259,7 +259,7 @@ class SessionView {
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         this.cmdIndex = (this.cmdIndex + (e.key === "ArrowDown" ? 1 : n - 1)) % n;
         this.renderPopup();
-      } else if (e.key === "Tab" || e.key === "Enter") this.insertCommandAt(this.cmdIndex);
+      } else if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey && !e.ctrlKey && !e.altKey)) this.insertCommandAt(this.cmdIndex);
       else if (e.key === "Escape") this.hidePopup();
       else return;
       e.preventDefault();
@@ -937,6 +937,7 @@ class SessionView {
     try {
       const updated = await api.setConfig(this.sessionId, "agent", value);
       if (updated) this.setConfig(updated);
+      else this.setAgent({ ...this.agentOption, currentValue: value });
       const entry = SlashCommands.agentPickerModel(this.agentOption).entries.find((e) => e.value === value);
       this.system("Agent: " + (entry?.name ?? (value || "Copilot")));
       return true;
@@ -963,10 +964,14 @@ class SessionView {
 
   send() {
     const text = this.input.value.trim();
-    if (!text || this.busy || this.dead) return;
+    if (!text || this.dead) return;
+    const cmd = this.agentAvailable() ? SlashCommands.parseAgentCommand(text) : null;
+    if (this.busy) {
+      if (cmd) this.statusEl.textContent = "Wait until Copilot finishes this turn.";
+      return;
+    }
     this.input.value = "";
     this.autosize();
-    const cmd = this.agentAvailable() ? SlashCommands.parseAgentCommand(text) : null;
     if (cmd) {
       if (cmd.arg === "") {
         this.agentPicker.focus();

@@ -82,7 +82,7 @@ The first `npm start` downloads the Electron binary (about 100 MB, from GitHub).
 ## Slash commands and agents
 
 Type `/` in the prompt box for a popup of the CLI's commands, your skills and the app's own commands. A command only
-counts as the first word of the prompt. If the session has custom agents, an agent picker appears in the header;
+counts as the first word of the prompt. If the session has custom agents, an agent picker appears in the composer next to Send;
 `/agent [name]` opens it or switches directly. `/rename <name>` renames the session without sending a message.
 Commands the CLI handles itself (such as `/context`) are not stored in the session history, so their bubbles get no
 Fork/Delete actions and don't count as turns.
