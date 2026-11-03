@@ -9,7 +9,10 @@ import {
   countFrom,
   countUserMessages,
   cutIndex,
+  deleteSession,
   describeCut,
+  forgetInStore,
+  purgeDeleted,
   forkSession,
   readEvents,
   sessionDir,
@@ -444,5 +447,110 @@ describe("countUserMessages", () => {
     fs.mkdirSync(dir);
     fs.writeFileSync(path.join(dir, "workspace.yaml"), WORKSPACE(id), { mode: 0o600 });
     assert.equal(countUserMessages(id), 0);
+  });
+});
+
+describe("deleteSession", () => {
+  const storeFile = () => path.join(home, "session-store.db");
+  async function makeStore(ids) {
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(storeFile());
+    db.exec(`
+      CREATE TABLE sessions (id TEXT PRIMARY KEY, cwd TEXT, parent_id TEXT REFERENCES sessions(id));
+      CREATE TABLE turn_notes (turn_id INTEGER REFERENCES turns(id));
+      CREATE TABLE turns (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL REFERENCES sessions(id), turn_index INTEGER);
+      CREATE TABLE new_child (owner TEXT NOT NULL REFERENCES sessions(id));
+      CREATE TABLE dynamic_context_items (name TEXT);
+      CREATE TABLE future_links (session_id TEXT, other TEXT);
+      CREATE VIRTUAL TABLE search_index USING fts5(content, session_id UNINDEXED);
+    `);
+    for (const [i, id] of ids.entries()) {
+      db.prepare("INSERT INTO sessions VALUES (?, '/x', ?)").run(id, i ? ids[0] : null); // later ones: children of the first
+      db.prepare("INSERT INTO turns (session_id, turn_index) VALUES (?, 0), (?, 1)").run(id, id);
+      db.prepare("INSERT INTO search_index VALUES ('hello', ?)").run(id);
+      db.prepare("INSERT INTO future_links VALUES (?, 'x')").run(id);
+      db.prepare("INSERT INTO new_child VALUES (?)").run(id);
+      db.prepare("INSERT INTO turn_notes SELECT id FROM turns WHERE session_id = ?").run(id);
+    }
+    db.prepare("INSERT INTO dynamic_context_items VALUES ('keep')").run();
+    db.close();
+  }
+  async function counts(id) {
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(storeFile());
+    try {
+      const n = (sql) => db.prepare(sql).get(id).n;
+      return {
+        sessions: n("SELECT count(*) AS n FROM sessions WHERE id = ?"),
+        turns: n("SELECT count(*) AS n FROM turns WHERE session_id = ?"),
+        search: n("SELECT count(*) AS n FROM search_index WHERE session_id = ?"),
+      };
+    } finally {
+      db.close();
+    }
+  }
+
+  test("removes the session dir and leaves other sessions alone", async () => {
+    const a = makeSession();
+    const b = makeSession();
+    const res = await deleteSession(a.id);
+    assert.equal(res.leftover, null);
+    assert.deepEqual(res.store, { removedRows: 0 }); // no session-store.db
+    assert.deepEqual(sessionIds(), [b.id]);
+    assert.ok(fs.existsSync(path.join(b.dir, "events.jsonl")));
+  });
+
+  test("removes the session's rows from session-store.db only", async () => {
+    const a = makeSession();
+    const b = makeSession();
+    await makeStore([a.id, b.id]);
+    const res = await deleteSession(a.id);
+    assert.deepEqual(res.store, { removedRows: 1 + 2 + 1 + 1 });
+    assert.deepEqual(await counts(a.id), { sessions: 0, turns: 0, search: 0 });
+    assert.deepEqual(await counts(b.id), { sessions: 1, turns: 2, search: 1 });
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(storeFile());
+    assert.equal(db.prepare("SELECT count(*) AS n FROM future_links").get().n, 2, "a session_id without a foreign key is left alone");
+    assert.equal(db.prepare("SELECT count(*) AS n FROM new_child").get().n, 1, "any table with a foreign key to sessions is cleaned");
+    db.close();
+  });
+
+  test("a session missing from the store is still deleted", async () => {
+    const a = makeSession();
+    await makeStore([randomUUID()]);
+    assert.deepEqual((await deleteSession(a.id)).store, { removedRows: 0 });
+    assert.deepEqual(sessionIds(), []);
+  });
+
+  test("an unreadable store is reported, the dir is deleted anyway", async () => {
+    const a = makeSession();
+    fs.writeFileSync(storeFile(), "not a database");
+    const res = await deleteSession(a.id);
+    assert.ok(res.store.error);
+    assert.deepEqual(sessionIds(), []);
+  });
+
+  test("missingOk: a session without a dir only has its store rows removed", async () => {
+    const id = randomUUID();
+    await makeStore([id]);
+    assert.deepEqual(await deleteSession(id, { missingOk: true }), { leftover: null, store: { removedRows: 1 + 2 + 1 + 1 } });
+    await assert.rejects(deleteSession("../etc", { missingOk: true }), /Invalid session id/);
+  });
+
+  test("purgeDeleted removes only leftovers of failed deletions", async () => {
+    const keep = makeSession();
+    const root = path.join(home, "session-state");
+    const trash = path.join(root, `.deleted-${randomUUID()}-${randomUUID()}`);
+    fs.mkdirSync(path.join(trash, "files"), { recursive: true });
+    fs.writeFileSync(path.join(trash, "events.jsonl"), "x");
+    fs.mkdirSync(path.join(root, ".deleted-not-ours"));
+    assert.equal(await purgeDeleted(), 1);
+    assert.deepEqual(fs.readdirSync(root).sort(), [".deleted-not-ours", keep.id].sort());
+  });
+
+  test("refuses invalid and missing ids", async () => {
+    await assert.rejects(deleteSession("../etc"), /Invalid session id/);
+    await assert.rejects(deleteSession(randomUUID()), /Session not found/);
+    await assert.rejects(forgetInStore("x' OR 1=1 --"), /Invalid session id/);
   });
 });

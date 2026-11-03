@@ -1,4 +1,4 @@
-// Copilot session history files (session-state/<id>/events.jsonl + workspace.yaml): fork and truncate.
+// Copilot session history files (session-state/<id>/events.jsonl + workspace.yaml): fork, truncate and delete.
 // The only place that knows the on-disk format; pure Node built-ins, no Electron.
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -200,4 +200,117 @@ export function truncateSession(id, target) {
     throw err;
   }
   return { removedUserMessages: countFrom(events, idx) };
+}
+
+const TRASH = /^\.deleted-[0-9a-f-]{36}-[0-9a-f-]{36}$/i;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** rename that retries while another process (antivirus, a Copilot process still exiting on Windows) holds a file. */
+async function renameRetry(from, to, tries = 6) {
+  for (let i = 1; ; i++) {
+    try {
+      return await fs.promises.rename(from, to);
+    } catch (err) {
+      // EACCES is transient only on Windows (a file held open); elsewhere it is a real permission problem
+      const transient = ["EPERM", "EBUSY", ...(process.platform === "win32" ? ["EACCES"] : [])];
+      if (i >= tries || !transient.includes(err.code)) throw err;
+      await sleep(250 * i);
+    }
+  }
+}
+
+/**
+ * Remove session `id` for good: its session-state dir, then its rows in Copilot's session-store.db (an index that
+ * only some sessions are in). The dir is first renamed out of the way, so a failed removal never leaves a
+ * half-deleted session that still looks resumable; a leftover is retried by purgeDeleted(). The caller must have
+ * closed the session's process. With `missingOk`, a session without a dir (never written) only has its rows removed.
+ */
+export async function deleteSession(id, { missingOk = false } = {}) {
+  let dir = null;
+  try {
+    dir = sessionDir(id);
+  } catch (err) {
+    if (!missingOk || !/^Session not found/.test(err.message)) throw err; // an invalid id is never "not found"
+  }
+  let leftover = null;
+  if (dir) {
+    const trash = path.join(path.dirname(dir), `.deleted-${id}-${randomUUID()}`);
+    await renameRetry(dir, trash);
+    try {
+      await fs.promises.rm(trash, { recursive: true, force: true, maxRetries: 3 });
+    } catch (err) {
+      leftover = `${trash}: ${err.message}`; // the session is gone already; purgeDeleted() tries again later
+    }
+  }
+  let store;
+  try {
+    store = { removedRows: await forgetInStore(id) };
+  } catch (err) {
+    store = { error: err.message };
+  }
+  return { leftover, store };
+}
+
+/** Remove what failed deletions left in session-state (`.deleted-<id>-<uuid>`); returns how many were removed. */
+export async function purgeDeleted() {
+  const root = sessionStateDir();
+  let removed = 0;
+  for (const name of await fs.promises.readdir(root).catch(() => [])) {
+    if (!TRASH.test(name)) continue;
+    try {
+      await fs.promises.rm(path.join(root, name), { recursive: true, force: true, maxRetries: 3 }); // a symlink: only the link
+      removed++;
+    } catch {
+      /* still locked: next start */
+    }
+  }
+  return removed;
+}
+
+// search_index is a plain FTS5 table (not external-content, no triggers) with an unindexed session_id and no foreign
+// key, so it is named here; every other per-session table is found through its foreign key to sessions(id).
+const FTS_TABLES = ["search_index"];
+
+/** Delete session `id`'s rows from session-store.db: every table with a foreign key to sessions(id) (by that key's
+ *  column, so a column that merely looks like a session id is never used), the FTS index, then `sessions`. */
+export async function forgetInStore(id, file = path.join(copilotHome(), "session-store.db"), { timeout = 1500 } = {}) {
+  if (!isSessionId(id)) throw new Error(`Invalid session id: ${id}`);
+  if (!fs.existsSync(file)) return 0;
+  const { DatabaseSync } = await import("node:sqlite");
+  // synchronous: keep the wait for a lock short. Foreign keys aren't enforced here: rows of a table that points at a
+  // per-session table (not at sessions) are left behind rather than failing the whole cleanup.
+  const db = new DatabaseSync(file, { timeout, enableForeignKeyConstraints: false });
+  try {
+    const tables = db
+      .prepare("SELECT name FROM pragma_table_list WHERE schema = 'main' AND type IN ('table', 'virtual')")
+      .all()
+      .map((r) => r.name);
+    const q = (name) => `"${name.replace(/"/g, '""')}"`;
+    const targets = []; // [table, column]
+    for (const t of tables.filter((t) => t !== "sessions")) {
+      // a key of sessions on itself (e.g. a parent session) would select other sessions' rows
+      const fks = db.prepare(`SELECT "from" AS col FROM pragma_foreign_key_list(?) WHERE "table" = 'sessions' AND ("to" IS 'id' OR "to" IS NULL)`).all(t);
+      for (const { col } of fks) targets.push([t, col]);
+    }
+    for (const t of FTS_TABLES) {
+      if (tables.includes(t) && db.prepare(`SELECT 1 FROM pragma_table_info(?) WHERE name = 'session_id'`).get(t)) targets.push([t, "session_id"]);
+    }
+    let removed = 0;
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const [t, col] of targets) removed += Number(db.prepare(`DELETE FROM ${q(t)} WHERE ${q(col)} = ?`).run(id).changes);
+      if (tables.includes("sessions")) removed += Number(db.prepare("DELETE FROM sessions WHERE id = ?").run(id).changes);
+      db.exec("COMMIT");
+    } catch (err) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        /* SQLite already rolled back (e.g. SQLITE_FULL): report the original error */
+      }
+      throw err;
+    }
+    return removed;
+  } finally {
+    db.close();
+  }
 }
