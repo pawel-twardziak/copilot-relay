@@ -1218,11 +1218,12 @@ async function reopenView(old, error) {
   const v = views.get(sessionId);
   if (!v) return;
   if (error) v.error(error);
+  if (v.dead && inbox.length) v.error(`${inbox.length} relay message(s) waiting for this session were discarded.`);
   if (typed && !v.input.value) {
     v.input.value = typed;
     v.autosize();
   }
-  if (inbox.length) {
+  if (inbox.length && !v.dead) {
     v.inbox.push(...inbox);
     v.pump();
   }
@@ -1273,7 +1274,12 @@ function item(s, v) {
     { class: "item-row" },
     h(
       "button",
-      { class: "item" + (s.sessionId === activeId ? " active" : ""), title: `${s.title ?? ""}\n${s.cwd}\n${s.sessionId}`, onclick: () => openSession(s) },
+      {
+        class: "item" + (s.sessionId === activeId ? " active" : ""),
+        title: `${s.title ?? ""}\n${s.cwd}\n${s.sessionId}`,
+        // opening it now would only make a dead view (main refuses); a failed delete reopens it itself
+        onclick: () => (deleting.has(s.sessionId) ? setStatus("This session is being deleted.", true) : openSession(s)),
+      },
       h("div", { class: "t" }, v && !v.dead && h("span", { class: "dot" + (v.busy ? " busy" : "") }), h("b", {}, shortTitle(v?.title || s.title))),
       h("div", { class: "m" }, [s.updatedAt ? ago(s.updatedAt) : "", s.sessionId.slice(0, 8)].filter(Boolean).join(" · ")),
     ),

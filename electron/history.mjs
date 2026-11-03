@@ -237,6 +237,8 @@ export async function deleteSession(id, { missingOk = false } = {}) {
     const trash = path.join(path.dirname(dir), `.deleted-${id}-${randomUUID()}`);
     await renameRetry(dir, trash);
     try {
+      // the files that make it a session first: a leftover without them can't be listed or resumed
+      for (const f of ["workspace.yaml", "events.jsonl"]) await fs.promises.rm(path.join(trash, f), { force: true, maxRetries: 3 }).catch(() => {});
       await fs.promises.rm(trash, { recursive: true, force: true, maxRetries: 3 });
     } catch (err) {
       leftover = `${trash}: ${err.message}`; // the session is gone already; purgeDeleted() tries again later
@@ -287,9 +289,9 @@ export async function forgetInStore(id, file = path.join(copilotHome(), "session
       .map((r) => r.name);
     const q = (name) => `"${name.replace(/"/g, '""')}"`;
     const targets = []; // [table, column]
-    for (const t of tables.filter((t) => t !== "sessions")) {
+    for (const t of tables.filter((t) => t.toLowerCase() !== "sessions")) {
       // a key of sessions on itself (e.g. a parent session) would select other sessions' rows
-      const fks = db.prepare(`SELECT "from" AS col FROM pragma_foreign_key_list(?) WHERE "table" = 'sessions' AND ("to" IS 'id' OR "to" IS NULL)`).all(t);
+      const fks = db.prepare(`SELECT "from" AS col FROM pragma_foreign_key_list(?) WHERE lower("table") = 'sessions' AND ("to" IS 'id' OR "to" IS NULL)`).all(t);
       for (const { col } of fks) targets.push([t, col]);
     }
     for (const t of FTS_TABLES) {

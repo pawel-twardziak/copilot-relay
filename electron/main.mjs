@@ -218,7 +218,10 @@ function handle(channel, fn) {
   });
 }
 
+let purging = Promise.resolve(); // leftovers of failed deletes are removed before the first list
+
 handle("sessions:list", async () => {
+  await purging;
   const conn = await getLister();
   const all = [];
   let cursor;
@@ -962,7 +965,7 @@ if (!app.requestSingleInstanceLock()) {
   });
   fixPath();
   app.whenReady().then(() => {
-    purgeDeleted().catch(() => {}); // what an earlier delete could not remove
+    purging = purgeDeleted().catch(() => {}); // what an earlier delete could not remove
     createWindow();
     app.on("activate", () => BrowserWindow.getAllWindows().length === 0 && createWindow());
   });
