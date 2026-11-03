@@ -199,6 +199,9 @@ let activeId = null;
 // ---------------------------------------------------------------------------
 // session view
 
+// how the relay broker prefixes a message from another session (src/registry.mjs): "[from <name>]" and a newline
+const RELAY_PREFIX = /^\[from [^\]\n]+\]\n/;
+
 class SessionView {
   constructor({ sessionId, cwd, title }) {
     Object.assign(this, { sessionId, cwd, title: title ?? "" });
@@ -214,6 +217,8 @@ class SessionView {
     this.turnReplyEl = null; // the latest turn's reply element carrying actions
     this.turnReplied = false; // the latest turn's reply already has fork/delete actions
     this.historyOp = false; // a fork/delete is running
+    this.recallEl = null; // the user bubble whose text is in the message box (Left Shift+Up/Down), null = the draft
+    this.draft = ""; // what was typed before recalling
 
     this.titleEl = h("b", { class: "renamable", onclick: () => this.renameSession() });
     this.selects = h("span", { class: "selects" });
@@ -222,7 +227,7 @@ class SessionView {
     this.usageLabel = h("span", { class: "label" }, "context: —");
     this.usageChip = h("span", { class: "usage-chip" }, h("span", { class: "meter" }, this.usageFill), this.usageLabel);
     this.log = h("div", { class: "log" });
-    this.input = h("textarea", { rows: 2, placeholder: "Message Copilot…  (Enter to send, Shift+Enter for a new line, Esc to stop)" });
+    this.input = h("textarea", { rows: 2, placeholder: "Message Copilot…  (Enter to send, Shift+Enter for a new line, Left Shift+↑/↓ for your earlier messages, Esc to stop)" });
     this.sendBtn = h("button", { class: "primary", onclick: () => this.send() }, "Send");
     this.stopBtn = h("button", { onclick: () => this.cancel(), disabled: true }, "Stop");
     this.statusEl = h("div", { class: "status-line" });
@@ -247,11 +252,20 @@ class SessionView {
         this.selects,
         h("button", { title: "Copy the whole conversation as Markdown", onclick: (e) => this.copyThread(e.currentTarget) }, "Copy thread"),
         h("button", { class: "danger", title: "Close this session in the app (it stays resumable)", onclick: () => closeView(this.sessionId) }, "Close"),
+        h("button", { class: "danger", title: "Delete this whole session from disk", onclick: () => deleteSessionFlow({ sessionId: this.sessionId, cwd: this.cwd, title: this.title }) }, "Delete"),
       ),
       this.log,
       h("div", { class: "composer" }, this.cmdPopup, this.input, this.agentPicker, h("div", { class: "btns" }, this.sendBtn, this.stopBtn)),
       this.statusEl,
     );
+    // Left Shift+Up/Down walks through your earlier messages, with the draft as the newest entry; registered first,
+    // so it also works while the command popup is open. Right Shift+arrows still extend the text selection.
+    this.input.addEventListener("keydown", (e) => {
+      if (!["ArrowUp", "ArrowDown"].includes(e.key) || !e.shiftKey || !leftShift.down || e.ctrlKey || e.altKey || e.metaKey || e.isComposing) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      this.recall(e.key === "ArrowUp" ? -1 : 1);
+    });
     // registered before the Enter/Esc handler below; consumes keys only while the popup is visible
     this.input.addEventListener("keydown", (e) => {
       if (this.cmdPopup.hidden || e.isComposing) return;
@@ -277,6 +291,7 @@ class SessionView {
       } else if (e.key === "Escape" && this.busy) this.cancel();
     });
     this.input.addEventListener("input", () => {
+      if (this.recallEl) this.setRecalled(null); // an edited earlier message is the new draft
       this.autosize();
       this.updatePopup();
     });
@@ -468,6 +483,39 @@ class SessionView {
   nearBottom() {
     return this.log.scrollHeight - this.log.scrollTop - this.log.clientHeight < 80;
   }
+  /** Your messages in this thread, oldest first. Relay messages from other sessions are not yours: live ones are
+   *  .msg.relay, replayed ones are .msg.user with the broker's "[from <name>]" prefix. */
+  ownMessages() {
+    // a message you typed in the relay GUI is yours: live it is .msg.relay with _human, replayed a plain .msg.user
+    return [...this.log.querySelectorAll(".msg.user, .msg.relay")].filter((el) => {
+      const text = el._matchText?.() ?? "";
+      if (el.classList.contains("relay") && !el._human) return false;
+      return !el.hidden && text.trim() && !RELAY_PREFIX.test(text);
+    });
+  }
+
+  /** Put the previous (dir -1) or next (dir 1) of your messages into the message box; past the newest: the draft. */
+  recall(dir) {
+    const list = this.ownMessages();
+    const at = this.recallEl ? list.indexOf(this.recallEl) : list.length;
+    const i = (at === -1 ? list.length : at) + dir;
+    if (i < 0 || (i >= list.length && !this.recallEl)) return; // already at the oldest / at the draft
+    if (!this.recallEl) this.draft = this.input.value;
+    const el = list[i] ?? null;
+    this.setRecalled(el);
+    this.input.value = el ? el._matchText() : this.draft;
+    this.input.setSelectionRange(this.input.value.length, this.input.value.length);
+    this.hidePopup();
+    this.autosize();
+    if (el) el.scrollIntoView({ block: "nearest" });
+  }
+
+  setRecalled(el) {
+    this.recallEl?.classList.remove("recalled");
+    this.recallEl = el;
+    el?.classList.add("recalled");
+  }
+
   append(el) {
     this.markTurn(el);
     const stick = this.nearBottom();
@@ -542,23 +590,29 @@ class SessionView {
 
   /** Fork a new session from, or delete the history from, a marked message (see markTurn). */
   async historyAction(el, action) {
-    if (this.busy || this.dead || this.historyOp) return;
+    if (this.busy || this.dead || this.deleting || this.historyOp) return;
     const where = el._kind === "user" ? "beforeUser" : action === "fork" ? "afterReply" : "beforeReply";
     const target = { ordinal: el._turn, text: String(el._matchText?.() ?? ""), where };
-    this.historyOp = true;
+    // each operation releases only its own flag: a fork releases it early, and another operation may start then
+    const op = Symbol(action);
+    this.historyOp = op;
+    const release = () => {
+      if (this.historyOp === op) this.historyOp = false;
+    };
     try {
-      if (action === "fork") await this.forkFrom(target);
+      if (action === "fork") await this.forkFrom(target, release);
       else await this.deleteFrom(target, el._kind);
     } finally {
-      this.historyOp = false;
+      release();
     }
   }
 
-  async forkFrom(target) {
+  async forkFrom(target, release) {
     this.statusEl.textContent = "Creating a fork…";
     let res;
     try {
       res = await api.forkSession(this.sessionId, target);
+      release(); // the source's files are done with: opening the fork doesn't touch them
     } catch (e) {
       this.error(`Could not fork: ${e.message}`);
       return;
@@ -596,7 +650,7 @@ class SessionView {
         "Don't use this while the session is open in a terminal Copilot CLI.",
     );
     if (!ok || this.busy || this.dead) return;
-    const { sessionId, cwd, title, inbox } = this;
+    const { sessionId } = this;
     this.setBusy(true);
     this.statusEl.textContent = "Deleting…";
     let failure = null;
@@ -608,16 +662,7 @@ class SessionView {
       await api.closeSession(sessionId).catch(() => {});
     }
     // rebuild the view from the replay (not closeView: the session is already closed)
-    views.delete(sessionId);
-    this.el.remove();
-    await openSession({ sessionId, cwd, title });
-    const v = views.get(sessionId);
-    if (!v) return;
-    if (failure) v.error(`Could not delete: ${failure.message}`);
-    if (inbox.length) {
-      v.inbox.push(...inbox); // relay messages that were waiting in the old view
-      v.pump();
-    }
+    await reopenView(this, failure && `Could not delete: ${failure.message}`);
   }
 
   system(text) {
@@ -631,12 +676,21 @@ class SessionView {
 
   setBusy(b) {
     this.busy = b;
-    this.el.classList.toggle("busy", b || this.dead); // disables the fork/delete actions
-    this.sendBtn.disabled = b || this.dead;
-    this.stopBtn.disabled = !b || this.dead;
-    this.input.disabled = this.dead;
-    this.agentPicker.disabled = b || this.dead;
-    this.statusEl.textContent = b ? "Working…" : this.dead ? "Copilot process ended" : this.inbox.length ? `${this.inbox.length} relay message(s) waiting` : "";
+    const off = b || this.dead || this.deleting; // this.deleting: the whole session is being deleted
+    this.el.classList.toggle("busy", off); // disables the fork/delete actions
+    this.sendBtn.disabled = off;
+    this.stopBtn.disabled = !b || this.dead || this.deleting;
+    this.input.disabled = this.dead || this.deleting;
+    this.agentPicker.disabled = off;
+    this.statusEl.textContent = this.deleting
+      ? "Deleting session…"
+      : b
+        ? "Working…"
+        : this.dead
+          ? "Copilot process ended"
+          : this.inbox.length
+            ? `${this.inbox.length} relay message(s) waiting`
+            : "";
     renderList();
     if (!b) queueMicrotask(() => this.pump());
   }
@@ -695,12 +749,14 @@ class SessionView {
   }
 
   pump() {
-    if (this.busy || this.dead || !this.inbox.length) return;
+    if (this.busy || this.dead || this.deleting || !this.inbox.length) return;
     const m = this.inbox.shift();
     // set by the broker for messages typed by a person in the relay GUI; a broker older than this app doesn't send it,
     // then the reserved-for-people name decides. It only re-opens the relay budget: relay text never attaches files.
     const human = m.human ?? m.from === "user";
-    this.runPrompt(m.prompt, bubble("relay", m.text, m.from), human ? "human" : "relay");
+    const el = bubble("relay", m.text, m.from);
+    el._human = human; // typed by you in the relay GUI: yours for Left Shift+Up/Down
+    this.runPrompt(m.prompt, el, human ? "human" : "relay");
   }
 
   // --- streaming blocks
@@ -964,14 +1020,20 @@ class SessionView {
 
   send() {
     const text = this.input.value.trim();
-    if (!text || this.dead) return;
+    if (!text || this.dead || this.deleting) return;
     const cmd = this.agentAvailable() ? SlashCommands.parseAgentCommand(text) : null;
     if (this.busy) {
       if (cmd) this.statusEl.textContent = "Wait until Copilot finishes this turn.";
       return;
     }
-    this.input.value = "";
+    // sending a recalled message as it was brings back what you were typing before recalling it
+    const recalled = this.recallEl;
+    const typed = this.draft;
+    this.input.value = recalled ? typed : "";
+    this.setRecalled(null);
+    this.draft = "";
     this.autosize();
+    this.updatePopup(); // the restored draft may be a "/command"
     if (cmd) {
       if (cmd.arg === "") {
         this.agentPicker.focus();
@@ -983,6 +1045,11 @@ class SessionView {
       if (hit) this.chooseAgent(hit.value);
       else {
         this.input.value = text;
+        if (recalled) {
+          // still the recalled message: Left Shift+Down brings back what was typed before
+          this.draft = typed;
+          this.setRecalled(recalled);
+        }
         this.autosize();
         this.statusEl.textContent = `Unknown agent "${cmd.arg}". Available: ${entries.map((e) => e.name).join(", ")}`;
       }
@@ -1015,12 +1082,16 @@ class SessionView {
       this.error(e.message);
     } finally {
       this.prompting = false;
-      if (before !== null) {
-        const after = await api.userMessages(this.sessionId).catch(() => null);
-        if (after === before) this.dropTurn(bubble);
+      // the view was closed or its session deleted meanwhile: nothing to update (a refresh would also replace the
+      // delete's warning in the status line)
+      if (views.get(this.sessionId) === this) {
+        if (before !== null) {
+          const after = await api.userMessages(this.sessionId).catch(() => null);
+          if (after === before) this.dropTurn(bubble);
+        }
+        if (!this.dead) this.setBusy(false);
+        if (!this.deleting) scheduleRefresh(); // a delete refreshes the list itself
       }
-      if (!this.dead) this.setBusy(false);
-      scheduleRefresh();
     }
   }
 
@@ -1089,14 +1160,17 @@ async function openSession(s) {
   activate(s.sessionId);
   v.setBusy(true);
   v.statusEl.textContent = "Resuming session…";
+  v.resuming = true;
   try {
     const res = await api.openSession(s.sessionId, s.cwd);
+    v.resuming = false;
     v.flush();
     v.setConfig(res.configOptions);
     v.log.scrollTop = v.log.scrollHeight;
     v.setBusy(false);
     if (!v.log.childElementCount) v.system("No messages yet.");
   } catch (e) {
+    v.resuming = false;
     v.dead = true;
     v.error(`Could not resume this session: ${e.message}`);
     v.setBusy(false);
@@ -1122,15 +1196,44 @@ async function newSession(cwd) {
   }
 }
 
-async function closeView(id) {
+/** Remove a session's view and everything the window keeps for it (the session itself is closed by the caller). */
+function dropView(id) {
   const v = views.get(id);
-  if (!v) return;
-  if (v.busy && !v.dead && !confirm("Copilot is still working in this session. Stop it and close?")) return;
   views.delete(id);
   lastCommands.delete(id);
   lastUsage.delete(id); // a re-opened session must not flash this stale snapshot
-  v.el.remove();
+  early.delete(id);
+  v?.el.remove();
   if (activeId === id) activate([...views.keys()].pop() ?? null);
+}
+
+/** Rebuild a closed session's view from its files (after its history changed or a delete failed); relay messages
+ *  that were waiting in the old view move to the new one. */
+async function reopenView(old, error) {
+  const { sessionId, cwd, title, inbox } = old;
+  const typed = old.recallEl ? old.draft : old.input.value; // what you typed (not a recalled earlier message)
+  if (views.get(sessionId) === old) views.delete(sessionId);
+  old.el.remove();
+  await openSession({ sessionId, cwd, title });
+  const v = views.get(sessionId);
+  if (!v) return;
+  if (error) v.error(error);
+  if (v.dead && inbox.length) v.error(`${inbox.length} relay message(s) waiting for this session were discarded.`);
+  if (typed && !v.input.value) {
+    v.input.value = typed;
+    v.autosize();
+  }
+  if (inbox.length && !v.dead) {
+    v.inbox.push(...inbox);
+    v.pump();
+  }
+}
+
+async function closeView(id) {
+  const v = views.get(id);
+  if (!v || v.deleting) return; // a running delete closes it, or restores it if the delete fails
+  if (v.busy && !v.dead && !confirm("Copilot is still working in this session. Stop it and close?")) return;
+  dropView(id);
   await api.closeSession(id).catch(() => {});
   renderList();
 }
@@ -1146,7 +1249,8 @@ function setStatus(text, isError = false) {
 
 async function refresh() {
   try {
-    sessions = await api.listSessions();
+    // a list fetched while a delete was running may still contain that session
+    sessions = (await api.listSessions()).filter((s) => !deleting.has(s.sessionId) && !deletedIds.has(s.sessionId));
     for (const s of sessions) {
       const v = views.get(s.sessionId);
       if (v && s.title && !v.title) v.setTitle(s.title);
@@ -1166,11 +1270,92 @@ function scheduleRefresh() {
 
 function item(s, v) {
   return h(
-    "button",
-    { class: "item" + (s.sessionId === activeId ? " active" : ""), title: `${s.title ?? ""}\n${s.cwd}\n${s.sessionId}`, onclick: () => openSession(s) },
-    h("div", { class: "t" }, v && !v.dead && h("span", { class: "dot" + (v.busy ? " busy" : "") }), h("b", {}, shortTitle(v?.title || s.title))),
-    h("div", { class: "m" }, [s.updatedAt ? ago(s.updatedAt) : "", s.sessionId.slice(0, 8)].filter(Boolean).join(" · ")),
+    "div",
+    { class: "item-row" },
+    h(
+      "button",
+      {
+        class: "item" + (s.sessionId === activeId ? " active" : ""),
+        title: `${s.title ?? ""}\n${s.cwd}\n${s.sessionId}`,
+        // opening it now would only make a dead view (main refuses); a failed delete reopens it itself
+        onclick: () => (deleting.has(s.sessionId) ? setStatus("This session is being deleted.", true) : openSession(s)),
+      },
+      h("div", { class: "t" }, v && !v.dead && h("span", { class: "dot" + (v.busy ? " busy" : "") }), h("b", {}, shortTitle(v?.title || s.title))),
+      h("div", { class: "m" }, [s.updatedAt ? ago(s.updatedAt) : "", s.sessionId.slice(0, 8)].filter(Boolean).join(" · ")),
+    ),
+    h("button", { class: "item-del danger", title: "Delete this session", onclick: () => deleteSessionFlow({ ...s, title: v?.title || s.title }) }, "🗑"),
   );
+}
+
+const deleting = new Set(); // sessions whose delete is running
+const deletedIds = new Set(); // deleted in this run of the app
+/** Delete a whole session from disk after asking; closes its view first. */
+async function deleteSessionFlow(s) {
+  if (deleting.has(s.sessionId)) return;
+  const v = views.get(s.sessionId);
+  // refused before asking: main would refuse a session that is still resuming, and a Fork/Delete of a message
+  // reopens the session when it is done
+  if (v?.resuming) return setStatus("This session is still opening. Delete it when it has loaded.", true);
+  if (v?.historyOp) return setStatus("Wait until the fork or delete of a message has finished.", true);
+  const name = shortTitle(s.title) || s.sessionId.slice(0, 8);
+  const ok = confirm(
+    `Delete the session "${name}"?\n\n` +
+      `${s.cwd ?? ""}\n${s.sessionId}\n\n` +
+      (v?.prompting && !v.dead ? "Copilot is still working in it and will be stopped.\n\n" : "") +
+      "Its whole history is removed from disk and cannot be restored. Files changed by the agent are not reverted. " +
+      "Don't use this while the session is open in a terminal Copilot CLI.",
+  );
+  if (!ok) return;
+  deleting.add(s.sessionId);
+  setStatus("Deleting session…");
+  const setDeleting = (on) => {
+    if (!v || views.get(s.sessionId) !== v) return;
+    v.deleting = on;
+    v.setBusy(v.busy); // re-applies the disabled state; a turn ending meanwhile can't re-enable the box
+  };
+  setDeleting(true);
+  const listed = sessions.find((x) => x.sessionId === s.sessionId); // its list entry, put back if it isn't deleted
+  let clean = false;
+  try {
+    const res = await api.deleteSession(s.sessionId); // main closes the session first
+    if (res.refused) {
+      // nothing was touched: the session is still open (or still opening) as it was
+      setDeleting(false);
+      setStatus(`Could not delete the session: ${res.refused}`, true);
+      return;
+    }
+    if (res.stuck) {
+      // closed, but its Copilot process would not exit: main refuses to open it again until that process is gone
+      const lost = v && views.get(s.sessionId) === v ? v.inbox.length : 0;
+      dropView(s.sessionId);
+      setStatus(`Could not delete the session: ${res.stuck}${lost ? ` (${lost} waiting relay message(s) were discarded)` : ""}`, true);
+      return;
+    }
+    deletedIds.add(s.sessionId);
+    const dropped = v && views.get(s.sessionId) === v ? v.inbox.length : 0; // relay messages it never got
+    dropView(s.sessionId); // only now: on a failure the session stays visible
+    sessions = sessions.filter((x) => x.sessionId !== s.sessionId);
+    const problems = [
+      dropped && `${dropped} relay message(s) waiting for it were discarded`,
+      res.leftover && `some files could not be removed yet (retried on the next start): ${res.leftover}`,
+      res.store?.error && `its entry in session-store.db could not be removed: ${res.store.error}`,
+    ].filter(Boolean);
+    setStatus(problems.length ? `Session deleted, but ${problems.join("; ")}` : `Session "${name}" deleted`, problems.length > 0);
+    clean = !problems.length;
+  } catch (e) {
+    setStatus(`Could not delete the session: ${e.message}`, true);
+    // main may have closed it before failing: reopen the view from the session's files (as after deleting messages)
+    if (v && views.get(s.sessionId) === v) {
+      await api.closeSession(s.sessionId).catch(() => {});
+      await reopenView(v, `Could not delete the session: ${e.message}`);
+    }
+  } finally {
+    deleting.delete(s.sessionId);
+    // not deleted: a refresh while it ran may have left it out of the list (see refresh)
+    if (listed && !deletedIds.has(s.sessionId) && !sessions.some((x) => x.sessionId === s.sessionId)) sessions.push(listed);
+    renderList();
+  }
+  if (clean) scheduleRefresh(); // a refresh would replace the warning in the status line with the session count
 }
 
 function renderList() {
@@ -1279,6 +1464,7 @@ const early = new Map();
 const forView = (sessionId, fn) => {
   const v = views.get(sessionId);
   if (v) return fn(v);
+  if (deletedIds.has(sessionId)) return; // no view will ever take these
   if (!early.has(sessionId)) early.set(sessionId, []);
   early.get(sessionId).push(fn);
 };
@@ -1310,6 +1496,19 @@ $("#btn-new-2").addEventListener("click", () => newSession());
 $("#btn-refresh").addEventListener("click", refresh);
 $("#btn-settings").addEventListener("click", openSettings);
 $("#search").addEventListener("input", renderList);
+// Left Shift for message recall (an arrow key's event doesn't say which Shift is down). Tracked on the whole document,
+// in the capture phase, so a Shift pressed before the message box got focus counts; reset whenever it can't be down.
+const leftShift = { down: false };
+const trackShift = (e) => {
+  if (e.code === "ShiftLeft") leftShift.down = e.type === "keydown";
+  // a Left Shift released where the page doesn't see it (inside a confirm() dialog) must not turn a later
+  // Right Shift+arrow into a recall
+  else if (!e.shiftKey || (e.code === "ShiftRight" && e.type === "keydown")) leftShift.down = false;
+};
+document.addEventListener("keydown", trackShift, true);
+document.addEventListener("keyup", trackShift, true);
+window.addEventListener("blur", () => (leftShift.down = false));
+
 document.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "n") {
     e.preventDefault();

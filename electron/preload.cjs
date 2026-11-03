@@ -29,6 +29,8 @@ contextBridge.exposeInMainWorld("api", {
   countFrom: (sessionId, target) => call("sessions:countFrom", sessionId, target),
   forkSession: (sessionId, target) => call("sessions:fork", sessionId, target),
   truncateSession: (sessionId, target) => call("sessions:truncate", sessionId, target),
+  // removes the whole session from disk (closes it first)
+  deleteSession: (sessionId) => call("sessions:delete", sessionId),
   setConfig: (sessionId, configId, value) => call("sessions:setConfig", sessionId, configId, value),
   answerPermission: (sessionId, reqId, optionId) => call("permission:answer", sessionId, reqId, optionId),
   pickDir: () => call("dialog:pickDir"),

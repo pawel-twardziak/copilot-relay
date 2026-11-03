@@ -33,6 +33,12 @@ It runs on Windows, macOS and Linux.
 - **Rename** a session: click its title in the header, type a name, press Enter (Esc cancels). The app uses Copilot's
   own `/rename` command, so the name is the same in the terminal CLI and in the list; it runs no model turn and is
   not added to the conversation.
+- **Delete a whole session**: the **Delete** button in the session header, or 🗑 next to a session in the list (on
+  hover). After a confirmation the app closes it and removes `~/.copilot/session-state/<id>/` and the session's rows
+  in `~/.copilot/session-store.db`. This cannot be undone; files the agent changed are not reverted.
+- **Your earlier messages**: **Left Shift+↑/↓** in the message box walks through the messages you wrote in this
+  session; past the newest one you get back what you were typing. Editing a recalled message makes it the new draft.
+  Right Shift+arrows still select text.
 - **Fork** or **Delete** from any message (hover a prompt, relay message or the start of an answer).
   Fork on a prompt starts a new session with the history before it and puts the prompt in the message box to edit;
   Fork on an answer starts a new session that ends with that answer. Delete removes the message (or answer) and

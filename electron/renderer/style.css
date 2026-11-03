@@ -203,3 +203,15 @@ dialog h3 { font-size: 13px; margin: 16px 0 8px; color: var(--muted); text-trans
 .cmd-row .cmd-hint { color: var(--muted); flex: none; }
 .cmd-row .cmd-desc { color: var(--muted); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .cmd-row.active .cmd-hint, .cmd-row.active .cmd-desc { color: rgba(255, 255, 255, 0.8); }
+
+/* sidebar: delete a session (shown on hover) */
+.item-row { position: relative; }
+.item-row .item-del {
+  position: absolute; top: 4px; right: 4px; opacity: 0; pointer-events: none; /* no clicks while invisible */
+  padding: 0 5px; font-size: 12px; line-height: 18px; background: var(--panel-2);
+}
+.item-row:hover .item-del, .item-row .item-del:focus-visible { opacity: 1; pointer-events: auto; }
+.item-row:hover .item .t b { padding-right: 24px; }
+
+/* the message recalled into the message box with Left Shift+Up/Down */
+.msg.recalled { outline: 2px solid #1f6feb99; outline-offset: 2px; }

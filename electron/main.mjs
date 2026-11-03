@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { AcpConnection } from "./acp.mjs";
-import { countUserMessages, describeCut, forkSession, truncateSession } from "./history.mjs";
+import { countUserMessages, deleteSession, describeCut, forkSession, isSessionId, purgeDeleted, sessionDir, truncateSession } from "./history.mjs";
 import { createUsagePusher } from "./usage.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -218,7 +218,11 @@ function handle(channel, fn) {
   });
 }
 
+let purging = Promise.resolve(); // leftovers of failed deletes are removed before the first list (briefly waited for:
+// they have no workspace.yaml/events.jsonl left, so a slow purge of a big one must not hold up the sidebar)
+
 handle("sessions:list", async () => {
+  await Promise.race([purging, new Promise((r) => setTimeout(r, 1000))]);
   const conn = await getLister();
   const all = [];
   let cursor;
@@ -254,8 +258,29 @@ handle("sessions:new", async (cwd) => {
   }
 });
 
+// sessions being opened (id -> number of opens in flight) / deleted: a delete must not race a resume that hasn't
+// registered the session in `open` yet
+const opening = new Map();
+const deleting = new Set();
+const historyBusy = new Set(); // a truncate is closing the session and rewriting its files
+const lingering = new Map(); // id -> connection whose Copilot would not exit: may still write the session's files
+
 handle("sessions:open", async (sessionId, cwd) => {
   if (open.has(sessionId)) return { sessionId, cwd, configOptions: null, alreadyOpen: true };
+  refuseWhileDeleting(sessionId);
+  // a truncate closed it and is rewriting events.jsonl: a resume now would load (and write) a half-done history
+  if (historyBusy.has(sessionId)) throw new Error("Wait until the delete of a message has finished.");
+  opening.set(sessionId, (opening.get(sessionId) ?? 0) + 1);
+  try {
+    return await openSession(sessionId, cwd);
+  } finally {
+    const n = opening.get(sessionId) - 1;
+    if (n > 0) opening.set(sessionId, n);
+    else opening.delete(sessionId);
+  }
+});
+
+async function openSession(sessionId, cwd) {
   requireDir(cwd);
   const conn = await connect(cwd);
   const relay = relayPrepare();
@@ -272,7 +297,7 @@ handle("sessions:open", async (sessionId, cwd) => {
     conn.kill();
     throw e;
   }
-});
+}
 
 // ---------- images ----------
 
@@ -513,13 +538,14 @@ handle("sessions:rename", async (sessionId, name) => {
   return name;
 });
 
-handle("sessions:cancel", async (sessionId) => {
-  const e = getOpen(sessionId);
-  // pending permission questions must be answered as cancelled
+/** Stop the session's turn: pending permission questions are answered as cancelled, then session/cancel. */
+function cancelTurn(sessionId, e) {
   for (const rpcId of e.permissions.values()) e.conn.respond(rpcId, { outcome: { outcome: "cancelled" } });
   e.permissions.clear();
   e.conn.notify("session/cancel", { sessionId });
-});
+}
+
+handle("sessions:cancel", async (sessionId) => cancelTurn(sessionId, getOpen(sessionId)));
 
 /** Close an open session and stop its agent; returns the stopped connection (undefined if it wasn't open). */
 async function closeEntry(sessionId) {
@@ -570,10 +596,48 @@ function exited(conn, ms = 4000) {
 // how many messages a delete would remove, for the confirm dialog
 handle("sessions:countFrom", async (sessionId, target) => describeCut(sessionId, cutTarget(target)));
 
+/** Close a session's process and wait until it is gone: until then the agent may still write to its files, and
+ *  could recreate a deleted session dir. One that outlives the SIGTERM→SIGKILL of kill() is killed again. */
+async function closeAndWait(sessionId) {
+  const conn = await closeEntry(sessionId);
+  await exited(conn);
+  if (!conn || conn.exited) return;
+  // on Windows the process is a shell wrapper: kill() runs taskkill /T /F on the whole tree again
+  if (process.platform === "win32") conn.kill();
+  else conn.proc?.kill("SIGKILL");
+  await exited(conn, 2000);
+  if (conn.exited) return;
+  // until it is really gone, nothing may open, rewrite or delete the session (a second agent on the same files)
+  lingering.set(sessionId, conn);
+  conn.once("exit", () => lingering.get(sessionId) === conn && lingering.delete(sessionId));
+  throw new Error("Copilot did not exit, so its files were left as they were. The session was closed; try again later.");
+}
+
+const LINGERING = "Copilot is still running for this session (it did not exit). Try again in a moment.";
+
+function refuseWhileDeleting(sessionId) {
+  if (deleting.has(sessionId)) throw new Error("This session is being deleted.");
+  if (lingering.has(sessionId)) throw new Error(LINGERING);
+}
+
+/** Run a truncate of `sessionId` marked in historyBusy, so a delete of the same session is refused meanwhile
+ *  (a fork is synchronous: nothing can run in between). */
+async function historyOp(sessionId, fn) {
+  refuseWhileDeleting(sessionId);
+  // a resume in flight isn't in `open` yet: closeAndWait would miss it and the history be rewritten under it
+  if (opening.has(sessionId)) throw new Error("This session is still opening. Try again when it has loaded.");
+  historyBusy.add(sessionId);
+  try {
+    return await fn();
+  } finally {
+    historyBusy.delete(sessionId);
+  }
+}
 // copy of the history up to the target under a new session id; the source stays as it is (open or not)
 handle("sessions:fork", async (sessionId, target) => {
   target = cutTarget(target);
   refuseWhilePrompting(sessionId);
+  refuseWhileDeleting(sessionId);
   return forkSession(sessionId, target);
 });
 
@@ -581,10 +645,44 @@ handle("sessions:fork", async (sessionId, target) => {
 handle("sessions:truncate", async (sessionId, target) => {
   target = cutTarget(target);
   refuseWhilePrompting(sessionId);
-  describeCut(sessionId, target); // throws for a target that doesn't match, before anything is closed
-  // the agent may write to events.jsonl until its process is gone
-  await exited(await closeEntry(sessionId));
-  return truncateSession(sessionId, target);
+  return historyOp(sessionId, async () => {
+    describeCut(sessionId, target); // throws for a target that doesn't match, before anything is closed
+    await closeAndWait(sessionId);
+    return truncateSession(sessionId, target);
+  });
+});
+
+// the whole session, for good: its process is closed first (the agent may write to its files until it is gone)
+handle("sessions:delete", async (sessionId) => {
+  // refusals leave the session untouched (still open if it was): the window must not reopen it
+  if (!isSessionId(sessionId)) return { refused: `Invalid session id: ${sessionId}` };
+  if (opening.has(sessionId)) return { refused: "This session is still opening. Try again when it has loaded." };
+  if (historyBusy.has(sessionId)) return { refused: "Wait until the delete of a message has finished." };
+  if (deleting.has(sessionId)) return { refused: "This session is already being deleted." };
+  if (lingering.has(sessionId)) return { refused: LINGERING };
+  // an entry that isn't a plain session dir (a file, a link) can't be deleted here: say so before closing anything
+  try {
+    sessionDir(sessionId);
+  } catch (err) {
+    if (err.code !== "ENOSESSION") return { refused: err.message };
+  }
+  deleting.add(sessionId);
+  try {
+    const e = open.get(sessionId);
+    if (e?.prompting || e?.permissions.size) cancelTurn(sessionId, e); // a running turn would delay session/close
+    try {
+      await closeAndWait(sessionId);
+    } catch (err) {
+      return { stuck: err.message }; // the window must not reopen it while the old process lives
+    }
+    // missingOk: a session that never wrote its dir (or is already gone) just has its store rows removed
+    const res = await deleteSession(sessionId, { missingOk: true });
+    if (res.leftover) console.warn(`[delete] could not remove ${res.leftover}`);
+    if (res.store.error) console.warn(`[delete] session-store.db: ${res.store.error}`);
+    return res;
+  } finally {
+    deleting.delete(sessionId);
+  }
 });
 
 handle("sessions:setConfig", async (sessionId, configId, value) => {
@@ -868,6 +966,7 @@ if (!app.requestSingleInstanceLock()) {
   });
   fixPath();
   app.whenReady().then(() => {
+    purging = purgeDeleted().catch(() => {}); // what an earlier delete could not remove
     createWindow();
     app.on("activate", () => BrowserWindow.getAllWindows().length === 0 && createWindow());
   });
