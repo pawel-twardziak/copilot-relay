@@ -214,4 +214,4 @@ dialog h3 { font-size: 13px; margin: 16px 0 8px; color: var(--muted); text-trans
 .item-row:hover .item .t b { padding-right: 24px; }
 
 /* the message recalled into the message box with Left Shift+Up/Down */
-.msg.user.recalled { outline: 2px solid #1f6feb99; outline-offset: 2px; }
+.msg.recalled { outline: 2px solid #1f6feb99; outline-offset: 2px; }

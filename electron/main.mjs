@@ -218,10 +218,11 @@ function handle(channel, fn) {
   });
 }
 
-let purging = Promise.resolve(); // leftovers of failed deletes are removed before the first list
+let purging = Promise.resolve(); // leftovers of failed deletes are removed before the first list (briefly waited for:
+// they have no workspace.yaml/events.jsonl left, so a slow purge of a big one must not hold up the sidebar)
 
 handle("sessions:list", async () => {
-  await purging;
+  await Promise.race([purging, new Promise((r) => setTimeout(r, 1000))]);
   const conn = await getLister();
   const all = [];
   let cursor;
