@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { AcpConnection } from "./acp.mjs";
-import { countUserMessages, deleteSession, describeCut, forkSession, isSessionId, purgeDeleted, truncateSession } from "./history.mjs";
+import { countUserMessages, deleteSession, describeCut, forkSession, isSessionId, purgeDeleted, sessionDir, truncateSession } from "./history.mjs";
 import { createUsagePusher } from "./usage.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -264,6 +264,8 @@ const lingering = new Map(); // id -> connection whose Copilot would not exit: m
 handle("sessions:open", async (sessionId, cwd) => {
   if (open.has(sessionId)) return { sessionId, cwd, configOptions: null, alreadyOpen: true };
   refuseWhileDeleting(sessionId);
+  // a truncate closed it and is rewriting events.jsonl: a resume now would load (and write) a half-done history
+  if (historyBusy.has(sessionId)) throw new Error("Wait until the delete of a message has finished.");
   opening.set(sessionId, (opening.get(sessionId) ?? 0) + 1);
   try {
     return await openSession(sessionId, cwd);
@@ -652,6 +654,12 @@ handle("sessions:delete", async (sessionId) => {
   if (historyBusy.has(sessionId)) return { refused: "Wait until the delete of a message has finished." };
   if (deleting.has(sessionId)) return { refused: "This session is already being deleted." };
   if (lingering.has(sessionId)) return { refused: LINGERING };
+  // an entry that isn't a plain session dir (a file, a link) can't be deleted here: say so before closing anything
+  try {
+    sessionDir(sessionId);
+  } catch (err) {
+    if (!/^Session not found/.test(err.message)) return { refused: err.message };
+  }
   deleting.add(sessionId);
   try {
     const e = open.get(sessionId);

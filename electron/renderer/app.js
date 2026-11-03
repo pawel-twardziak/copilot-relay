@@ -1207,7 +1207,7 @@ function dropView(id) {
  *  that were waiting in the old view move to the new one. */
 async function reopenView(old, error) {
   const { sessionId, cwd, title, inbox } = old;
-  const typed = old.input.value; // what was in the message box
+  const typed = old.recallEl ? old.draft : old.input.value; // what you typed (not a recalled earlier message)
   if (views.get(sessionId) === old) views.delete(sessionId);
   old.el.remove();
   await openSession({ sessionId, cwd, title });
@@ -1304,6 +1304,7 @@ async function deleteSessionFlow(s) {
     v.setBusy(v.busy); // re-applies the disabled state; a turn ending meanwhile can't re-enable the box
   };
   setDeleting(true);
+  const listed = sessions.find((x) => x.sessionId === s.sessionId); // its list entry, put back if it isn't deleted
   let clean = false;
   try {
     const res = await api.deleteSession(s.sessionId); // main closes the session first
@@ -1315,8 +1316,9 @@ async function deleteSessionFlow(s) {
     }
     if (res.stuck) {
       // closed, but its Copilot process would not exit: main refuses to open it again until that process is gone
+      const lost = v && views.get(s.sessionId) === v ? v.inbox.length : 0;
       dropView(s.sessionId);
-      setStatus(`Could not delete the session: ${res.stuck}`, true);
+      setStatus(`Could not delete the session: ${res.stuck}${lost ? ` (${lost} waiting relay message(s) were discarded)` : ""}`, true);
       return;
     }
     deletedIds.add(s.sessionId);
@@ -1340,7 +1342,7 @@ async function deleteSessionFlow(s) {
   } finally {
     deleting.delete(s.sessionId);
     // not deleted: a refresh while it ran may have left it out of the list (see refresh)
-    if (!deletedIds.has(s.sessionId) && !sessions.some((x) => x.sessionId === s.sessionId)) sessions.push(s);
+    if (listed && !deletedIds.has(s.sessionId) && !sessions.some((x) => x.sessionId === s.sessionId)) sessions.push(listed);
     renderList();
   }
   if (clean) scheduleRefresh(); // a refresh would replace the warning in the status line with the session count
