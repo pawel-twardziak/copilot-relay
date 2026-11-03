@@ -620,6 +620,8 @@ function refuseWhileDeleting(sessionId) {
  *  (a fork is synchronous: nothing can run in between). */
 async function historyOp(sessionId, fn) {
   refuseWhileDeleting(sessionId);
+  // a resume in flight isn't in `open` yet: closeAndWait would miss it and the history be rewritten under it
+  if (opening.has(sessionId)) throw new Error("This session is still opening. Try again when it has loaded.");
   historyBusy.add(sessionId);
   try {
     return await fn();
@@ -658,7 +660,7 @@ handle("sessions:delete", async (sessionId) => {
   try {
     sessionDir(sessionId);
   } catch (err) {
-    if (!/^Session not found/.test(err.message)) return { refused: err.message };
+    if (err.code !== "ENOSESSION") return { refused: err.message };
   }
   deleting.add(sessionId);
   try {

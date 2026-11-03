@@ -486,8 +486,10 @@ class SessionView {
   /** Your messages in this thread, oldest first. Relay messages from other sessions are not yours: live ones are
    *  .msg.relay, replayed ones are .msg.user with the broker's "[from <name>]" prefix. */
   ownMessages() {
-    return [...this.log.querySelectorAll(".msg.user")].filter((el) => {
+    // a message you typed in the relay GUI is yours: live it is .msg.relay with _human, replayed a plain .msg.user
+    return [...this.log.querySelectorAll(".msg.user, .msg.relay")].filter((el) => {
       const text = el._matchText?.() ?? "";
+      if (el.classList.contains("relay") && !el._human) return false;
       return !el.hidden && text.trim() && !RELAY_PREFIX.test(text);
     });
   }
@@ -752,7 +754,9 @@ class SessionView {
     // set by the broker for messages typed by a person in the relay GUI; a broker older than this app doesn't send it,
     // then the reserved-for-people name decides. It only re-opens the relay budget: relay text never attaches files.
     const human = m.human ?? m.from === "user";
-    this.runPrompt(m.prompt, bubble("relay", m.text, m.from), human ? "human" : "relay");
+    const el = bubble("relay", m.text, m.from);
+    el._human = human; // typed by you in the relay GUI: yours for Left Shift+Up/Down
+    this.runPrompt(m.prompt, el, human ? "human" : "relay");
   }
 
   // --- streaming blocks
@@ -1454,6 +1458,7 @@ const early = new Map();
 const forView = (sessionId, fn) => {
   const v = views.get(sessionId);
   if (v) return fn(v);
+  if (deletedIds.has(sessionId)) return; // no view will ever take these
   if (!early.has(sessionId)) early.set(sessionId, []);
   early.get(sessionId).push(fn);
 };

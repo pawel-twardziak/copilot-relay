@@ -33,7 +33,7 @@ export function sessionDir(id) {
     root = fs.realpathSync(sessionStateDir());
     st = fs.lstatSync(path.join(root, id));
   } catch {
-    throw new Error(`Session not found: ${id}`);
+    throw Object.assign(new Error(`Session not found: ${id}`), { code: "ENOSESSION" });
   }
   if (!st.isDirectory()) throw new Error(`Session ${id} is not a directory`);
   const dir = fs.realpathSync(path.join(root, id));
@@ -230,7 +230,7 @@ export async function deleteSession(id, { missingOk = false } = {}) {
   try {
     dir = sessionDir(id);
   } catch (err) {
-    if (!missingOk || !/^Session not found/.test(err.message)) throw err; // an invalid id is never "not found"
+    if (!missingOk || err.code !== "ENOSESSION") throw err; // an invalid id or a non-dir entry is never "not found"
   }
   let leftover = null;
   if (dir) {

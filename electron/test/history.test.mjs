@@ -550,7 +550,7 @@ describe("deleteSession", () => {
 
   test("refuses invalid and missing ids", async () => {
     await assert.rejects(deleteSession("../etc"), /Invalid session id/);
-    await assert.rejects(deleteSession(randomUUID()), /Session not found/);
+    await assert.rejects(deleteSession(randomUUID()), (err) => err.code === "ENOSESSION" && /Session not found/.test(err.message));
     await assert.rejects(forgetInStore("x' OR 1=1 --"), /Invalid session id/);
   });
 });
