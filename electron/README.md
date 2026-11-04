@@ -6,6 +6,9 @@ It runs on Windows, macOS and Linux.
 - **Resume** any existing Copilot CLI session, including sessions started in a terminal. The list comes from
   ACP `session/list` and is grouped by folder. Opening a session replays its history.
 - **Start** a new session in any folder: use **+ New session**, `Ctrl/Cmd+N`, or the `+` next to a folder in the list.
+- **Collapse** a folder in the list by clicking its name (▸ / ▾, the number is its session count). **Pin** a session
+  with 📌 (on hover): pinned sessions are listed on top, above the folders. Both are remembered. While you filter the
+  list every folder is shown expanded.
 - Chat with streamed answers, collapsible thinking and tool calls, file diffs and permission prompts.
   Press **Stop** (or `Esc`) to cancel a turn.
 - Links are clickable. Web and `mailto:` links open in your browser or mail app. File links and file paths in
@@ -28,6 +31,14 @@ It runs on Windows, macOS and Linux.
   reboot; a new folder is then created on the next paste.
   **⚙ Settings → Files** shows the exact folder, the number and size of the files, **Open folder** and
   **Delete pasted images**, plus the location of the settings file.
+- **Images in the chat**: images mentioned with `@path` in prompts and relay messages, and Markdown images in answers,
+  are shown as thumbnails. Click one to open the viewer: the wheel zooms around the cursor, drag moves the image,
+  double-click switches between fit and 100 %, `+` / `-` / `0`, `F` or ⛶ for full screen, `←` / `→` for the other
+  images of the message, `Esc` closes. Local images in the session folder or the paste folder load by themselves;
+  any other local file shows **Click to load** and is read only when you click it (a path in a relay message or an
+  answer must not make the app read files on its own). Network paths and SVG are never shown.
+- **Text size**: **Left Ctrl + mouse wheel** or **Left Ctrl + `+` / `-`** makes the chat text bigger or smaller
+  (70–200 %), **Left Ctrl + `0`** resets it. It applies to all sessions and is remembered.
 - Copy anything. Hover a message, code block or tool output to show its **Copy** button; copying a diff gives the
   new file content. **Copy thread** copies the whole conversation as Markdown. Right-click shows Copy / Select All.
 - **Rename** a session: click its title in the header, type a name, press Enter (Esc cancels). The app uses Copilot's
