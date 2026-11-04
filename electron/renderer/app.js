@@ -4,6 +4,25 @@
 // `api` is the global exposed by preload.cjs (window.api)
 const $ = (sel, el = document) => el.querySelector(sel);
 
+const decodeURIComponentSafe = (x) => {
+  try {
+    return decodeURIComponent(x);
+  } catch {
+    return x;
+  }
+};
+
+/** Open the viewer on a thumbnail's image, with the other loaded images of the same message to page through. */
+function openViewerFrom(img) {
+  const msg = img.closest(".msg") ?? img.parentElement;
+  const imgs = [...msg.querySelectorAll(".thumb img")];
+  viewer.open?.(
+    imgs.map((i) => ({ src: i.src, name: i.alt })),
+    Math.max(0, imgs.indexOf(img)),
+    img.closest(".thumb"),
+  );
+}
+
 /** Tiny DOM helper: h("div", { class: "x", onclick }, child, "text") */
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
@@ -102,6 +121,10 @@ function bubble(cls, text, from) {
 }
 
 marked.use({ gfm: true, breaks: false });
+// Markdown images never become <img>: a local src must be read by the main process (see images:load), and every
+// image gets the same thumbnail + viewer. The placeholder is replaced by a thumbnail when the reply is finished.
+const attr = (x) => String(x ?? "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+marked.use({ renderer: { image: ({ href, text }) => `<span class="img-ref" data-src="${attr(href)}" data-alt="${attr(text)}"></span>` } });
 // DOMPurify's default URI rules, plus file: for <a href> only. Links are opened by the main process on click, which
 // refuses network paths. An <img src="file://host/..."> would be fetched on render (on Windows an SMB connection that
 // leaks the NTLM hash), so file: stays forbidden everywhere else (and the CSP has no 'self' for images).
@@ -314,6 +337,58 @@ class SessionView {
   }
 
   /** Web links open in the browser; anything else is treated as a file path (relative to the session folder). */
+  // --- images in messages: thumbnails, opened in the viewer
+
+  /** One load per image source and session (re-renders and repeated mentions reuse it). Never rejects. */
+  loadImage(src) {
+    this.images ??= new Map();
+    if (!this.images.has(src)) {
+      const name = decodeURIComponentSafe(String(src).split(/[\\/]/).pop().replace(/[?#].*$/, "")) || "image";
+      const remote = /^https:\/\//i.test(src) || /^data:image\/(png|jpeg|gif|webp)[;,]/i.test(src);
+      this.images.set(src, remote ? Promise.resolve({ dataUrl: src, name }) : api.loadImage(this.cwd, src).catch((e) => ({ problem: e.message, name })));
+    }
+    return this.images.get(src);
+  }
+
+  /** A thumbnail for `src`, filled in when it has loaded: an image, a "click to load" chip or an "unavailable" note. */
+  thumb(src, alt = "") {
+    const slot = h("span", { class: "thumb-slot" });
+    const show = (r) => {
+      if (r.dataUrl) {
+        const img = h("img", { src: r.dataUrl, alt: alt || r.name, loading: "lazy", draggable: "false" });
+        slot.replaceChildren(h("button", { class: "thumb", title: alt || r.name, onclick: () => openViewerFrom(img) }, img));
+      } else if (r.outside) {
+        // outside the session and paste folders: read only because the user asked for it (not cached for others)
+        const chip = h("button", { class: "img-chip", title: `${src}\nOutside the session folder: loaded only when you click.` }, `🖼 Click to load ${r.name}`);
+        chip.onclick = () => {
+          chip.disabled = true;
+          api
+            .loadImage(this.cwd, src, { clicked: true })
+            .catch((e) => ({ problem: e.message, name: r.name }))
+            .then(show);
+        };
+        slot.replaceChildren(chip);
+      } else slot.replaceChildren(h("span", { class: "img-chip off", title: r.problem ?? "" }, `🖼 ${r.name} unavailable`));
+    };
+    this.loadImage(src).then(show);
+    return slot;
+  }
+
+  /** Thumbnails for the images a prompt mentions (`@path`), under its text. */
+  mentionThumbs(el, text) {
+    const refs = UiState.imageMentions(text);
+    if (!refs.length || el.querySelector(":scope > .thumbs")) return;
+    el.querySelector(":scope > .body")?.after(h("div", { class: "thumbs" }, ...refs.map((src) => this.thumb(src))));
+  }
+
+  /** Markdown images of a finished agent reply (placeholders from the marked renderer) become thumbnails in place. */
+  imageRefs(body) {
+    for (const ref of body.querySelectorAll(".img-ref[data-src]")) {
+      const src = ref.dataset.src;
+      ref.replaceWith(h("span", { class: "thumbs inline" }, src ? this.thumb(src, ref.dataset.alt) : null));
+    }
+  }
+
   async openLink(href) {
     if (!href || href.startsWith("#")) return;
     try {
@@ -755,6 +830,7 @@ class SessionView {
     // then the reserved-for-people name decides. It only re-opens the relay budget: relay text never attaches files.
     const human = m.human ?? m.from === "user";
     const el = bubble("relay", m.text, m.from);
+    this.mentionThumbs(el, m.text);
     el._human = human; // typed by you in the relay GUI: yours for Left Shift+Up/Down
     this.runPrompt(m.prompt, el, human ? "human" : "relay");
   }
@@ -800,6 +876,8 @@ class SessionView {
     if (r && this.renderQueued) renderRun(r, true);
     else if (r?.type === "agent") linkify(r.body, { codeOnly: true });
     else if (r?.type === "user") linkify(r.body);
+    if (r?.type === "agent") this.imageRefs(r.body);
+    else if (r?.type === "user") this.mentionThumbs(r.el, r.text);
     this.run = null;
   }
 
@@ -1061,7 +1139,9 @@ class SessionView {
       this.applyRename(rename.name);
       return;
     }
-    this.runPrompt(text, bubble("user", text), "app");
+    const el = bubble("user", text);
+    this.mentionThumbs(el, text);
+    this.runPrompt(text, el, "app");
   }
 
   /** @param {"app"|"human"|"relay"} source who wrote the prompt (decides the relay budget and image attachments) */

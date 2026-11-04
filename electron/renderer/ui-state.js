@@ -42,6 +42,19 @@ function stepScale(current, dir) {
   return Math.min(CHAT_SCALE.max, Math.max(CHAT_SCALE.min, next));
 }
 
-const UiState = { listModel, CHAT_SCALE, stepScale };
+// `@path` / `@"path with spaces"` mentions, the same syntax main.mjs attaches images from (MENTION_RE there)
+const MENTION_RE = /(?:^|\s)@(?:"([^"]+)"|(\S+))/g;
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp)$/i;
+/** Image files mentioned in a prompt, in order, each once. */
+function imageMentions(text) {
+  const out = [];
+  for (const m of String(text ?? "").matchAll(MENTION_RE)) {
+    const raw = m[1] ?? m[2].replace(/[.,;:!?)]+$/, "");
+    if (IMAGE_EXT.test(raw) && !out.includes(raw)) out.push(raw);
+  }
+  return out;
+}
+
+const UiState = { listModel, CHAT_SCALE, stepScale, imageMentions };
 globalThis.UiState = UiState;
 if (typeof module !== "undefined") module.exports = UiState;

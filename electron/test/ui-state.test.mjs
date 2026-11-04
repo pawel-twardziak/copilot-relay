@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { test } from "node:test";
 
 const UiState = createRequire(import.meta.url)("../renderer/ui-state.js");
-const { listModel, stepScale } = UiState;
+const { listModel, stepScale, imageMentions } = UiState;
 
 const S = (sessionId, cwd, updatedAt, title = sessionId) => ({ sessionId, cwd, updatedAt, title });
 const sessions = [
@@ -81,4 +81,22 @@ test("stepScale steps by 10 % and clamps to 70-200 %", () => {
   assert.equal(stepScale(1.3, 0), 1);
   assert.equal(stepScale(0.8999999, 1), 1);
   assert.equal(stepScale(Number.NaN, 1), 1.1); // a broken stored value starts from 100 %
+});
+
+test("imageMentions keeps only image files", () => {
+  assert.deepEqual(imageMentions("see @a.png and @b.txt"), ["a.png"]);
+  assert.deepEqual(imageMentions("@/x/A.JPG @y.jpeg @z.gif @w.webp @v.svg"), ["/x/A.JPG", "y.jpeg", "z.gif", "w.webp"]);
+});
+
+test("quoted mention with spaces", () => {
+  assert.deepEqual(imageMentions('look @"C:\\A B\\Shot.PNG" ok'), ["C:\\A B\\Shot.PNG"]);
+});
+
+test("imageMentions drops trailing punctuation and repeats", () => {
+  assert.deepEqual(imageMentions("@x.png, @x.png. (@y.png)"), ["x.png"]);
+});
+
+test("an @ inside a word is not a mention", () => {
+  assert.deepEqual(imageMentions("mail me@x.png"), []);
+  assert.deepEqual(imageMentions(""), []);
 });
