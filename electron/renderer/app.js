@@ -1621,11 +1621,13 @@ function saveUi() {
 
 /** Collapse / expand one project in place (no re-render, so the transition runs). */
 function toggleGroup(cwd, header, items) {
+  // while filtering every folder is shown expanded and the stored state stays as it was (a toggle you can't see
+  // would surprise you when the filter is cleared)
+  if ($("#search").value.trim()) return setStatus("Clear the filter to collapse or expand folders.");
   const collapsed = !ui.collapsed.has(cwd);
   if (collapsed) ui.collapsed.add(cwd);
   else ui.collapsed.delete(cwd);
   saveUi();
-  if ($("#search").value.trim()) return renderList(); // filtering shows everything expanded anyway
   header.classList.toggle("collapsed", collapsed);
   header.setAttribute("aria-expanded", String(!collapsed));
   items.classList.toggle("collapsed", collapsed);

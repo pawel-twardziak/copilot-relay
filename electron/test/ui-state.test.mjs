@@ -117,3 +117,7 @@ test("zoomAt clamps to 10-1000 %", () => {
   assert.deepEqual(zoomAt({ scale: 10, x: 5, y: 6 }, 2, 0, 0), { scale: 10, x: 5, y: 6 });
   assert.equal(zoomAt({ scale: 0.1, x: 0, y: 0 }, 0.5, 0, 0).scale, 0.1);
 });
+
+test("imageMentions ignores URLs (a relay message must not make the app fetch them)", () => {
+  assert.deepEqual(imageMentions("@https://evil.example/p.png @http://x/y.gif @file:///p/a.png @b.png"), ["file:///p/a.png", "b.png"]);
+});

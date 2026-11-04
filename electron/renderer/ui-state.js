@@ -50,6 +50,8 @@ function imageMentions(text) {
   const out = [];
   for (const m of String(text ?? "").matchAll(MENTION_RE)) {
     const raw = m[1] ?? m[2].replace(/[.,;:!?)]+$/, "");
+    // URLs are not shown: a relay message must not make the app fetch something (file: URLs are local paths)
+    if (/^[a-z][a-z0-9+.-]*:/i.test(raw) && !/^file:/i.test(raw) && !/^[a-z]:[\\/]/i.test(raw)) continue;
     if (IMAGE_EXT.test(raw) && !out.includes(raw)) out.push(raw);
   }
   return out;

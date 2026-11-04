@@ -1,6 +1,6 @@
 // Electron main process: owns the `copilot --acp` processes and bridges them to the window over IPC.
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from "electron";
-import { isInside } from "./paths.mjs";
+import { isInside, lexicalPath } from "./paths.mjs";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -872,26 +872,36 @@ async function pasteStats() {
 // this window. `clicked` (the user clicked "Click to load") lifts that folder rule, nothing else.
 const MAX_PREVIEW_BYTES = 20 * 1024 * 1024;
 handle("images:load", async (cwd, src, { clicked = false } = {}) => {
-  const fallbackName = path.basename(String(src ?? "").replace(/[?#].*$/, "")) || "image";
+  const t = String(src ?? "");
+  const fallbackName = path.basename(t.replace(/[?#].*$/, "")) || "image";
+  if (/^[a-z][a-z0-9+.-]*:/i.test(t) && !/^file:/i.test(t) && !/^[a-z]:[\\/]/i.test(t)) return { problem: "is not a local file", name: fallbackName };
+  let roots;
+  if (!clicked) {
+    const { current, older } = await pasteFolders();
+    const own = [current];
+    for (const d of older) if (d && (await isOwnPasteDir(d))) own.push(d);
+    roots = [cwd, ...own].filter(Boolean).map((d) => path.resolve(d));
+    // first by the text alone, before anything on that path is touched (a mapped drive or automount would contact
+    // the remote host), with and without %xx decoding as resolveTarget tries both
+    const home = os.homedir();
+    const lexical = [lexicalPath(t, cwd, home), lexicalPath(t, cwd, home, process.platform, { decode: false })];
+    if (lexical.some((c) => !c || !roots.some((r) => isInside(c, r)))) return { outside: true, name: fallbackName };
+  }
   let real;
   try {
-    const t = String(src ?? "");
-    if (/^[a-z][a-z0-9+.-]*:/i.test(t) && !/^file:/i.test(t) && !/^[a-z]:[\\/]/i.test(t)) return { problem: "is not a local file", name: fallbackName };
     real = await resolveTarget(cwd, t); // refuses network paths (also through links), resolves file:, ~ and relative
   } catch (e) {
     return { problem: e.message, name: fallbackName };
   }
   const name = path.basename(real);
   if (!clicked) {
-    const { current, older } = await pasteFolders();
-    const own = [];
-    for (const d of [current, ...older]) if (d && (d === current || (await isOwnPasteDir(d)))) own.push(d);
-    const roots = [];
-    for (const d of [cwd, ...own]) {
-      const r = d && (await localRealpath(path.resolve(d)).catch(() => null));
-      if (r) roots.push(r);
+    // then by the real path: a symlink inside the folder may point anywhere
+    const realRoots = [];
+    for (const d of roots) {
+      const r = await localRealpath(d).catch(() => null);
+      if (r) realRoots.push(r);
     }
-    if (!roots.some((r) => isInside(real, r))) return { outside: true, name };
+    if (!realRoots.some((r) => isInside(real, r))) return { outside: true, name };
   }
   const r = await readImage(real, MAX_PREVIEW_BYTES);
   if (r.problem) return { problem: r.problem, name };
