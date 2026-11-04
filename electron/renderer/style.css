@@ -53,6 +53,19 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberat
 .group-title span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .group-title .new-here { visibility: hidden; padding: 0 6px; font-size: 12px; line-height: 16px; }
 .group-title:hover .new-here { visibility: visible; }
+.group-title.toggle { cursor: pointer; justify-content: flex-start; align-items: center; border-radius: 4px; }
+.group-title.toggle:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.group-title .name { flex: 0 1 auto; }
+.group-title .chev { flex: none; display: inline-block; width: 10px; transform: rotate(90deg); transition: transform .18s ease-out; }
+.group-title.collapsed .chev { transform: none; }
+.group-title .count { flex: none; margin-left: auto; padding: 0 6px; border-radius: 8px; background: var(--panel-2); letter-spacing: 0; }
+.group-title .new-here { flex: none; }
+.group-items { display: grid; grid-template-rows: 1fr; transition: grid-template-rows .18s ease-out, opacity .18s ease-out; }
+.group-items > div { overflow: hidden; min-height: 0; }
+.group-items.collapsed { grid-template-rows: 0fr; opacity: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .group-title .chev, .group-items { transition: none; }
+}
 .item {
   display: block; width: 100%; text-align: left; border: 1px solid transparent; background: none;
   padding: 6px 8px; border-radius: 6px;

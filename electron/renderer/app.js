@@ -1358,9 +1358,75 @@ async function deleteSessionFlow(s) {
   if (clean) scheduleRefresh(); // a refresh would replace the warning in the status line with the session count
 }
 
+// Sidebar state kept across restarts: pinned sessions, collapsed project folders, chat text scale.
+const UI_KEY = "copilot-sessions.ui.v1";
+function loadUi() {
+  let raw = {};
+  try {
+    raw = JSON.parse(localStorage.getItem(UI_KEY) ?? "{}") ?? {};
+  } catch {}
+  const set = (a) => new Set(Array.isArray(a) ? a.filter((x) => typeof x === "string") : []);
+  return { pinned: set(raw.pinned), collapsed: set(raw.collapsed), chatScale: Number.isFinite(raw.chatScale) ? raw.chatScale : 1 };
+}
+const ui = loadUi();
+function saveUi() {
+  try {
+    localStorage.setItem(UI_KEY, JSON.stringify({ pinned: [...ui.pinned], collapsed: [...ui.collapsed], chatScale: ui.chatScale }));
+  } catch {}
+}
+
+/** Collapse / expand one project in place (no re-render, so the transition runs). */
+function toggleGroup(cwd, header, items) {
+  const collapsed = !ui.collapsed.has(cwd);
+  if (collapsed) ui.collapsed.add(cwd);
+  else ui.collapsed.delete(cwd);
+  saveUi();
+  if ($("#search").value.trim()) return renderList(); // filtering shows everything expanded anyway
+  header.classList.toggle("collapsed", collapsed);
+  header.setAttribute("aria-expanded", String(!collapsed));
+  items.classList.toggle("collapsed", collapsed);
+  items.inert = collapsed;
+}
+
+function groupBlock(g) {
+  const items = h("div", { class: "group-items" + (g.collapsed ? " collapsed" : "") }, h("div", {}, ...g.sessions.map((s) => item(s, views.get(s.sessionId)))));
+  items.inert = g.collapsed;
+  const header = h(
+    "div",
+    {
+      class: "group-title toggle" + (g.collapsed ? " collapsed" : ""),
+      title: g.cwd,
+      role: "button",
+      tabindex: "0",
+      "aria-expanded": String(!g.collapsed),
+      onclick: () => toggleGroup(g.cwd, header, items),
+      onkeydown: (e) => {
+        if (e.target !== header || (e.key !== "Enter" && e.key !== " ")) return;
+        e.preventDefault();
+        toggleGroup(g.cwd, header, items);
+      },
+    },
+    h("span", { class: "chev" }, "▸"),
+    h("span", { class: "name" }, baseName(g.cwd)),
+    h("span", { class: "count" }, String(g.count)),
+    h(
+      "button",
+      {
+        class: "new-here",
+        title: `New session in ${g.cwd}`,
+        onclick: (e) => {
+          e.stopPropagation();
+          newSession(g.cwd);
+        },
+      },
+      "+",
+    ),
+  );
+  return [header, items];
+}
+
 function renderList() {
   const q = $("#search").value.trim().toLowerCase();
-  const match = (s) => !q || `${s.title ?? ""} ${s.cwd ?? ""} ${s.sessionId}`.toLowerCase().includes(q);
   const out = [];
 
   const openOnes = [...views.values()].map((v) => sessions.find((s) => s.sessionId === v.sessionId) ?? { sessionId: v.sessionId, cwd: v.cwd, title: v.title });
@@ -1369,25 +1435,8 @@ function renderList() {
     for (const s of openOnes) out.push(item(s, views.get(s.sessionId)));
   }
 
-  const groups = new Map();
-  for (const s of sessions.filter(match)) {
-    if (!groups.has(s.cwd)) groups.set(s.cwd, []);
-    groups.get(s.cwd).push(s);
-  }
-  const latest = (list) => Math.max(...list.map((s) => new Date(s.updatedAt ?? 0).getTime()));
-  const sorted = [...groups.entries()].sort((a, b) => latest(b[1]) - latest(a[1]));
-  for (const [cwd, list] of sorted) {
-    list.sort((a, b) => new Date(b.updatedAt ?? 0) - new Date(a.updatedAt ?? 0));
-    out.push(
-      h(
-        "div",
-        { class: "group-title", title: cwd },
-        h("span", {}, baseName(cwd)),
-        h("button", { class: "new-here", title: `New session in ${cwd}`, onclick: () => newSession(cwd) }, "+"),
-      ),
-    );
-    for (const s of list) out.push(item(s, views.get(s.sessionId)));
-  }
+  const model = UiState.listModel(sessions, { pinned: ui.pinned, collapsed: ui.collapsed, query: q });
+  for (const g of model.groups) out.push(...groupBlock(g));
   if (!out.length) out.push(h("div", { class: "group-title" }, h("span", {}, q ? "No matches" : "No sessions yet")));
   $("#session-list").replaceChildren(...out);
 }
