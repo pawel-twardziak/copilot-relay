@@ -799,6 +799,7 @@ class SessionView {
     const r = this.run;
     if (r && this.renderQueued) renderRun(r, true);
     else if (r?.type === "agent") linkify(r.body, { codeOnly: true });
+    else if (r?.type === "user") linkify(r.body);
     this.run = null;
   }
 
@@ -1131,7 +1132,10 @@ function renderRun(r, final = false) {
     r.body.innerHTML = md(r.text);
     decoratePres(r.body);
     if (final) linkify(r.body, { codeOnly: true }); // marked already links plain URLs in Markdown text
-  } else r.body.textContent = r.text;
+  } else {
+    r.body.textContent = r.text;
+    if (final && r.type === "user") linkify(r.body); // a prompt replayed from the history (live ones are bubbles)
+  }
   if (r.type === "user") r.el.hidden = !r.text.trim(); // replayed prompts can be empty (e.g. attachments only)
 }
 
