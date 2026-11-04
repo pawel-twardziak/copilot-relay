@@ -4,6 +4,25 @@
 // `api` is the global exposed by preload.cjs (window.api)
 const $ = (sel, el = document) => el.querySelector(sel);
 
+const decodeURIComponentSafe = (x) => {
+  try {
+    return decodeURIComponent(x);
+  } catch {
+    return x;
+  }
+};
+
+/** Open the viewer on a thumbnail's image, with the other loaded images of the same message to page through. */
+function openViewerFrom(img) {
+  const msg = img.closest(".msg") ?? img.parentElement;
+  const imgs = [...msg.querySelectorAll(".thumb img")];
+  viewer.open?.(
+    imgs.map((i) => ({ src: i.src, name: i.alt })),
+    Math.max(0, imgs.indexOf(img)),
+    img.closest(".thumb"),
+  );
+}
+
 /** Tiny DOM helper: h("div", { class: "x", onclick }, child, "text") */
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
@@ -102,6 +121,10 @@ function bubble(cls, text, from) {
 }
 
 marked.use({ gfm: true, breaks: false });
+// Markdown images never become <img>: a local src must be read by the main process (see images:load), and every
+// image gets the same thumbnail + viewer. The placeholder is replaced by a thumbnail when the reply is finished.
+const attr = (x) => String(x ?? "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+marked.use({ renderer: { image: ({ href, text }) => `<span class="img-ref" data-src="${attr(href)}" data-alt="${attr(text)}"></span>` } });
 // DOMPurify's default URI rules, plus file: for <a href> only. Links are opened by the main process on click, which
 // refuses network paths. An <img src="file://host/..."> would be fetched on render (on Windows an SMB connection that
 // leaks the NTLM hash), so file: stays forbidden everywhere else (and the CSP has no 'self' for images).
@@ -314,6 +337,58 @@ class SessionView {
   }
 
   /** Web links open in the browser; anything else is treated as a file path (relative to the session folder). */
+  // --- images in messages: thumbnails, opened in the viewer
+
+  /** One load per image source and session (re-renders and repeated mentions reuse it). Never rejects. */
+  loadImage(src) {
+    this.images ??= new Map();
+    if (!this.images.has(src)) {
+      const name = decodeURIComponentSafe(String(src).split(/[\\/]/).pop().replace(/[?#].*$/, "")) || "image";
+      const remote = /^https:\/\//i.test(src) || /^data:image\/(png|jpeg|gif|webp)[;,]/i.test(src);
+      this.images.set(src, remote ? Promise.resolve({ dataUrl: src, name }) : api.loadImage(this.cwd, src).catch((e) => ({ problem: e.message, name })));
+    }
+    return this.images.get(src);
+  }
+
+  /** A thumbnail for `src`, filled in when it has loaded: an image, a "click to load" chip or an "unavailable" note. */
+  thumb(src, alt = "") {
+    const slot = h("span", { class: "thumb-slot" });
+    const show = (r) => {
+      if (r.dataUrl) {
+        const img = h("img", { src: r.dataUrl, alt: alt || r.name, loading: "lazy", draggable: "false" });
+        slot.replaceChildren(h("button", { class: "thumb", title: alt || r.name, onclick: () => openViewerFrom(img) }, img));
+      } else if (r.outside) {
+        // outside the session and paste folders: read only because the user asked for it (not cached for others)
+        const chip = h("button", { class: "img-chip", title: `${src}\nOutside the session folder: loaded only when you click.` }, `🖼 Click to load ${r.name}`);
+        chip.onclick = () => {
+          chip.disabled = true;
+          api
+            .loadImage(this.cwd, src, { clicked: true })
+            .catch((e) => ({ problem: e.message, name: r.name }))
+            .then(show);
+        };
+        slot.replaceChildren(chip);
+      } else slot.replaceChildren(h("span", { class: "img-chip off", title: r.problem ?? "" }, `🖼 ${r.name} unavailable`));
+    };
+    this.loadImage(src).then(show);
+    return slot;
+  }
+
+  /** Thumbnails for the images a prompt mentions (`@path`), under its text. */
+  mentionThumbs(el, text) {
+    const refs = UiState.imageMentions(text);
+    if (!refs.length || el.querySelector(":scope > .thumbs")) return;
+    el.querySelector(":scope > .body")?.after(h("div", { class: "thumbs" }, ...refs.map((src) => this.thumb(src))));
+  }
+
+  /** Markdown images of a finished agent reply (placeholders from the marked renderer) become thumbnails in place. */
+  imageRefs(body) {
+    for (const ref of body.querySelectorAll(".img-ref[data-src]")) {
+      const src = ref.dataset.src;
+      ref.replaceWith(h("span", { class: "thumbs inline" }, src ? this.thumb(src, ref.dataset.alt) : null));
+    }
+  }
+
   async openLink(href) {
     if (!href || href.startsWith("#")) return;
     try {
@@ -755,6 +830,7 @@ class SessionView {
     // then the reserved-for-people name decides. It only re-opens the relay budget: relay text never attaches files.
     const human = m.human ?? m.from === "user";
     const el = bubble("relay", m.text, m.from);
+    this.mentionThumbs(el, m.text);
     el._human = human; // typed by you in the relay GUI: yours for Left Shift+Up/Down
     this.runPrompt(m.prompt, el, human ? "human" : "relay");
   }
@@ -799,6 +875,9 @@ class SessionView {
     const r = this.run;
     if (r && this.renderQueued) renderRun(r, true);
     else if (r?.type === "agent") linkify(r.body, { codeOnly: true });
+    else if (r?.type === "user") linkify(r.body);
+    if (r?.type === "agent") this.imageRefs(r.body);
+    else if (r?.type === "user") this.mentionThumbs(r.el, r.text);
     this.run = null;
   }
 
@@ -1060,7 +1139,9 @@ class SessionView {
       this.applyRename(rename.name);
       return;
     }
-    this.runPrompt(text, bubble("user", text), "app");
+    const el = bubble("user", text);
+    this.mentionThumbs(el, text);
+    this.runPrompt(text, el, "app");
   }
 
   /** @param {"app"|"human"|"relay"} source who wrote the prompt (decides the relay budget and image attachments) */
@@ -1131,7 +1212,10 @@ function renderRun(r, final = false) {
     r.body.innerHTML = md(r.text);
     decoratePres(r.body);
     if (final) linkify(r.body, { codeOnly: true }); // marked already links plain URLs in Markdown text
-  } else r.body.textContent = r.text;
+  } else {
+    r.body.textContent = r.text;
+    if (final && r.type === "user") linkify(r.body); // a prompt replayed from the history (live ones are bubbles)
+  }
   if (r.type === "user") r.el.hidden = !r.text.trim(); // replayed prompts can be empty (e.g. attachments only)
 }
 
@@ -1268,7 +1352,16 @@ function scheduleRefresh() {
   refreshTimer = setTimeout(refresh, 1500);
 }
 
-function item(s, v) {
+function togglePin(id) {
+  if (ui.pinned.has(id)) ui.pinned.delete(id);
+  else ui.pinned.add(id);
+  saveUi();
+  renderList();
+}
+
+/** showProject: the session is listed outside its project (pinned), so its folder goes into the meta line. */
+function item(s, v, { showProject = false } = {}) {
+  const pinned = ui.pinned.has(s.sessionId);
   return h(
     "div",
     { class: "item-row" },
@@ -1281,9 +1374,14 @@ function item(s, v) {
         onclick: () => (deleting.has(s.sessionId) ? setStatus("This session is being deleted.", true) : openSession(s)),
       },
       h("div", { class: "t" }, v && !v.dead && h("span", { class: "dot" + (v.busy ? " busy" : "") }), h("b", {}, shortTitle(v?.title || s.title))),
-      h("div", { class: "m" }, [s.updatedAt ? ago(s.updatedAt) : "", s.sessionId.slice(0, 8)].filter(Boolean).join(" · ")),
+      h("div", { class: "m" }, [showProject && baseName(s.cwd), s.updatedAt ? ago(s.updatedAt) : "", s.sessionId.slice(0, 8)].filter(Boolean).join(" · ")),
     ),
-    h("button", { class: "item-del danger", title: "Delete this session", onclick: () => deleteSessionFlow({ ...s, title: v?.title || s.title }) }, "🗑"),
+    h(
+      "div",
+      { class: "row-actions" },
+      h("button", { class: "item-pin" + (pinned ? " pinned" : ""), title: pinned ? "Unpin" : "Pin to top", "aria-pressed": String(pinned), onclick: () => togglePin(s.sessionId) }, "📌"),
+      h("button", { class: "item-del danger", title: "Delete this session", onclick: () => deleteSessionFlow({ ...s, title: v?.title || s.title }) }, "🗑"),
+    ),
   );
 }
 
@@ -1332,6 +1430,7 @@ async function deleteSessionFlow(s) {
       return;
     }
     deletedIds.add(s.sessionId);
+    if (ui.pinned.delete(s.sessionId)) saveUi();
     const dropped = v && views.get(s.sessionId) === v ? v.inbox.length : 0; // relay messages it never got
     dropView(s.sessionId); // only now: on a failure the session stays visible
     sessions = sessions.filter((x) => x.sessionId !== s.sessionId);
@@ -1358,9 +1457,222 @@ async function deleteSessionFlow(s) {
   if (clean) scheduleRefresh(); // a refresh would replace the warning in the status line with the session count
 }
 
+// Sidebar state kept across restarts: pinned sessions, collapsed project folders, chat text scale.
+const UI_KEY = "copilot-sessions.ui.v1";
+function loadUi() {
+  let raw = {};
+  try {
+    raw = JSON.parse(localStorage.getItem(UI_KEY) ?? "{}") ?? {};
+  } catch {}
+  const set = (a) => new Set(Array.isArray(a) ? a.filter((x) => typeof x === "string") : []);
+  return { pinned: set(raw.pinned), collapsed: set(raw.collapsed), chatScale: Number.isFinite(raw.chatScale) ? raw.chatScale : 1 };
+}
+const ui = loadUi();
+// The image viewer, opened from a thumbnail: wheel zooms around the cursor, drag pans, double-click toggles fit / 100 %.
+const viewer = (() => {
+  const el = $("#viewer");
+  const stage = $(".viewer-stage", el);
+  const img = $("img", stage);
+  const cap = $(".viewer-cap", el);
+  const zoomEl = $(".viewer-zoom", el);
+  let list = [];
+  let index = 0;
+  let st = { scale: 1, x: 0, y: 0 };
+  let fitted = true;
+  let opener = null;
+  let drag = null;
+  const apply = () => {
+    img.style.transform = `translate(${st.x}px, ${st.y}px) scale(${st.scale})`;
+    zoomEl.textContent = `${Math.round(st.scale * 100)} %`;
+  };
+  const box = () => stage.getBoundingClientRect();
+  const fit = () => {
+    const b = box();
+    const s = UiState.fitScale(img.naturalWidth, img.naturalHeight, b.width, b.height);
+    st = { scale: s, x: (b.width - img.naturalWidth * s) / 2, y: (b.height - img.naturalHeight * s) / 2 };
+    fitted = true;
+    apply();
+  };
+  const zoomBy = (factor, cx, cy) => {
+    const b = box();
+    st = UiState.zoomAt(st, factor, cx ?? b.width / 2, cy ?? b.height / 2);
+    fitted = false;
+    apply();
+  };
+  const show = (i) => {
+    index = (i + list.length) % list.length;
+    const it = list[index];
+    img.onload = fit;
+    img.src = it.src;
+    img.alt = it.name ?? "";
+    cap.textContent = list.length > 1 ? `${it.name} · ${index + 1} / ${list.length}` : (it.name ?? "");
+    for (const b of el.querySelectorAll('[data-act="prev"], [data-act="next"]')) b.hidden = list.length < 2;
+  };
+  const toggleFull = () => (document.fullscreenElement ? document.exitFullscreen() : el.requestFullscreen()).catch(() => {});
+  const v = {
+    isOpen: false,
+    open(images, i = 0, from = null) {
+      if (!images.length) return;
+      list = images;
+      opener = from;
+      el.hidden = false;
+      v.isOpen = true;
+      show(i);
+      el.focus();
+    },
+    close() {
+      if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+      el.hidden = true;
+      v.isOpen = false;
+      img.removeAttribute("src");
+      opener?.isConnected && opener.focus();
+      opener = null;
+    },
+  };
+  const actions = {
+    prev: () => show(index - 1),
+    next: () => show(index + 1),
+    out: () => zoomBy(1 / 1.25),
+    in: () => zoomBy(1.25),
+    fit,
+    full: toggleFull,
+    close: v.close,
+  };
+  $(".viewer-bar", el).addEventListener("click", (e) => {
+    const act = e.target.closest("button")?.dataset.act;
+    if (act) actions[act]();
+  });
+  stage.addEventListener(
+    "wheel",
+    (e) => {
+      e.preventDefault();
+      if (!e.deltaY) return;
+      const b = box();
+      zoomBy(e.deltaY < 0 ? 1.15 : 1 / 1.15, e.clientX - b.left, e.clientY - b.top);
+    },
+    { passive: false },
+  );
+  stage.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    drag = { x: e.clientX, y: e.clientY, sx: st.x, sy: st.y, moved: false, onImage: onImage(e) };
+    stage.setPointerCapture(e.pointerId);
+    stage.classList.add("grabbing");
+  });
+  stage.addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    const dx = e.clientX - drag.x;
+    const dy = e.clientY - drag.y;
+    if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
+    if (!drag.moved) return;
+    st = { ...st, x: drag.sx + dx, y: drag.sy + dy };
+    fitted = false;
+    apply();
+  });
+  const endDrag = () => {
+    const d = drag;
+    drag = null;
+    stage.classList.remove("grabbing");
+    return d;
+  };
+  stage.addEventListener("pointerup", () => {
+    const d = endDrag();
+    if (d && !d.moved && !d.onImage) v.close(); // a plain click on the dark backdrop
+  });
+  stage.addEventListener("pointercancel", endDrag);
+  // (with the pointer captured by the stage, clicks target the stage: test the position, not e.target)
+  const onImage = (e) => {
+    const r = img.getBoundingClientRect();
+    return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+  };
+  stage.addEventListener("dblclick", (e) => {
+    if (!onImage(e)) return;
+    const b = box();
+    if (fitted) zoomBy(1 / st.scale, e.clientX - b.left, e.clientY - b.top);
+    else fit();
+  });
+  const refit = () => v.isOpen && fitted && fit();
+  document.addEventListener("fullscreenchange", refit);
+  window.addEventListener("resize", refit);
+  // while it is open the viewer has the keyboard: no chat shortcuts (recall, zoom, Ctrl+N) underneath
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      if (!v.isOpen) return;
+      e.stopImmediatePropagation();
+      const key = { "+": "in", "=": "in", "-": "out", _: "out", 0: "fit", f: "full", F: "full", ArrowLeft: "prev", ArrowRight: "next" }[e.key];
+      if (e.key === "Escape") {
+        e.preventDefault();
+        if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+        else v.close();
+      } else if (key && !(list.length < 2 && (key === "prev" || key === "next"))) {
+        e.preventDefault();
+        actions[key]();
+      } else if (e.key === "Tab") e.preventDefault(); // focus stays in the viewer
+    },
+    true,
+  );
+  return v;
+})();
+function saveUi() {
+  try {
+    localStorage.setItem(UI_KEY, JSON.stringify({ pinned: [...ui.pinned], collapsed: [...ui.collapsed], chatScale: ui.chatScale }));
+  } catch {}
+}
+
+/** Collapse / expand one project in place (no re-render, so the transition runs). */
+function toggleGroup(cwd, header, items) {
+  // while filtering every folder is shown expanded and the stored state stays as it was (a toggle you can't see
+  // would surprise you when the filter is cleared)
+  if ($("#search").value.trim()) return setStatus("Clear the filter to collapse or expand folders.");
+  const collapsed = !ui.collapsed.has(cwd);
+  if (collapsed) ui.collapsed.add(cwd);
+  else ui.collapsed.delete(cwd);
+  saveUi();
+  header.classList.toggle("collapsed", collapsed);
+  header.setAttribute("aria-expanded", String(!collapsed));
+  items.classList.toggle("collapsed", collapsed);
+  items.inert = collapsed;
+}
+
+function groupBlock(g) {
+  const items = h("div", { class: "group-items" + (g.collapsed ? " collapsed" : "") }, h("div", {}, ...g.sessions.map((s) => item(s, views.get(s.sessionId)))));
+  items.inert = g.collapsed;
+  const header = h(
+    "div",
+    {
+      class: "group-title toggle" + (g.collapsed ? " collapsed" : ""),
+      title: g.cwd,
+      role: "button",
+      tabindex: "0",
+      "aria-expanded": String(!g.collapsed),
+      onclick: () => toggleGroup(g.cwd, header, items),
+      onkeydown: (e) => {
+        if (e.target !== header || (e.key !== "Enter" && e.key !== " ")) return;
+        e.preventDefault();
+        toggleGroup(g.cwd, header, items);
+      },
+    },
+    h("span", { class: "chev" }, "▸"),
+    h("span", { class: "name" }, baseName(g.cwd)),
+    h("span", { class: "count" }, String(g.count)),
+    h(
+      "button",
+      {
+        class: "new-here",
+        title: `New session in ${g.cwd}`,
+        onclick: (e) => {
+          e.stopPropagation();
+          newSession(g.cwd);
+        },
+      },
+      "+",
+    ),
+  );
+  return [header, items];
+}
+
 function renderList() {
   const q = $("#search").value.trim().toLowerCase();
-  const match = (s) => !q || `${s.title ?? ""} ${s.cwd ?? ""} ${s.sessionId}`.toLowerCase().includes(q);
   const out = [];
 
   const openOnes = [...views.values()].map((v) => sessions.find((s) => s.sessionId === v.sessionId) ?? { sessionId: v.sessionId, cwd: v.cwd, title: v.title });
@@ -1369,25 +1681,11 @@ function renderList() {
     for (const s of openOnes) out.push(item(s, views.get(s.sessionId)));
   }
 
-  const groups = new Map();
-  for (const s of sessions.filter(match)) {
-    if (!groups.has(s.cwd)) groups.set(s.cwd, []);
-    groups.get(s.cwd).push(s);
+  const model = UiState.listModel(sessions, { pinned: ui.pinned, collapsed: ui.collapsed, query: q });
+  if (model.pinned.length) {
+    out.unshift(h("div", { class: "group-title" }, h("span", {}, "📌 Pinned")), ...model.pinned.map((s) => item(s, views.get(s.sessionId), { showProject: true })));
   }
-  const latest = (list) => Math.max(...list.map((s) => new Date(s.updatedAt ?? 0).getTime()));
-  const sorted = [...groups.entries()].sort((a, b) => latest(b[1]) - latest(a[1]));
-  for (const [cwd, list] of sorted) {
-    list.sort((a, b) => new Date(b.updatedAt ?? 0) - new Date(a.updatedAt ?? 0));
-    out.push(
-      h(
-        "div",
-        { class: "group-title", title: cwd },
-        h("span", {}, baseName(cwd)),
-        h("button", { class: "new-here", title: `New session in ${cwd}`, onclick: () => newSession(cwd) }, "+"),
-      ),
-    );
-    for (const s of list) out.push(item(s, views.get(s.sessionId)));
-  }
+  for (const g of model.groups) out.push(...groupBlock(g));
   if (!out.length) out.push(h("div", { class: "group-title" }, h("span", {}, q ? "No matches" : "No sessions yet")));
   $("#session-list").replaceChildren(...out);
 }
@@ -1508,6 +1806,64 @@ const trackShift = (e) => {
 document.addEventListener("keydown", trackShift, true);
 document.addEventListener("keyup", trackShift, true);
 window.addEventListener("blur", () => (leftShift.down = false));
+
+// Left Ctrl for the chat text size, tracked like Left Shift (a wheel event doesn't say which Ctrl is down)
+const leftCtrl = { down: false };
+const trackCtrl = (e) => {
+  if (e.code === "ControlLeft") leftCtrl.down = e.type === "keydown";
+  else if (!e.ctrlKey || (e.code === "ControlRight" && e.type === "keydown")) leftCtrl.down = false;
+};
+document.addEventListener("keydown", trackCtrl, true);
+document.addEventListener("keyup", trackCtrl, true);
+window.addEventListener("blur", () => (leftCtrl.down = false));
+
+const applyChatScale = () => document.documentElement.style.setProperty("--chat-scale", String(ui.chatScale));
+let scaleNote; // { el, text, timer }: the status line text the size note covers for a moment
+function changeChatScale(dir) {
+  const next = UiState.stepScale(ui.chatScale, dir);
+  const atLimit = next === ui.chatScale && dir !== 0;
+  ui.chatScale = next;
+  saveUi();
+  applyChatScale();
+  const el = views.get(activeId)?.statusEl ?? $("#side-status");
+  if (scaleNote?.el !== el) {
+    if (scaleNote) scaleNote.el.textContent = scaleNote.text;
+    scaleNote = { el, text: el.textContent };
+  }
+  clearTimeout(scaleNote.timer);
+  const limit = atLimit ? (dir > 0 ? " (max)" : " (min)") : "";
+  el.textContent = `Chat text ${Math.round(next * 100)} %${limit}`;
+  const note = el.textContent;
+  scaleNote.timer = setTimeout(() => {
+    if (el.textContent === note) el.textContent = scaleNote.text; // unless something else wrote there meanwhile
+    scaleNote = null;
+  }, 1500);
+}
+applyChatScale();
+
+// Ctrl+wheel and Ctrl + +/-/0 never zoom the whole window; with Left Ctrl they change the chat text size.
+// (The image viewer handles its own wheel and keys while it is open.)
+document.addEventListener(
+  "wheel",
+  (e) => {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    if (leftCtrl.down && !viewer.isOpen && e.deltaY) changeChatScale(e.deltaY < 0 ? 1 : -1);
+  },
+  { passive: false, capture: true },
+);
+const ZOOM_KEYS = { "+": 1, "=": 1, "-": -1, _: -1, 0: 0, NumpadAdd: 1, NumpadSubtract: -1, Numpad0: 0 };
+document.addEventListener(
+  "keydown",
+  (e) => {
+    if (!e.ctrlKey || e.altKey || e.metaKey) return;
+    const dir = ZOOM_KEYS[e.code] ?? ZOOM_KEYS[e.key];
+    if (dir === undefined) return;
+    e.preventDefault();
+    if (leftCtrl.down && !viewer.isOpen) changeChatScale(dir);
+  },
+  true,
+);
 
 document.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "n") {

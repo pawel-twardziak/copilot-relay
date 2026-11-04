@@ -32,6 +32,7 @@
       "acp.mjs",
       "history.mjs",
       "usage.mjs",
+      "paths.mjs",
       "relay-client.mjs",
       "preload.cjs",
       "renderer/**",

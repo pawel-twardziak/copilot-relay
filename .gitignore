@@ -4,3 +4,4 @@ workspace/*
 .idea/
 electron/dist/
 electron/relay-client.mjs
+.superpowers/

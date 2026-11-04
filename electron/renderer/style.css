@@ -1,4 +1,5 @@
 :root {
+  --chat-scale: 1;
   --bg: #0d1117;
   --panel: #161b22;
   --panel-2: #1c2129;
@@ -53,6 +54,19 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberat
 .group-title span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .group-title .new-here { visibility: hidden; padding: 0 6px; font-size: 12px; line-height: 16px; }
 .group-title:hover .new-here { visibility: visible; }
+.group-title.toggle { cursor: pointer; justify-content: flex-start; align-items: center; border-radius: 4px; }
+.group-title.toggle:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.group-title .name { flex: 0 1 auto; }
+.group-title .chev { flex: none; display: inline-block; width: 10px; transform: rotate(90deg); transition: transform .18s ease-out; }
+.group-title.collapsed .chev { transform: none; }
+.group-title .count { flex: none; margin-left: auto; padding: 0 6px; border-radius: 8px; background: var(--panel-2); letter-spacing: 0; }
+.group-title .new-here { flex: none; }
+.group-items { display: grid; grid-template-rows: 1fr; transition: grid-template-rows .18s ease-out, opacity .18s ease-out; }
+.group-items > div { overflow: hidden; min-height: 0; }
+.group-items.collapsed { grid-template-rows: 0fr; opacity: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .group-title .chev, .group-items { transition: none; }
+}
 .item {
   display: block; width: 100%; text-align: left; border: 1px solid transparent; background: none;
   padding: 6px 8px; border-radius: 6px;
@@ -206,12 +220,45 @@ dialog h3 { font-size: 13px; margin: 16px 0 8px; color: var(--muted); text-trans
 
 /* sidebar: delete a session (shown on hover) */
 .item-row { position: relative; }
-.item-row .item-del {
-  position: absolute; top: 4px; right: 4px; opacity: 0; pointer-events: none; /* no clicks while invisible */
+.item-row .row-actions { position: absolute; top: 4px; right: 4px; display: flex; gap: 2px; }
+.item-row .row-actions button {
+  opacity: 0; pointer-events: none; /* no clicks while invisible */
   padding: 0 5px; font-size: 12px; line-height: 18px; background: var(--panel-2);
 }
-.item-row:hover .item-del, .item-row .item-del:focus-visible { opacity: 1; pointer-events: auto; }
-.item-row:hover .item .t b { padding-right: 24px; }
+.item-row:hover .row-actions button, .item-row .row-actions button:focus-visible { pointer-events: auto; }
+.item-row:hover .item-del, .item-row .item-del:focus-visible { opacity: 1; }
+.item-row:hover .item-pin, .item-row .item-pin:focus-visible { opacity: .45; }
+.item-row .item-pin:hover { opacity: 1; }
+.item-row .item-pin.pinned { opacity: 1; pointer-events: auto; background: none; border-color: transparent; }
+.item-row:hover .item-pin.pinned { background: var(--panel-2); border-color: var(--border); }
+.item-row:hover .item .t b { padding-right: 52px; }
+.item-row:has(.item-pin.pinned) .item .t b { padding-right: 28px; }
+.item-row:hover:has(.item-pin.pinned) .item .t b { padding-right: 52px; }
 
 /* the message recalled into the message box with Left Shift+Up/Down */
 .msg.recalled { outline: 2px solid #1f6feb99; outline-offset: 2px; }
+
+/* chat text size (Left Ctrl + wheel / + / - / 0) */
+.log, .composer textarea { zoom: var(--chat-scale); }
+
+/* images in messages */
+.thumbs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; white-space: normal; zoom: calc(1 / var(--chat-scale)); }
+.thumbs.inline { display: inline-flex; margin: 2px 0; vertical-align: top; }
+.thumb { display: block; padding: 0; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); cursor: zoom-in; overflow: hidden; }
+.thumb:hover { border-color: var(--muted); }
+.thumb img { display: block; max-width: 160px; max-height: 120px; object-fit: contain; }
+.img-chip { font-size: 12px; color: var(--muted); padding: 3px 8px; border-radius: 6px; }
+span.img-chip.off { border: 1px dashed var(--border); }
+.img-ref::before { content: "🖼 " attr(data-alt); color: var(--muted); font-size: 12px; }
+
+/* image viewer */
+#viewer { position: fixed; inset: 0; z-index: 1000; background: rgba(1, 4, 9, .9); outline: none; }
+#viewer[hidden] { display: none; }
+.viewer-stage { position: absolute; inset: 0; overflow: hidden; cursor: grab; touch-action: none; }
+.viewer-stage.grabbing { cursor: grabbing; }
+.viewer-stage img { position: absolute; left: 0; top: 0; max-width: none; transform-origin: 0 0; user-select: none; }
+.viewer-bar { position: absolute; top: 10px; right: 10px; display: flex; gap: 6px; align-items: center; }
+.viewer-bar button { min-width: 32px; background: var(--panel-2); }
+.viewer-bar button[hidden] { display: none; }
+.viewer-bar .viewer-zoom { min-width: 64px; font-variant-numeric: tabular-nums; }
+.viewer-cap { position: absolute; left: 14px; bottom: 10px; color: var(--muted); font-size: 12px; pointer-events: none; }

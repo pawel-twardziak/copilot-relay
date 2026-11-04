@@ -1,5 +1,6 @@
 // Electron main process: owns the `copilot --acp` processes and bridges them to the window over IPC.
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from "electron";
+import { isInside, lexicalPath } from "./paths.mjs";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -865,6 +866,49 @@ async function pasteStats() {
   return { dir: dir ?? `${path.join(os.tmpdir(), "copilot-sessions-…")} (created on the first paste)`, count: files.length, size: fmtBytes(sizes.reduce((a, b) => a + b, 0)) };
 }
 
+// Images shown in the chat (thumbnails and the viewer). Larger than the attach limit: a full-size screenshot should
+// still preview. Shown without a click only from the session folder or our paste folders: a path can also come from
+// a relay message or from an agent reply quoting one, and reading local files must not be triggered from outside
+// this window. `clicked` (the user clicked "Click to load") lifts that folder rule, nothing else.
+const MAX_PREVIEW_BYTES = 20 * 1024 * 1024;
+handle("images:load", async (cwd, src, { clicked = false } = {}) => {
+  const t = String(src ?? "");
+  const fallbackName = path.basename(t.replace(/[?#].*$/, "")) || "image";
+  if (/^[a-z][a-z0-9+.-]*:/i.test(t) && !/^file:/i.test(t) && !/^[a-z]:[\\/]/i.test(t)) return { problem: "is not a local file", name: fallbackName };
+  let roots;
+  if (!clicked) {
+    const { current, older } = await pasteFolders();
+    const own = [current];
+    for (const d of older) if (d && (await isOwnPasteDir(d))) own.push(d);
+    roots = [cwd, ...own].filter(Boolean).map((d) => path.resolve(d));
+    // first by the text alone, before anything on that path is touched (a mapped drive or automount would contact
+    // the remote host), with and without %xx decoding as resolveTarget tries both
+    const home = os.homedir();
+    const lexical = [lexicalPath(t, cwd, home), lexicalPath(t, cwd, home, process.platform, { decode: false })];
+    if (lexical.some((c) => !c || !roots.some((r) => isInside(c, r)))) return { outside: true, name: fallbackName };
+  }
+  let real;
+  try {
+    real = await resolveTarget(cwd, t); // refuses network paths (also through links), resolves file:, ~ and relative
+  } catch (e) {
+    return { problem: e.message, name: fallbackName };
+  }
+  const name = path.basename(real);
+  if (!clicked) {
+    // then by the real path: a symlink inside the folder may point anywhere
+    const realRoots = [];
+    for (const d of roots) {
+      const r = await localRealpath(d).catch(() => null);
+      if (r) realRoots.push(r);
+    }
+    if (!realRoots.some((r) => isInside(real, r))) return { outside: true, name };
+  }
+  const r = await readImage(real, MAX_PREVIEW_BYTES);
+  if (r.problem) return { problem: r.problem, name };
+  if (r.tooBig) return { problem: `is too large to preview (${fmtBytes(r.tooBig)})`, name };
+  return { dataUrl: `data:${r.block.mimeType};base64,${r.block.data}`, name };
+});
+
 handle("images:config", async () => ({ mimes: Object.keys(EXT_FOR_MIME), maxBytes: MAX_IMAGE_BYTES, maxSide: MAX_IMAGE_SIDE }));
 
 handle("storage:get", async () => ({ pastes: await pasteStats(), settingsFile: settingsFile() }));
@@ -921,6 +965,9 @@ function createWindow() {
   });
   // The renderer handles link clicks (it knows the session folder) through open:link. These are the fallback for
   // anything that still tries to navigate: web links use the same allowlist, everything else is blocked.
+  // no zoom of the whole window (pinch, Ctrl+wheel): the renderer scales only the chat text
+  win.webContents.setVisualZoomLevelLimits(1, 1);
+  win.webContents.on("zoom-changed", () => win.webContents.setZoomFactor(1));
   win.webContents.setWindowOpenHandler(({ url }) => {
     openWeb(url);
     return { action: "deny" };
@@ -966,6 +1013,16 @@ if (!app.requestSingleInstanceLock()) {
   });
   fixPath();
   app.whenReady().then(() => {
+    // the default menu without its zoom items: Ctrl + +/-/0 belong to the chat text size (see the renderer)
+    Menu.setApplicationMenu(
+      Menu.buildFromTemplate([
+        ...(process.platform === "darwin" ? [{ role: "appMenu" }] : []),
+        { role: "fileMenu" },
+        { role: "editMenu" },
+        { label: "View", submenu: [{ role: "reload" }, { role: "forceReload" }, { role: "toggleDevTools" }, { type: "separator" }, { role: "togglefullscreen" }] },
+        { role: "windowMenu" },
+      ]),
+    );
     purging = purgeDeleted().catch(() => {}); // what an earlier delete could not remove
     createWindow();
     app.on("activate", () => BrowserWindow.getAllWindows().length === 0 && createWindow());
