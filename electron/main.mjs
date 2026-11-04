@@ -1,5 +1,6 @@
 // Electron main process: owns the `copilot --acp` processes and bridges them to the window over IPC.
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from "electron";
+import { isInside } from "./paths.mjs";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -864,6 +865,39 @@ async function pasteStats() {
   const sizes = await Promise.all(files.map((f) => stat(f).then((s) => s.size, () => 0)));
   return { dir: dir ?? `${path.join(os.tmpdir(), "copilot-sessions-…")} (created on the first paste)`, count: files.length, size: fmtBytes(sizes.reduce((a, b) => a + b, 0)) };
 }
+
+// Images shown in the chat (thumbnails and the viewer). Larger than the attach limit: a full-size screenshot should
+// still preview. Shown without a click only from the session folder or our paste folders: a path can also come from
+// a relay message or from an agent reply quoting one, and reading local files must not be triggered from outside
+// this window. `clicked` (the user clicked "Click to load") lifts that folder rule, nothing else.
+const MAX_PREVIEW_BYTES = 20 * 1024 * 1024;
+handle("images:load", async (cwd, src, { clicked = false } = {}) => {
+  const fallbackName = path.basename(String(src ?? "").replace(/[?#].*$/, "")) || "image";
+  let real;
+  try {
+    const t = String(src ?? "");
+    if (/^[a-z][a-z0-9+.-]*:/i.test(t) && !/^file:/i.test(t) && !/^[a-z]:[\\/]/i.test(t)) return { problem: "is not a local file", name: fallbackName };
+    real = await resolveTarget(cwd, t); // refuses network paths (also through links), resolves file:, ~ and relative
+  } catch (e) {
+    return { problem: e.message, name: fallbackName };
+  }
+  const name = path.basename(real);
+  if (!clicked) {
+    const { current, older } = await pasteFolders();
+    const own = [];
+    for (const d of [current, ...older]) if (d && (d === current || (await isOwnPasteDir(d)))) own.push(d);
+    const roots = [];
+    for (const d of [cwd, ...own]) {
+      const r = d && (await localRealpath(path.resolve(d)).catch(() => null));
+      if (r) roots.push(r);
+    }
+    if (!roots.some((r) => isInside(real, r))) return { outside: true, name };
+  }
+  const r = await readImage(real, MAX_PREVIEW_BYTES);
+  if (r.problem) return { problem: r.problem, name };
+  if (r.tooBig) return { problem: `is too large to preview (${fmtBytes(r.tooBig)})`, name };
+  return { dataUrl: `data:${r.block.mimeType};base64,${r.block.data}`, name };
+});
 
 handle("images:config", async () => ({ mimes: Object.keys(EXT_FOR_MIME), maxBytes: MAX_IMAGE_BYTES, maxSide: MAX_IMAGE_SIDE }));
 

@@ -43,6 +43,8 @@ contextBridge.exposeInMainWorld("api", {
   openPastes: () => call("storage:openPastes"),
   clearPastes: () => call("storage:clearPastes"),
   imageConfig: () => call("images:config"),
+  // a chat image as a data: URL; { outside } for a local file outside the session/paste folders unless clicked
+  loadImage: (cwd, src, opts) => call("images:load", cwd, src, opts),
   savePastedImage: (bytes, mime) => call("paste:saveImage", bytes, mime),
   // real path of a File from paste / drag & drop ("" for in-memory data such as a copied screenshot)
   pathForFile: (file) => {
