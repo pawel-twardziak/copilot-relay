@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { test } from "node:test";
 
 const UiState = createRequire(import.meta.url)("../renderer/ui-state.js");
-const { listModel } = UiState;
+const { listModel, stepScale } = UiState;
 
 const S = (sessionId, cwd, updatedAt, title = sessionId) => ({ sessionId, cwd, updatedAt, title });
 const sessions = [
@@ -72,4 +72,13 @@ test("group whose sessions are all pinned is omitted", () => {
     m.groups.map((g) => g.cwd),
     ["/a"],
   );
+});
+
+test("stepScale steps by 10 % and clamps to 70-200 %", () => {
+  assert.equal(stepScale(1, 1), 1.1);
+  assert.equal(stepScale(2, 1), 2);
+  assert.equal(stepScale(0.7, -1), 0.7);
+  assert.equal(stepScale(1.3, 0), 1);
+  assert.equal(stepScale(0.8999999, 1), 1);
+  assert.equal(stepScale(Number.NaN, 1), 1.1); // a broken stored value starts from 100 %
 });

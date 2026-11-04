@@ -1,4 +1,5 @@
 :root {
+  --chat-scale: 1;
   --bg: #0d1117;
   --panel: #161b22;
   --panel-2: #1c2129;
@@ -236,3 +237,6 @@ dialog h3 { font-size: 13px; margin: 16px 0 8px; color: var(--muted); text-trans
 
 /* the message recalled into the message box with Left Shift+Up/Down */
 .msg.recalled { outline: 2px solid #1f6feb99; outline-offset: 2px; }
+
+/* chat text size (Left Ctrl + wheel / + / - / 0) */
+.log, .composer textarea { zoom: var(--chat-scale); }

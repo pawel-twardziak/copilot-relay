@@ -1384,6 +1384,7 @@ function loadUi() {
   return { pinned: set(raw.pinned), collapsed: set(raw.collapsed), chatScale: Number.isFinite(raw.chatScale) ? raw.chatScale : 1 };
 }
 const ui = loadUi();
+const viewer = { isOpen: false }; // the image viewer (opened from a thumbnail)
 function saveUi() {
   try {
     localStorage.setItem(UI_KEY, JSON.stringify({ pinned: [...ui.pinned], collapsed: [...ui.collapsed], chatScale: ui.chatScale }));
@@ -1575,6 +1576,64 @@ const trackShift = (e) => {
 document.addEventListener("keydown", trackShift, true);
 document.addEventListener("keyup", trackShift, true);
 window.addEventListener("blur", () => (leftShift.down = false));
+
+// Left Ctrl for the chat text size, tracked like Left Shift (a wheel event doesn't say which Ctrl is down)
+const leftCtrl = { down: false };
+const trackCtrl = (e) => {
+  if (e.code === "ControlLeft") leftCtrl.down = e.type === "keydown";
+  else if (!e.ctrlKey || (e.code === "ControlRight" && e.type === "keydown")) leftCtrl.down = false;
+};
+document.addEventListener("keydown", trackCtrl, true);
+document.addEventListener("keyup", trackCtrl, true);
+window.addEventListener("blur", () => (leftCtrl.down = false));
+
+const applyChatScale = () => document.documentElement.style.setProperty("--chat-scale", String(ui.chatScale));
+let scaleNote; // { el, text, timer }: the status line text the size note covers for a moment
+function changeChatScale(dir) {
+  const next = UiState.stepScale(ui.chatScale, dir);
+  const atLimit = next === ui.chatScale && dir !== 0;
+  ui.chatScale = next;
+  saveUi();
+  applyChatScale();
+  const el = views.get(activeId)?.statusEl ?? $("#side-status");
+  if (scaleNote?.el !== el) {
+    if (scaleNote) scaleNote.el.textContent = scaleNote.text;
+    scaleNote = { el, text: el.textContent };
+  }
+  clearTimeout(scaleNote.timer);
+  const limit = atLimit ? (dir > 0 ? " (max)" : " (min)") : "";
+  el.textContent = `Chat text ${Math.round(next * 100)} %${limit}`;
+  const note = el.textContent;
+  scaleNote.timer = setTimeout(() => {
+    if (el.textContent === note) el.textContent = scaleNote.text; // unless something else wrote there meanwhile
+    scaleNote = null;
+  }, 1500);
+}
+applyChatScale();
+
+// Ctrl+wheel and Ctrl + +/-/0 never zoom the whole window; with Left Ctrl they change the chat text size.
+// (The image viewer handles its own wheel and keys while it is open.)
+document.addEventListener(
+  "wheel",
+  (e) => {
+    if (!e.ctrlKey) return;
+    e.preventDefault();
+    if (leftCtrl.down && !viewer.isOpen && e.deltaY) changeChatScale(e.deltaY < 0 ? 1 : -1);
+  },
+  { passive: false, capture: true },
+);
+const ZOOM_KEYS = { "+": 1, "=": 1, "-": -1, _: -1, 0: 0, NumpadAdd: 1, NumpadSubtract: -1, Numpad0: 0 };
+document.addEventListener(
+  "keydown",
+  (e) => {
+    if (!e.ctrlKey || e.altKey || e.metaKey) return;
+    const dir = ZOOM_KEYS[e.code] ?? ZOOM_KEYS[e.key];
+    if (dir === undefined) return;
+    e.preventDefault();
+    if (leftCtrl.down && !viewer.isOpen) changeChatScale(dir);
+  },
+  true,
+);
 
 document.addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "n") {

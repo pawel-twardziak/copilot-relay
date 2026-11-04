@@ -32,6 +32,16 @@ function listModel(sessions, { pinned = new Set(), collapsed = new Set(), query 
   return { pinned: top.sort(newestFirst), groups: out };
 }
 
-const UiState = { listModel };
+// Chat text scale: Left Ctrl + wheel / + / - / 0
+const CHAT_SCALE = { min: 0.7, max: 2, step: 0.1 };
+/** dir: 1 bigger, -1 smaller, 0 back to 100 %. Rounded to one decimal so repeated steps don't drift. */
+function stepScale(current, dir) {
+  if (dir === 0) return 1;
+  const base = Number.isFinite(current) ? current : 1;
+  const next = Math.round((base + dir * CHAT_SCALE.step) * 10) / 10;
+  return Math.min(CHAT_SCALE.max, Math.max(CHAT_SCALE.min, next));
+}
+
+const UiState = { listModel, CHAT_SCALE, stepScale };
 globalThis.UiState = UiState;
 if (typeof module !== "undefined") module.exports = UiState;

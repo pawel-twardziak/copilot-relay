@@ -921,6 +921,9 @@ function createWindow() {
   });
   // The renderer handles link clicks (it knows the session folder) through open:link. These are the fallback for
   // anything that still tries to navigate: web links use the same allowlist, everything else is blocked.
+  // no zoom of the whole window (pinch, Ctrl+wheel): the renderer scales only the chat text
+  win.webContents.setVisualZoomLevelLimits(1, 1);
+  win.webContents.on("zoom-changed", () => win.webContents.setZoomFactor(1));
   win.webContents.setWindowOpenHandler(({ url }) => {
     openWeb(url);
     return { action: "deny" };
@@ -966,6 +969,16 @@ if (!app.requestSingleInstanceLock()) {
   });
   fixPath();
   app.whenReady().then(() => {
+    // the default menu without its zoom items: Ctrl + +/-/0 belong to the chat text size (see the renderer)
+    Menu.setApplicationMenu(
+      Menu.buildFromTemplate([
+        ...(process.platform === "darwin" ? [{ role: "appMenu" }] : []),
+        { role: "fileMenu" },
+        { role: "editMenu" },
+        { label: "View", submenu: [{ role: "reload" }, { role: "forceReload" }, { role: "toggleDevTools" }, { type: "separator" }, { role: "togglefullscreen" }] },
+        { role: "windowMenu" },
+      ]),
+    );
     purging = purgeDeleted().catch(() => {}); // what an earlier delete could not remove
     createWindow();
     app.on("activate", () => BrowserWindow.getAllWindows().length === 0 && createWindow());
