@@ -1268,7 +1268,16 @@ function scheduleRefresh() {
   refreshTimer = setTimeout(refresh, 1500);
 }
 
-function item(s, v) {
+function togglePin(id) {
+  if (ui.pinned.has(id)) ui.pinned.delete(id);
+  else ui.pinned.add(id);
+  saveUi();
+  renderList();
+}
+
+/** showProject: the session is listed outside its project (pinned), so its folder goes into the meta line. */
+function item(s, v, { showProject = false } = {}) {
+  const pinned = ui.pinned.has(s.sessionId);
   return h(
     "div",
     { class: "item-row" },
@@ -1281,9 +1290,14 @@ function item(s, v) {
         onclick: () => (deleting.has(s.sessionId) ? setStatus("This session is being deleted.", true) : openSession(s)),
       },
       h("div", { class: "t" }, v && !v.dead && h("span", { class: "dot" + (v.busy ? " busy" : "") }), h("b", {}, shortTitle(v?.title || s.title))),
-      h("div", { class: "m" }, [s.updatedAt ? ago(s.updatedAt) : "", s.sessionId.slice(0, 8)].filter(Boolean).join(" · ")),
+      h("div", { class: "m" }, [showProject && baseName(s.cwd), s.updatedAt ? ago(s.updatedAt) : "", s.sessionId.slice(0, 8)].filter(Boolean).join(" · ")),
     ),
-    h("button", { class: "item-del danger", title: "Delete this session", onclick: () => deleteSessionFlow({ ...s, title: v?.title || s.title }) }, "🗑"),
+    h(
+      "div",
+      { class: "row-actions" },
+      h("button", { class: "item-pin" + (pinned ? " pinned" : ""), title: pinned ? "Unpin" : "Pin to top", "aria-pressed": String(pinned), onclick: () => togglePin(s.sessionId) }, "📌"),
+      h("button", { class: "item-del danger", title: "Delete this session", onclick: () => deleteSessionFlow({ ...s, title: v?.title || s.title }) }, "🗑"),
+    ),
   );
 }
 
@@ -1332,6 +1346,7 @@ async function deleteSessionFlow(s) {
       return;
     }
     deletedIds.add(s.sessionId);
+    if (ui.pinned.delete(s.sessionId)) saveUi();
     const dropped = v && views.get(s.sessionId) === v ? v.inbox.length : 0; // relay messages it never got
     dropView(s.sessionId); // only now: on a failure the session stays visible
     sessions = sessions.filter((x) => x.sessionId !== s.sessionId);
@@ -1436,6 +1451,9 @@ function renderList() {
   }
 
   const model = UiState.listModel(sessions, { pinned: ui.pinned, collapsed: ui.collapsed, query: q });
+  if (model.pinned.length) {
+    out.unshift(h("div", { class: "group-title" }, h("span", {}, "📌 Pinned")), ...model.pinned.map((s) => item(s, views.get(s.sessionId), { showProject: true })));
+  }
   for (const g of model.groups) out.push(...groupBlock(g));
   if (!out.length) out.push(h("div", { class: "group-title" }, h("span", {}, q ? "No matches" : "No sessions yet")));
   $("#session-list").replaceChildren(...out);

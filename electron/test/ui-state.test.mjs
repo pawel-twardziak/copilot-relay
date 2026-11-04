@@ -46,3 +46,30 @@ test("collapsed state is not changed by query", () => {
   listModel(sessions, { collapsed, query: "foo" });
   assert.deepEqual([...collapsed], ["/a"]);
 });
+
+test("pinned sessions are listed first and removed from their group", () => {
+  const m = listModel(sessions, { pinned: new Set(["s2"]) });
+  assert.deepEqual(ids(m.pinned), ["s2"]);
+  assert.ok(m.groups.every((g) => !ids(g.sessions).includes("s2")));
+  assert.equal(m.groups.find((g) => g.cwd === "/a").count, 1);
+});
+
+test("pinned are filtered by query", () => {
+  const m = listModel(sessions, { pinned: new Set(["s2"]), query: "s3" });
+  assert.deepEqual(m.pinned, []);
+});
+
+test("stale pinned ids are ignored", () => {
+  const m = listModel(sessions, { pinned: new Set(["gone"]) });
+  assert.deepEqual(m.pinned, []);
+  assert.equal(m.groups.length, 2);
+});
+
+test("group whose sessions are all pinned is omitted", () => {
+  const m = listModel(sessions, { pinned: new Set(["s3", "s1"]) });
+  assert.deepEqual(ids(m.pinned), ["s3", "s1"]);
+  assert.deepEqual(
+    m.groups.map((g) => g.cwd),
+    ["/a"],
+  );
+});

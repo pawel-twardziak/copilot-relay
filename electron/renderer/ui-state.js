@@ -11,9 +11,14 @@ const newestFirst = (a, b) => time(b) - time(a);
  */
 function listModel(sessions, { pinned = new Set(), collapsed = new Set(), query = "" } = {}) {
   const match = (s) => !query || `${s.title ?? ""} ${s.cwd ?? ""} ${s.sessionId}`.toLowerCase().includes(query);
+  const top = [];
   const groups = new Map();
   for (const s of sessions) {
     if (!match(s)) continue;
+    if (pinned.has(s.sessionId)) {
+      top.push(s); // shown in the pinned section instead of its project
+      continue;
+    }
     if (!groups.has(s.cwd)) groups.set(s.cwd, []);
     groups.get(s.cwd).push(s);
   }
@@ -24,7 +29,7 @@ function listModel(sessions, { pinned = new Set(), collapsed = new Set(), query 
     collapsed: collapsed.has(cwd) && !query,
   }));
   out.sort((a, b) => time(b.sessions[0]) - time(a.sessions[0]));
-  return { pinned: [], groups: out };
+  return { pinned: top.sort(newestFirst), groups: out };
 }
 
 const UiState = { listModel };

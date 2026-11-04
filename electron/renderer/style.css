@@ -219,12 +219,20 @@ dialog h3 { font-size: 13px; margin: 16px 0 8px; color: var(--muted); text-trans
 
 /* sidebar: delete a session (shown on hover) */
 .item-row { position: relative; }
-.item-row .item-del {
-  position: absolute; top: 4px; right: 4px; opacity: 0; pointer-events: none; /* no clicks while invisible */
+.item-row .row-actions { position: absolute; top: 4px; right: 4px; display: flex; gap: 2px; }
+.item-row .row-actions button {
+  opacity: 0; pointer-events: none; /* no clicks while invisible */
   padding: 0 5px; font-size: 12px; line-height: 18px; background: var(--panel-2);
 }
-.item-row:hover .item-del, .item-row .item-del:focus-visible { opacity: 1; pointer-events: auto; }
-.item-row:hover .item .t b { padding-right: 24px; }
+.item-row:hover .row-actions button, .item-row .row-actions button:focus-visible { pointer-events: auto; }
+.item-row:hover .item-del, .item-row .item-del:focus-visible { opacity: 1; }
+.item-row:hover .item-pin, .item-row .item-pin:focus-visible { opacity: .45; }
+.item-row .item-pin:hover { opacity: 1; }
+.item-row .item-pin.pinned { opacity: 1; pointer-events: auto; background: none; border-color: transparent; }
+.item-row:hover .item-pin.pinned { background: var(--panel-2); border-color: var(--border); }
+.item-row:hover .item .t b { padding-right: 52px; }
+.item-row:has(.item-pin.pinned) .item .t b { padding-right: 28px; }
+.item-row:hover:has(.item-pin.pinned) .item .t b { padding-right: 52px; }
 
 /* the message recalled into the message box with Left Shift+Up/Down */
 .msg.recalled { outline: 2px solid #1f6feb99; outline-offset: 2px; }
