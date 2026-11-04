@@ -1468,7 +1468,151 @@ function loadUi() {
   return { pinned: set(raw.pinned), collapsed: set(raw.collapsed), chatScale: Number.isFinite(raw.chatScale) ? raw.chatScale : 1 };
 }
 const ui = loadUi();
-const viewer = { isOpen: false }; // the image viewer (opened from a thumbnail)
+// The image viewer, opened from a thumbnail: wheel zooms around the cursor, drag pans, double-click toggles fit / 100 %.
+const viewer = (() => {
+  const el = $("#viewer");
+  const stage = $(".viewer-stage", el);
+  const img = $("img", stage);
+  const cap = $(".viewer-cap", el);
+  const zoomEl = $(".viewer-zoom", el);
+  let list = [];
+  let index = 0;
+  let st = { scale: 1, x: 0, y: 0 };
+  let fitted = true;
+  let opener = null;
+  let drag = null;
+  const apply = () => {
+    img.style.transform = `translate(${st.x}px, ${st.y}px) scale(${st.scale})`;
+    zoomEl.textContent = `${Math.round(st.scale * 100)} %`;
+  };
+  const box = () => stage.getBoundingClientRect();
+  const fit = () => {
+    const b = box();
+    const s = UiState.fitScale(img.naturalWidth, img.naturalHeight, b.width, b.height);
+    st = { scale: s, x: (b.width - img.naturalWidth * s) / 2, y: (b.height - img.naturalHeight * s) / 2 };
+    fitted = true;
+    apply();
+  };
+  const zoomBy = (factor, cx, cy) => {
+    const b = box();
+    st = UiState.zoomAt(st, factor, cx ?? b.width / 2, cy ?? b.height / 2);
+    fitted = false;
+    apply();
+  };
+  const show = (i) => {
+    index = (i + list.length) % list.length;
+    const it = list[index];
+    img.onload = fit;
+    img.src = it.src;
+    img.alt = it.name ?? "";
+    cap.textContent = list.length > 1 ? `${it.name} · ${index + 1} / ${list.length}` : (it.name ?? "");
+    for (const b of el.querySelectorAll('[data-act="prev"], [data-act="next"]')) b.hidden = list.length < 2;
+  };
+  const toggleFull = () => (document.fullscreenElement ? document.exitFullscreen() : el.requestFullscreen()).catch(() => {});
+  const v = {
+    isOpen: false,
+    open(images, i = 0, from = null) {
+      if (!images.length) return;
+      list = images;
+      opener = from;
+      el.hidden = false;
+      v.isOpen = true;
+      show(i);
+      el.focus();
+    },
+    close() {
+      if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+      el.hidden = true;
+      v.isOpen = false;
+      img.removeAttribute("src");
+      opener?.isConnected && opener.focus();
+      opener = null;
+    },
+  };
+  const actions = {
+    prev: () => show(index - 1),
+    next: () => show(index + 1),
+    out: () => zoomBy(1 / 1.25),
+    in: () => zoomBy(1.25),
+    fit,
+    full: toggleFull,
+    close: v.close,
+  };
+  $(".viewer-bar", el).addEventListener("click", (e) => {
+    const act = e.target.closest("button")?.dataset.act;
+    if (act) actions[act]();
+  });
+  stage.addEventListener(
+    "wheel",
+    (e) => {
+      e.preventDefault();
+      if (!e.deltaY) return;
+      const b = box();
+      zoomBy(e.deltaY < 0 ? 1.15 : 1 / 1.15, e.clientX - b.left, e.clientY - b.top);
+    },
+    { passive: false },
+  );
+  stage.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    drag = { x: e.clientX, y: e.clientY, sx: st.x, sy: st.y, moved: false, onImage: onImage(e) };
+    stage.setPointerCapture(e.pointerId);
+    stage.classList.add("grabbing");
+  });
+  stage.addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    const dx = e.clientX - drag.x;
+    const dy = e.clientY - drag.y;
+    if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
+    if (!drag.moved) return;
+    st = { ...st, x: drag.sx + dx, y: drag.sy + dy };
+    fitted = false;
+    apply();
+  });
+  const endDrag = () => {
+    const d = drag;
+    drag = null;
+    stage.classList.remove("grabbing");
+    return d;
+  };
+  stage.addEventListener("pointerup", () => {
+    const d = endDrag();
+    if (d && !d.moved && !d.onImage) v.close(); // a plain click on the dark backdrop
+  });
+  stage.addEventListener("pointercancel", endDrag);
+  // (with the pointer captured by the stage, clicks target the stage: test the position, not e.target)
+  const onImage = (e) => {
+    const r = img.getBoundingClientRect();
+    return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+  };
+  stage.addEventListener("dblclick", (e) => {
+    if (!onImage(e)) return;
+    const b = box();
+    if (fitted) zoomBy(1 / st.scale, e.clientX - b.left, e.clientY - b.top);
+    else fit();
+  });
+  const refit = () => v.isOpen && fitted && fit();
+  document.addEventListener("fullscreenchange", refit);
+  window.addEventListener("resize", refit);
+  // while it is open the viewer has the keyboard: no chat shortcuts (recall, zoom, Ctrl+N) underneath
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      if (!v.isOpen) return;
+      e.stopImmediatePropagation();
+      const key = { "+": "in", "=": "in", "-": "out", _: "out", 0: "fit", f: "full", F: "full", ArrowLeft: "prev", ArrowRight: "next" }[e.key];
+      if (e.key === "Escape") {
+        e.preventDefault();
+        if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+        else v.close();
+      } else if (key && !(list.length < 2 && (key === "prev" || key === "next"))) {
+        e.preventDefault();
+        actions[key]();
+      } else if (e.key === "Tab") e.preventDefault(); // focus stays in the viewer
+    },
+    true,
+  );
+  return v;
+})();
 function saveUi() {
   try {
     localStorage.setItem(UI_KEY, JSON.stringify({ pinned: [...ui.pinned], collapsed: [...ui.collapsed], chatScale: ui.chatScale }));

@@ -55,6 +55,21 @@ function imageMentions(text) {
   return out;
 }
 
-const UiState = { listModel, CHAT_SCALE, stepScale, imageMentions };
+// Image viewer: the image is drawn at translate(x, y) scale(scale), origin top-left, in stage coordinates
+const VIEWER_ZOOM = { min: 0.1, max: 10 };
+/** Scale that fits the image into the stage, never above 100 %. */
+function fitScale(iw, ih, vw, vh) {
+  if (!(iw > 0 && ih > 0)) return 1;
+  return Math.min(1, vw / iw, vh / ih);
+}
+/** Zoom by `factor` around the stage point (cx, cy): the image point under it stays there. */
+function zoomAt({ scale, x, y }, factor, cx, cy) {
+  const next = Math.min(VIEWER_ZOOM.max, Math.max(VIEWER_ZOOM.min, scale * factor));
+  if (next === scale) return { scale, x, y };
+  const k = next / scale;
+  return { scale: next, x: cx - (cx - x) * k, y: cy - (cy - y) * k };
+}
+
+const UiState = { listModel, CHAT_SCALE, stepScale, imageMentions, VIEWER_ZOOM, fitScale, zoomAt };
 globalThis.UiState = UiState;
 if (typeof module !== "undefined") module.exports = UiState;

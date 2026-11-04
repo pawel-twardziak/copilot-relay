@@ -62,6 +62,20 @@
       </form>
     </dialog>
 
+    <div id="viewer" hidden tabindex="-1" role="dialog" aria-label="Image viewer">
+      <div class="viewer-stage"><img alt="" draggable="false" /></div>
+      <div class="viewer-bar">
+        <button data-act="prev" title="Previous image (←)">‹</button>
+        <button data-act="next" title="Next image (→)">›</button>
+        <button data-act="out" title="Zoom out (-)">−</button>
+        <button data-act="fit" class="viewer-zoom" title="Fit to window (0)">100 %</button>
+        <button data-act="in" title="Zoom in (+)">+</button>
+        <button data-act="full" title="Full screen (F)">⛶</button>
+        <button data-act="close" title="Close (Esc)">✕</button>
+      </div>
+      <div class="viewer-cap"></div>
+    </div>
+
     <script src="../node_modules/marked/lib/marked.umd.js"></script>
     <script src="../node_modules/dompurify/dist/purify.min.js"></script>
     <script src="commands.js"></script>

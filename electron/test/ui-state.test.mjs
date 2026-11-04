@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { test } from "node:test";
 
 const UiState = createRequire(import.meta.url)("../renderer/ui-state.js");
-const { listModel, stepScale, imageMentions } = UiState;
+const { listModel, stepScale, imageMentions, fitScale, zoomAt } = UiState;
 
 const S = (sessionId, cwd, updatedAt, title = sessionId) => ({ sessionId, cwd, updatedAt, title });
 const sessions = [
@@ -99,4 +99,21 @@ test("imageMentions drops trailing punctuation and repeats", () => {
 test("an @ inside a word is not a mention", () => {
   assert.deepEqual(imageMentions("mail me@x.png"), []);
   assert.deepEqual(imageMentions(""), []);
+});
+
+test("fitScale fits large images and never upscales", () => {
+  assert.equal(fitScale(4000, 2000, 1000, 800), 0.25);
+  assert.equal(fitScale(100, 100, 1000, 800), 1);
+  assert.equal(fitScale(0, 0, 1000, 800), 1); // not decoded yet
+});
+
+test("zoomAt keeps the point under the cursor", () => {
+  assert.deepEqual(zoomAt({ scale: 1, x: 0, y: 0 }, 2, 100, 50), { scale: 2, x: -100, y: -50 });
+  const s = zoomAt({ scale: 0.5, x: 20, y: 10 }, 2, 220, 110); // image point (400, 200) under (220, 110)
+  assert.deepEqual(s, { scale: 1, x: -180, y: -90 });
+});
+
+test("zoomAt clamps to 10-1000 %", () => {
+  assert.deepEqual(zoomAt({ scale: 10, x: 5, y: 6 }, 2, 0, 0), { scale: 10, x: 5, y: 6 });
+  assert.equal(zoomAt({ scale: 0.1, x: 0, y: 0 }, 0.5, 0, 0).scale, 0.1);
 });

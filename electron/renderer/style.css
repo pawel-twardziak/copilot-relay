@@ -250,3 +250,15 @@ dialog h3 { font-size: 13px; margin: 16px 0 8px; color: var(--muted); text-trans
 .img-chip { font-size: 12px; color: var(--muted); padding: 3px 8px; border-radius: 6px; }
 span.img-chip.off { border: 1px dashed var(--border); }
 .img-ref::before { content: "🖼 " attr(data-alt); color: var(--muted); font-size: 12px; }
+
+/* image viewer */
+#viewer { position: fixed; inset: 0; z-index: 1000; background: rgba(1, 4, 9, .9); outline: none; }
+#viewer[hidden] { display: none; }
+.viewer-stage { position: absolute; inset: 0; overflow: hidden; cursor: grab; touch-action: none; }
+.viewer-stage.grabbing { cursor: grabbing; }
+.viewer-stage img { position: absolute; left: 0; top: 0; max-width: none; transform-origin: 0 0; user-select: none; }
+.viewer-bar { position: absolute; top: 10px; right: 10px; display: flex; gap: 6px; align-items: center; }
+.viewer-bar button { min-width: 32px; background: var(--panel-2); }
+.viewer-bar button[hidden] { display: none; }
+.viewer-bar .viewer-zoom { min-width: 64px; font-variant-numeric: tabular-nums; }
+.viewer-cap { position: absolute; left: 14px; bottom: 10px; color: var(--muted); font-size: 12px; pointer-events: none; }
