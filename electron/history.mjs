@@ -41,12 +41,9 @@ export function sessionDir(id) {
   return dir;
 }
 
-/** Parsed events plus their raw lines (kept so writing back preserves the original bytes). With `liveTail`, a last
- *  line without its newline is left out: the agent of a running session may be in the middle of writing it. */
-export function readEvents(dir, { liveTail = false } = {}) {
-  let text = fs.readFileSync(path.join(dir, "events.jsonl"), "utf8");
-  if (liveTail && !text.endsWith("\n")) text = text.slice(0, text.lastIndexOf("\n") + 1);
-  const lines = text.split("\n").filter((l) => l.trim());
+/** Parsed events plus their raw lines (kept so writing back preserves the original bytes). */
+export function readEvents(dir) {
+  const lines = fs.readFileSync(path.join(dir, "events.jsonl"), "utf8").split("\n").filter((l) => l.trim());
   const events = lines.map((line, i) => {
     let e;
     try {
@@ -147,17 +144,17 @@ function yamlSet(text, values) {
   return lines.join("\n") + "\n";
 }
 
-/** Copy the session dir `src` under a new id with only `lines[0..idx)` of its history, renamed by `rename(oldName)`.
- *  `marker` names an extra empty file to create in the copy. Returns { sessionId, dst, cwd, name }. */
-function copySession(src, { events, lines }, idx, rename, now, marker) {
+/** Copy session `id` under a new id with history cut at `target`; the original is not modified. */
+export function forkSession(id, target, now = new Date()) {
+  const src = sessionDir(id);
+  const { events, lines } = readEvents(src);
+  const idx = cutIndex(events, target);
   const sessionId = randomUUID();
   const dst = path.join(path.dirname(src), sessionId);
   try {
-    // the original's delete backup, temp files, Copilot's lock file and side-question marker belong to the original only
-    const own = (p) =>
-      path.dirname(p) !== src || !/^(events\.jsonl\.bak|\.events\.jsonl\..*\.tmp|\.workspace-fork\.lock|\.side-question)$/.test(path.basename(p));
+    // the original's delete backup, temp files and Copilot's lock file belong to the original only
+    const own = (p) => path.dirname(p) !== src || !/^(events\.jsonl\.bak|\.events\.jsonl\..*\.tmp|\.workspace-fork\.lock)$/.test(path.basename(p));
     fs.cpSync(src, dst, { recursive: true, errorOnExist: true, force: false, filter: own });
-    if (marker) fs.writeFileSync(path.join(dst, marker), "", { mode: 0o600 });
     const start = structuredClone(events[0]);
     start.data = { ...start.data, sessionId };
     fs.writeFileSync(path.join(dst, "events.jsonl"), jsonl([JSON.stringify(start), ...lines.slice(1, idx)]), { mode: 0o600 });
@@ -169,7 +166,7 @@ function copySession(src, { events, lines }, idx, rename, now, marker) {
     } catch (err) {
       if (err.code !== "ENOENT") throw err;
     }
-    const name = rename(yamlGet(ws, "name") || "session");
+    const name = `Fork of ${yamlGet(ws, "name") || "session"}`;
     const stamp = now.toISOString();
     fs.writeFileSync(
       wsFile,
@@ -177,60 +174,12 @@ function copySession(src, { events, lines }, idx, rename, now, marker) {
       { mode: 0o600 },
     );
     const cwd = yamlGet(ws, "cwd") || events[0].data?.context?.cwd || null;
-    return { sessionId, dst, cwd, name };
+    const prefill = target.where === "beforeUser" ? String(events[idx].data?.content ?? "") : "";
+    return { sessionId, cwd, name, prefill };
   } catch (err) {
     fs.rmSync(dst, { recursive: true, force: true });
     throw err;
   }
-}
-
-/** Copy session `id` under a new id with history cut at `target`; the original is not modified. */
-export function forkSession(id, target, now = new Date()) {
-  const src = sessionDir(id);
-  const history = readEvents(src);
-  const idx = cutIndex(history.events, target);
-  const { sessionId, cwd, name } = copySession(src, history, idx, (old) => `Fork of ${old}`, now);
-  const prefill = target.where === "beforeUser" ? String(history.events[idx].data?.content ?? "") : "";
-  return { sessionId, cwd, name, prefill };
-}
-
-/** Marker file of a temporary side-question copy: such a dir is removed by purgeSideQuestions() if it outlives its use. */
-const SIDE_MARKER = ".side-question";
-
-/**
- * Temporary copy of session `id` for a side question, made while its agent may be mid-turn: history up to (not
- * including) user message number `keepUsers + 1`, i.e. the turns finished before the running one. A half-written
- * last line is skipped. The original is not modified.
- */
-export function snapshotSession(id, keepUsers, now = new Date()) {
-  if (!Number.isInteger(keepUsers) || keepUsers < 0) throw new Error(`Invalid number of turns to keep: ${keepUsers}`);
-  const src = sessionDir(id);
-  const history = readEvents(src, { liveTail: true });
-  let seen = 0;
-  let idx = history.events.findIndex((e) => isUser(e) && ++seen > keepUsers);
-  if (idx === -1) idx = history.events.length;
-  const { sessionId, cwd } = copySession(src, history, idx, () => "Side question (temporary)", now, SIDE_MARKER);
-  return { sessionId, cwd };
-}
-
-/** True if session `id` is a temporary side-question copy. */
-export function isSideQuestion(id) {
-  try {
-    return fs.existsSync(path.join(sessionDir(id), SIDE_MARKER));
-  } catch {
-    return false;
-  }
-}
-
-/** Delete the side-question copies a crash or a stuck process left behind; returns how many were removed. */
-export async function purgeSideQuestions() {
-  let removed = 0;
-  for (const name of await fs.promises.readdir(sessionStateDir()).catch(() => [])) {
-    if (!isSessionId(name) || !isSideQuestion(name)) continue;
-    const res = await deleteSession(name).catch(() => null);
-    if (res) removed++;
-  }
-  return removed;
 }
 
 /** Cut session `id`'s history at `target` in place: events.jsonl.bak first, then an atomic rename. */

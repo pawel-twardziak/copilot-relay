@@ -81,22 +81,6 @@ identity it has in a terminal (`cli:<sessionId>`), so it keeps its relay name. I
   `relay: offline` and the app keeps retrying.
 - Turn it off in **⚙ Settings → Connect sessions to copilot-relay**. The change applies to sessions opened afterwards.
 
-## Side questions
-
-Copilot can't take a second prompt while it works (in ACP a new prompt cancels the running turn). So while a turn
-runs, the send button becomes **⤷ Ask aside**, and Enter sends a side question.
-
-- The question is answered in a temporary copy of the session: the turns finished before the running one, plus
-  what the GUI has shown of the running turn so far. A second Copilot process answers it, and every tool that
-  needs a permission is refused there, so it can't change files. The copy is deleted when the answer is in.
-- Copilot's turn goes on. Esc and Stop in the message box stop that turn; the card's own Stop stops only the
-  side question.
-- The answer stays in a card marked "Copilot doesn't see this". **Send to agent** queues the question and answer
-  as a message of yours, sent when the turn ends.
-- Cards are saved by the app (`side-questions/<session id>.json` in its data folder) and shown again when the
-  session is reopened. Delete from message and deleting the session remove them too. Copies left by a crash are
-  deleted at the next start.
-
 ## Run
 
 Requires Node.js 18+ and an installed, signed-in Copilot CLI (`copilot --version`, `copilot login`).

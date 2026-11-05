@@ -24,13 +24,6 @@ contextBridge.exposeInMainWorld("api", {
   // number of user messages recorded in the Copilot session history
   userMessages: (sessionId) => call("sessions:userMessages", sessionId),
   cancel: (sessionId) => call("sessions:cancel", sessionId),
-  // a side question: answered in a temporary read-only copy of the session, never seen by its agent
-  askAside: (sessionId, asideId, text) => call("aside:ask", sessionId, asideId, text),
-  cancelAside: (asideId) => call("aside:cancel", asideId),
-  // finished side questions saved per session, to show their cards again when the session is reopened
-  listAsides: (sessionId) => call("aside:list", sessionId),
-  saveAside: (sessionId, entry) => call("aside:save", sessionId, entry),
-  removeAside: (sessionId, id) => call("aside:remove", sessionId, id),
   closeSession: (sessionId) => call("sessions:close", sessionId),
   // target: { ordinal, text, where } – the message to cut at, see electron/history.mjs
   countFrom: (sessionId, target) => call("sessions:countFrom", sessionId, target),
@@ -66,7 +59,6 @@ contextBridge.exposeInMainWorld("api", {
   onExit: on("acp:exit"),
   onUsage: on("usage:update"),
   onNotice: on("acp:notice"),
-  onAsideUpdate: on("aside:update"),
   onRelayMessage: on("relay:message"),
   onRelayStatus: on("relay:status"),
 });

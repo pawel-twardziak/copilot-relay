@@ -120,16 +120,6 @@ function bubble(cls, text, from) {
   return el;
 }
 
-// how a side question passed on to the agent starts; recognized again when the history is replayed
-const ASIDE_PREFIX_TEXT =
-  "[A side question I asked while you were working, answered from a copy of this session made before that turn " +
-  "finished; parts of the answer may be out of date.]";
-function markFromAside(el) {
-  if (el.classList.contains("from-aside")) return;
-  el.classList.add("from-aside");
-  el.prepend(h("div", { class: "from" }, "⤷ from a side question"));
-}
-
 marked.use({ gfm: true, breaks: false });
 // Markdown images never become <img>: a local src must be read by the main process (see images:load), and every
 // image gets the same thumbnail + viewer. The placeholder is replaced by a thumbnail when the reply is finished.
@@ -243,8 +233,7 @@ class SessionView {
     this.run = null; // current streamed block { type, el, text }
     this.tools = new Map();
     this.renderQueued = false;
-    this.inbox = []; // relay messages (and side questions passed on) waiting for the session to be idle
-    this.asides = new Map(); // asideId -> side-question card running in this view
+    this.inbox = []; // relay messages waiting for the session to be idle
     this.relayName = null;
     this.turn = 0; // user/relay messages so far = the turn ordinal of the latest one (see append)
     this.turnText = null; // getter for the latest user message's text
@@ -764,25 +753,18 @@ class SessionView {
     this.busy = b;
     const off = b || this.dead || this.deleting; // this.deleting: the whole session is being deleted
     this.el.classList.toggle("busy", off); // disables the fork/delete actions
-    const aside = this.asideReady();
-    this.sendBtn.disabled = off && !aside;
-    this.sendBtn.textContent = aside ? "⤷ Ask aside" : "Send";
-    this.sendBtn.className = aside ? "aside-btn" : "primary";
-    this.sendBtn.title = aside ? "Ask a side question: answered from a copy of this session, Copilot won't see it" : "";
-    this.input.classList.toggle("aside-mode", aside);
+    this.sendBtn.disabled = off;
     this.stopBtn.disabled = !b || this.dead || this.deleting;
     this.input.disabled = this.dead || this.deleting;
     this.agentPicker.disabled = off;
     this.statusEl.textContent = this.deleting
       ? "Deleting session…"
       : b
-        ? aside
-          ? "Working… Enter asks a side question (Copilot won't see it), Esc stops the turn."
-          : "Working…"
+        ? "Working…"
         : this.dead
           ? "Copilot process ended"
           : this.inbox.length
-            ? `${this.inbox.length} message(s) waiting`
+            ? `${this.inbox.length} relay message(s) waiting`
             : "";
     renderList();
     if (!b) queueMicrotask(() => this.pump());
@@ -838,13 +820,12 @@ class SessionView {
   incoming(m) {
     this.inbox.push(m);
     if (!this.busy) this.pump();
-    else this.statusEl.textContent = `Working… (${this.inbox.length} message(s) waiting)`;
+    else this.statusEl.textContent = `Working… (${this.inbox.length} relay message(s) waiting)`;
   }
 
   pump() {
     if (this.busy || this.dead || this.deleting || !this.inbox.length) return;
     const m = this.inbox.shift();
-    if (m.aside) return this.passAside(m);
     // set by the broker for messages typed by a person in the relay GUI; a broker older than this app doesn't send it,
     // then the reserved-for-people name decides. It only re-opens the relay budget: relay text never attaches files.
     const human = m.human ?? m.from === "user";
@@ -897,7 +878,6 @@ class SessionView {
     else if (r?.type === "user") linkify(r.body);
     if (r?.type === "agent") this.imageRefs(r.body);
     else if (r?.type === "user") this.mentionThumbs(r.el, r.text);
-    if (r?.type === "user" && r.text.startsWith(ASIDE_PREFIX_TEXT)) markFromAside(r.el);
     this.run = null;
   }
 
@@ -1016,7 +996,6 @@ class SessionView {
               await api.answerPermission(this.sessionId, reqId, o.optionId).catch((e) => this.error(e.message));
               card.classList.add("done");
               opts.replaceChildren(h("span", {}, `→ ${o.name}`));
-              if (views.get(this.sessionId) === this && !this.dead) this.setBusy(this.busy); // the status line again
             },
           },
           o.name,
@@ -1123,16 +1102,7 @@ class SessionView {
     if (!text || this.dead || this.deleting) return;
     const cmd = this.agentAvailable() ? SlashCommands.parseAgentCommand(text) : null;
     if (this.busy) {
-      if (!this.asideReady()) return;
-      if (cmd || SlashCommands.parseRenameCommand(text) || text.startsWith("/")) {
-        this.statusEl.textContent = "Commands wait until Copilot finishes this turn. Side questions are plain text.";
-        return;
-      }
-      this.input.value = this.recallEl ? this.draft : "";
-      this.setRecalled(null);
-      this.draft = "";
-      this.autosize();
-      this.askAside(text);
+      if (cmd) this.statusEl.textContent = "Wait until Copilot finishes this turn.";
       return;
     }
     // sending a recalled message as it was brings back what you were typing before recalling it
@@ -1179,8 +1149,8 @@ class SessionView {
     this.flush();
     this.append(bubble);
     this.log.scrollTop = this.log.scrollHeight;
-    this.prompting = true; // first: setBusy offers side questions only while a prompt runs
     this.setBusy(true);
+    this.prompting = true;
     // CLI commands (/context ...) are not recorded in events.jsonl; compare the recorded count to tell
     const isCmd = SlashCommands.isCommandPrompt(text);
     const before = isCmd ? await api.userMessages(this.sessionId).catch(() => null) : null;
@@ -1208,220 +1178,6 @@ class SessionView {
 
   cancel() {
     if (this.busy) api.cancel(this.sessionId).catch((e) => this.error(e.message));
-  }
-
-  // --- side questions: asked while Copilot works, answered from a temporary read-only copy of the session
-
-  /** Side questions are offered while one of your prompts (or a relay message) runs, not while resuming or forking. */
-  asideReady() {
-    return this.busy && this.prompting && !this.dead && !this.deleting;
-  }
-
-  /** The running turn so far as text (the copy has only the finished turns): its prompt, replies and tool calls. */
-  turnContext() {
-    const kids = [...this.log.children];
-    const start = kids.findLastIndex((el) => el._kind === "user" && el._turn === this.turn);
-    if (start === -1) return "";
-    const text = kids
-      .slice(start)
-      .filter((el) => !el.classList.contains("aside-card"))
-      .map((el) => el._md?.())
-      .filter((t) => t && t.trim())
-      .join("\n\n");
-    return text.length > 6000 ? "…" + text.slice(-6000) : text;
-  }
-
-  askAside(question) {
-    const context = this.turnContext();
-    const prompt = [
-      "[Side question. The user asks this while you are still working on the turn below, in a read-only copy of this " +
-        "session: you can't run tools or change files here, and your answer is not added to the session. Answer briefly " +
-        "from what you know.]",
-      context && `Turn in progress so far:\n${context}`,
-      `Question: ${question}`,
-    ]
-      .filter(Boolean)
-      .join("\n\n");
-    const card = this.asideCard({ id: crypto.randomUUID(), turn: this.turn, at: new Date().toISOString(), question });
-    const id = card.data.id;
-    this.asides.set(id, card);
-    this.flush(); // the reply goes on below the card
-    this.append(card.el);
-    this.log.scrollTop = this.log.scrollHeight;
-    renderList();
-    card.setState("running", "Copying the session…");
-    api
-      .askAside(this.sessionId, id, prompt)
-      .then((stop) => card.setState(stop === "cancelled" ? "stopped" : "done"))
-      .catch((e) => card.setState("failed", e.message))
-      .finally(() => {
-        this.asides.delete(id);
-        renderList();
-      });
-  }
-
-  /** Progress of a side question (from main: { phase } / { text } / { tool }). */
-  onAside({ asideId, phase, text, tool }) {
-    const card = this.asides.get(asideId);
-    if (!card) return;
-    if (phase) card.setState("running", { copy: "Copying the session…", start: "Starting Copilot for the copy…", ask: "Answering…" }[phase]);
-    if (tool) card.setState("running", `Tried a tool (refused, read-only): ${tool}`);
-    if (text) card.add(text);
-  }
-
-  /** Show the saved side questions again, each after the reply of the turn it was asked in (after a resume). */
-  async restoreAsides() {
-    const list = await api.listAsides(this.sessionId).catch(() => []);
-    if (views.get(this.sessionId) !== this) return;
-    for (const d of list) {
-      const card = this.asideCard(d);
-      const next = [...this.log.children].find((el) => el._kind === "user" && el._turn > d.turn);
-      if (next) this.log.insertBefore(card.el, next);
-      else this.log.append(card.el);
-      card.setState(d.state, d.detail, { restored: true });
-    }
-  }
-
-  /** A side question's card; `data` is what is saved: { id, turn, at, question, answer, state, detail, sentAt, collapsed }. */
-  asideCard(data) {
-    const d = { answer: "", state: "running", detail: "", sentAt: "", collapsed: false, ...data };
-    const time = (iso) => new Date(iso || Date.now()).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    const answer = h("div", { class: "md" });
-    const note = h("div", { class: "aside-note" });
-    const foot = h("div", { class: "aside-foot" });
-    const toggle = h("button", { class: "aside-act" }, "Collapse");
-    const stop = h("button", { class: "aside-act", title: "Stop this side question (Copilot's turn goes on)" }, "Stop");
-    const el = h(
-      "div",
-      { class: "aside-card", role: "group", "aria-label": "Side question" },
-      h(
-        "div",
-        { class: "aside-bar" },
-        h("b", {}, "⤷ Side question"),
-        h("span", {}, time(d.at)),
-        h("span", { class: "aside-hint" }, "· Copilot doesn't see this"),
-        h("span", { class: "sp" }),
-        stop,
-        toggle,
-      ),
-      h("div", { class: "aside-body" }, h("div", { class: "aside-q" }, h("b", {}, "You: "), d.question), h("div", { class: "aside-a" }, answer), note, foot),
-    );
-    linkify(el.querySelector(".aside-q"));
-    const card = { el, data: d };
-    const save = () => api.saveAside(this.sessionId, d).catch((e) => console.warn("side question not saved:", e.message));
-    const forget = () => api.removeAside(this.sessionId, d.id).catch(() => {});
-    let frame = 0;
-    const render = (final) => {
-      answer.innerHTML = md(d.answer);
-      if (final) {
-        linkify(answer, { codeOnly: true });
-        decoratePres(answer);
-      }
-    };
-    card.add = (t) => {
-      d.answer += t;
-      note.textContent = "";
-      if (!frame)
-        frame = requestAnimationFrame(() => {
-          frame = 0;
-          const stick = this.nearBottom();
-          render(false);
-          if (stick) this.log.scrollTop = this.log.scrollHeight;
-        });
-    };
-    const setCollapsed = (c) => {
-      el.classList.toggle("collapsed", c);
-      toggle.textContent = c ? "Expand" : "Collapse";
-    };
-    toggle.addEventListener("click", () => {
-      d.collapsed = !d.collapsed;
-      setCollapsed(d.collapsed);
-      if (d.state !== "running") save();
-    });
-    stop.addEventListener("click", () => api.cancelAside(d.id).catch(() => {}));
-    const button = (label, cls, onclick) => h("button", { class: cls, onclick }, label);
-    card.sent = (iso) => {
-      d.sentAt = iso;
-      foot.replaceChildren(h("span", { class: "aside-sent" }, `✓ Sent to Copilot ${time(iso)}`));
-      save();
-    };
-    card.setState = (state, detail = "", { restored = false } = {}) => {
-      el.dataset.state = state;
-      stop.hidden = state !== "running";
-      if (state === "running") {
-        if (!d.answer) note.textContent = detail;
-        return;
-      }
-      cancelAnimationFrame(frame);
-      frame = 0;
-      d.state = state;
-      d.detail = state === "failed" ? detail : "";
-      // Copilot ends a cancelled answer with its own notice; the card says it was stopped
-      if (state === "stopped") d.answer = d.answer.replace(/\s*Info: Operation cancelled by user\s*$/, "");
-      render(true);
-      foot.replaceChildren();
-      if (state === "done") {
-        note.textContent = d.answer.trim() ? "" : "(no answer)";
-        if (d.sentAt) foot.append(h("span", { class: "aside-sent" }, `✓ Sent to Copilot ${time(d.sentAt)}`));
-        else if (d.answer.trim()) foot.append(button("Send to agent", "aside-btn", () => this.queueAside(card)));
-      } else {
-        note.textContent = state === "stopped" ? (d.answer ? "✕ Stopped: partial answer." : "✕ Stopped.") : `Side question failed: ${detail}`;
-        foot.append(
-          button("Ask again", "aside-btn", () => {
-            el.remove();
-            forget();
-            if (this.asideReady()) this.askAside(d.question);
-            else {
-              this.input.value = d.question;
-              this.autosize();
-              this.input.focus();
-            }
-          }),
-          button("Dismiss", "", () => {
-            el.remove();
-            forget();
-          }),
-        );
-      }
-      if (restored) setCollapsed(d.collapsed);
-      else save();
-    };
-    el._md = () => `> **⤷ Side question (Copilot didn't see this):** ${d.question}\n>\n> ${d.answer.trim().replace(/\n/g, "\n> ") || "(no answer)"}`;
-    return card;
-  }
-
-  /** "Send to agent": the question and answer become a normal message, sent when the turn ends (or now if idle). */
-  queueAside(card) {
-    const entry = { aside: true, question: card.data.question, answer: card.data.answer.trim(), card };
-    const foot = card.el.querySelector(".aside-foot");
-    foot.replaceChildren(
-      h("span", { class: "aside-queued" }, "⏳ Queued for Copilot: sent when this turn ends"),
-      h(
-        "button",
-        {
-          class: "aside-act",
-          onclick: () => {
-            const i = this.inbox.indexOf(entry);
-            if (i !== -1) this.inbox.splice(i, 1);
-            card.setState("done");
-            if (this.busy) this.setBusy(true); // refresh the waiting count
-          },
-        },
-        "Cancel",
-      ),
-    );
-    this.inbox.push(entry);
-    if (!this.busy) this.pump();
-    else this.statusEl.textContent = `Working… (${this.inbox.length} message(s) waiting)`;
-  }
-
-  /** Send a queued side question to the agent as your message. */
-  passAside(m) {
-    const prompt = `${ASIDE_PREFIX_TEXT}\n\nQuestion: ${m.question}\n\nAnswer: ${m.answer}`;
-    const el = bubble("user", prompt);
-    markFromAside(el);
-    m.card.sent(new Date().toISOString());
-    this.runPrompt(prompt, el, "human");
   }
 
   markDead({ code, signal, stderr }) {
@@ -1493,7 +1249,6 @@ async function openSession(s) {
     const res = await api.openSession(s.sessionId, s.cwd);
     v.resuming = false;
     v.flush();
-    await v.restoreAsides();
     v.setConfig(res.configOptions);
     v.log.scrollTop = v.log.scrollHeight;
     v.setBusy(false);
@@ -1618,13 +1373,7 @@ function item(s, v, { showProject = false } = {}) {
         // opening it now would only make a dead view (main refuses); a failed delete reopens it itself
         onclick: () => (deleting.has(s.sessionId) ? setStatus("This session is being deleted.", true) : openSession(s)),
       },
-      h(
-        "div",
-        { class: "t" },
-        v && !v.dead && h("span", { class: "dot" + (v.busy ? " busy" : "") }),
-        h("b", {}, shortTitle(v?.title || s.title)),
-        v?.asides.size > 0 && h("span", { class: "aside-mark", title: "Side question in progress" }, "⤷"),
-      ),
+      h("div", { class: "t" }, v && !v.dead && h("span", { class: "dot" + (v.busy ? " busy" : "") }), h("b", {}, shortTitle(v?.title || s.title))),
       h("div", { class: "m" }, [showProject && baseName(s.cwd), s.updatedAt ? ago(s.updatedAt) : "", s.sessionId.slice(0, 8)].filter(Boolean).join(" · ")),
     ),
     h(
@@ -2007,7 +1756,6 @@ api.onUpdate(({ sessionId, update }) => {
 api.onPermission((p) => views.get(p.sessionId)?.permission(p));
 api.onExit((e) => views.get(e.sessionId)?.markDead(e));
 api.onNotice((n) => views.get(n.sessionId)?.system(n.text));
-api.onAsideUpdate((u) => views.get(u.sessionId)?.onAside(u));
 
 // relay events can arrive before the view exists (right after session/new) – keep them until it does
 const early = new Map();

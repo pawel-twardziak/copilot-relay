@@ -14,10 +14,7 @@ import {
   forgetInStore,
   purgeDeleted,
   forkSession,
-  isSideQuestion,
-  purgeSideQuestions,
   readEvents,
-  snapshotSession,
   sessionDir,
   sessionStateDir,
   truncateSession,
@@ -355,53 +352,6 @@ describe("forkSession", () => {
     fs.appendFileSync(path.join(home, "session-state", id, "events.jsonl"), "{broken\n");
     assert.throws(() => forkSession(id, { ordinal: 1, text: "", where: "afterReply" }, now), /Unrecognized/);
     assert.deepEqual(sessionIds(), [id]);
-  });
-});
-
-describe("snapshotSession", () => {
-  const now = new Date("2026-11-05T18:00:00.000Z");
-
-  test("keeps the finished turns and drops the running one", () => {
-    const { id, dir, lines } = makeSession();
-    const before = snapshot(dir);
-    const res = snapshotSession(id, 2, now);
-    const out = readLines(path.join(home, "session-state", res.sessionId, "events.jsonl"));
-    assert.equal(out.length, 13); // up to, not including, user message 3 (index 13)
-    assert.equal(JSON.parse(out[0]).data.sessionId, res.sessionId);
-    assert.deepEqual(out.slice(1), lines.slice(1, 13));
-    assert.equal(res.cwd, "/some/dir");
-    const ws = fs.readFileSync(path.join(home, "session-state", res.sessionId, "workspace.yaml"), "utf8");
-    assert.match(ws, /^name: 'Side question \(temporary\)'$/m);
-    assert.ok(isSideQuestion(res.sessionId));
-    assert.ok(!isSideQuestion(id));
-    assert.deepEqual(snapshot(dir), before);
-  });
-
-  test("keeps everything when the running turn isn't recorded yet", () => {
-    const { id, lines } = makeSession();
-    const res = snapshotSession(id, 3, now);
-    assert.equal(readLines(path.join(home, "session-state", res.sessionId, "events.jsonl")).length, lines.length);
-  });
-
-  test("skips a half-written last line", () => {
-    const { id, dir } = makeSession();
-    fs.appendFileSync(path.join(dir, "events.jsonl"), '{"type":"assistant.mess');
-    const res = snapshotSession(id, 3, now);
-    assert.equal(readLines(path.join(home, "session-state", res.sessionId, "events.jsonl")).length, 17);
-  });
-
-  test("a fork of a session does not inherit the marker; purge removes only marked copies", async () => {
-    const { id } = makeSession();
-    const snap = snapshotSession(id, 1, now);
-    const fork = forkSession(snap.sessionId, { ordinal: 1, text: "", where: "afterReply" }, now);
-    assert.ok(!isSideQuestion(fork.sessionId));
-    assert.equal(await purgeSideQuestions(), 1);
-    assert.deepEqual(sessionIds(), [id, fork.sessionId].sort());
-  });
-
-  test("rejects an invalid turn count", () => {
-    const { id } = makeSession();
-    assert.throws(() => snapshotSession(id, -1), /Invalid number/);
   });
 });
 
