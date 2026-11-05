@@ -1085,7 +1085,8 @@ function createWindow() {
   // The renderer handles link clicks (it knows the session folder) through open:link. These are the fallback for
   // anything that still tries to navigate: web links use the same allowlist, everything else is blocked.
   // no zoom of the whole window (pinch, Ctrl+wheel): the renderer scales only the chat text
-  win.webContents.setVisualZoomLevelLimits(1, 1);
+  // set once the page has loaded (and again after a reload): before that it rejects ("Render frame was disposed")
+  win.webContents.on("did-finish-load", () => win.webContents.setVisualZoomLevelLimits(1, 1).catch(() => {}));
   win.webContents.on("zoom-changed", () => win.webContents.setZoomFactor(1));
   win.webContents.setWindowOpenHandler(({ url }) => {
     openWeb(url);
