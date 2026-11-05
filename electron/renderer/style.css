@@ -262,3 +262,36 @@ span.img-chip.off { border: 1px dashed var(--border); }
 .viewer-bar button[hidden] { display: none; }
 .viewer-bar .viewer-zoom { min-width: 64px; font-variant-numeric: tabular-nums; }
 .viewer-cap { position: absolute; left: 14px; bottom: 10px; color: var(--muted); font-size: 12px; pointer-events: none; }
+
+/* side questions: asked while Copilot works, answered from a read-only copy of the session */
+:root { --aside: #39c5cf; --aside-bg: #0f2a2e; }
+button.aside-btn { background: #0e4a50; border-color: var(--aside); color: #c9f6fa; }
+.composer textarea.aside-mode { border-color: var(--aside); }
+.aside-card { max-width: 920px; border: 1px dashed var(--aside); border-radius: 10px; background: var(--aside-bg); position: relative; }
+.aside-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 5px 10px; border-bottom: 1px dashed #39c5cf55; font-size: 12px; color: var(--aside); }
+.aside-bar .aside-hint { color: #8fd6dc; }
+.aside-bar .sp { flex: 1; }
+.aside-bar button[hidden] { display: none; }
+/* not .act: those are disabled while Copilot works, and side questions are used exactly then */
+.aside-act { font-size: 11px; padding: 1px 7px; background: var(--panel-2); color: var(--muted); }
+.aside-act:hover { color: var(--text); }
+.aside-body { padding: 8px 12px 10px; display: flex; flex-direction: column; gap: 6px; line-height: 1.5; overflow-wrap: anywhere; user-select: text; }
+.aside-q { white-space: pre-wrap; }
+.aside-q b { color: var(--aside); }
+.aside-a .md > :first-child { margin-top: 0; }
+.aside-a .md > :last-child { margin-bottom: 0; }
+.aside-a pre { background: var(--panel); border: 1px solid var(--border); padding: 10px; border-radius: 6px; overflow-x: auto; }
+.aside-a code { background: var(--panel-2); padding: 1px 4px; border-radius: 4px; }
+.aside-a pre code { background: none; padding: 0; }
+.aside-note { color: var(--muted); font-size: 12.5px; }
+.aside-note:empty, .aside-foot:empty { display: none; }
+.aside-card[data-state="running"] .aside-note::before { content: "⟳ "; color: var(--warn); }
+.aside-card[data-state="failed"] .aside-note { color: var(--err); }
+.aside-foot { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.aside-queued { font-size: 12px; color: var(--warn); }
+.aside-sent { font-size: 12px; color: var(--ok); }
+.aside-card.collapsed .aside-body { display: none; }
+.aside-card.collapsed .aside-bar { border-bottom: 0; }
+.aside-mark { color: var(--aside); font-size: 11px; flex: none; }
+.msg.user.from-aside { border-left: 3px solid var(--aside); }
+.msg.user.from-aside .from { color: var(--aside); font-size: 11.5px; margin-bottom: 2px; }
