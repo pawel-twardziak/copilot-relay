@@ -9,8 +9,21 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { AcpConnection } from "./acp.mjs";
-import { countUserMessages, deleteSession, describeCut, forkSession, isSessionId, purgeDeleted, sessionDir, truncateSession } from "./history.mjs";
+import {
+  countUserMessages,
+  deleteSession,
+  describeCut,
+  forkSession,
+  isSessionId,
+  isSideQuestion,
+  purgeDeleted,
+  purgeSideQuestions,
+  sessionDir,
+  snapshotSession,
+  truncateSession,
+} from "./history.mjs";
 import { createUsagePusher } from "./usage.mjs";
+import { dropAsides, listAsides, pruneAsides, removeAside, saveAside } from "./asides.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 let win = null;
@@ -233,7 +246,8 @@ handle("sessions:list", async () => {
     cursor = res.nextCursor;
     if (!cursor) break;
   }
-  return all;
+  // temporary side-question copies are not sessions of yours (the title check keeps the disk lookups rare)
+  return all.filter((s) => !sideCopies.has(s.sessionId) && !isSideQuestion(s.sessionId));
 });
 
 handle("sessions:new", async (cwd) => {
@@ -508,6 +522,12 @@ handle("sessions:prompt", async (sessionId, text, source = "relay") => {
     imagesSupported: conn.init?.agentCapabilities?.promptCapabilities?.image === true,
   });
   for (const note of notes) send("acp:notice", { sessionId, text: note });
+  // a side question asked during this turn sees the history up to here: the turns finished before it
+  try {
+    entry.turnUsers = countUserMessages(sessionId);
+  } catch {
+    entry.turnUsers = null;
+  }
   // fork/truncate refuse while a turn is running: the agent is still writing the history
   entry.prompting = true;
   try {
@@ -556,6 +576,7 @@ async function closeEntry(sessionId) {
   open.delete(sessionId);
   usage.forget(sessionId);
   e.relay?.stop();
+  stopAsides(sessionId);
   await Promise.race([e.conn.request("session/close", { sessionId }).catch(() => {}), new Promise((r) => setTimeout(r, 2000))]);
   e.conn.kill();
   return e.conn;
@@ -563,6 +584,93 @@ async function closeEntry(sessionId) {
 
 handle("sessions:close", async (sessionId) => {
   await closeEntry(sessionId);
+});
+
+// ---------- side questions ----------
+// A question about a session whose agent is busy: asked in a temporary copy of the session (the turns finished
+// before the running one), run by a second Copilot process that may only read. The original is never touched and
+// its agent never sees the question; the copy is deleted when the answer is in.
+
+const asides = new Map(); // asideId -> { parent, conn, copyId, stopped }
+// ids of this run's copies, kept after they are deleted: Copilot's session list may still name one for a while
+const sideCopies = new Set();
+
+/** Stop a side question: before its prompt it just won't start, during it session/cancel ends the answer. */
+function stopAside(a) {
+  a.stopped = true;
+  if (a.prompting) a.conn.notify("session/cancel", { sessionId: a.copyId });
+}
+
+function stopAsides(parent) {
+  for (const a of asides.values()) if (a.parent === parent) stopAside(a);
+}
+
+/** Close a side question's process, then delete its copy (left for purgeSideQuestions() if the process won't exit). */
+async function disposeAside(a) {
+  if (a.conn) {
+    await Promise.race([a.conn.request("session/close", { sessionId: a.copyId }).catch(() => {}), new Promise((r) => setTimeout(r, 1000))]);
+    a.conn.kill();
+    await exited(a.conn);
+  }
+  if (a.copyId && (!a.conn || a.conn.exited)) {
+    const res = await deleteSession(a.copyId, { missingOk: true }).catch((err) => ({ leftover: err.message }));
+    if (res.leftover) console.warn(`[aside] could not remove ${res.leftover}`);
+  }
+}
+
+handle("aside:ask", async (sessionId, asideId, text) => {
+  if (typeof asideId !== "string" || !asideId || asides.has(asideId)) throw new Error("Invalid side question id.");
+  text = String(text ?? "").trim();
+  if (!text) throw new Error("The question is empty.");
+  const entry = getOpen(sessionId);
+  refuseWhileDeleting(sessionId);
+  if (historyBusy.has(sessionId)) throw new Error("Wait until the delete of a message has finished.");
+  // during a turn: the turns finished before it; otherwise the whole history
+  const keep = entry.prompting ? entry.turnUsers : countUserMessages(sessionId);
+  if (!Number.isInteger(keep)) throw new Error("Could not read this session's history.");
+
+  const a = { parent: sessionId, conn: null, copyId: null, stopped: false, prompting: false };
+  asides.set(asideId, a);
+  const emit = (payload) => send("aside:update", { sessionId, asideId, ...payload });
+  try {
+    emit({ phase: "copy" });
+    a.copyId = snapshotSession(sessionId, keep).sessionId;
+    sideCopies.add(a.copyId);
+    if (a.stopped) return "cancelled";
+    emit({ phase: "start" });
+    a.conn = await connect(entry.cwd);
+    // read-only: every tool that needs a permission is refused
+    a.conn.on("request:session/request_permission", (rpcId) => a.conn.respond(rpcId, { outcome: { outcome: "cancelled" } }));
+    if (a.stopped) return "cancelled";
+    // the copy's history is replayed before session/load answers; only what comes after it is the answer
+    await a.conn.request("session/load", { sessionId: a.copyId, cwd: entry.cwd, mcpServers: [] });
+    if (a.stopped) return "cancelled";
+    a.conn.on("notification", (method, params) => {
+      if (method !== "session/update" || params?.sessionId !== a.copyId) return;
+      const u = params.update;
+      if (u?.sessionUpdate === "agent_message_chunk" && u.content?.type === "text") emit({ text: u.content.text });
+      else if (u?.sessionUpdate === "tool_call") emit({ tool: u.title ?? "tool" });
+    });
+    emit({ phase: "ask" });
+    a.prompting = true;
+    const res = await a.conn.request("session/prompt", { sessionId: a.copyId, prompt: [{ type: "text", text }] });
+    return res?.stopReason ?? "end_turn";
+  } finally {
+    a.prompting = false;
+    asides.delete(asideId);
+    disposeAside(a).catch((err) => console.warn(`[aside] cleanup failed: ${err.message}`));
+  }
+});
+
+// the cards of finished side questions, kept by the app (Copilot's history doesn't have them)
+const asideDir = () => path.join(app.getPath("userData"), "side-questions");
+handle("aside:list", async (sessionId) => listAsides(asideDir(), sessionId));
+handle("aside:save", async (sessionId, entry) => saveAside(asideDir(), sessionId, entry));
+handle("aside:remove", async (sessionId, id) => removeAside(asideDir(), sessionId, String(id)));
+
+handle("aside:cancel", async (asideId) => {
+  const a = asides.get(asideId);
+  if (a) stopAside(a);
 });
 
 // ---------- history: fork / delete from a message ----------
@@ -649,7 +757,13 @@ handle("sessions:truncate", async (sessionId, target) => {
   return historyOp(sessionId, async () => {
     describeCut(sessionId, target); // throws for a target that doesn't match, before anything is closed
     await closeAndWait(sessionId);
-    return truncateSession(sessionId, target);
+    const res = truncateSession(sessionId, target);
+    try {
+      pruneAsides(asideDir(), sessionId, countUserMessages(sessionId)); // the cards of the removed turns go too
+    } catch (err) {
+      console.warn(`[aside] could not prune saved side questions: ${err.message}`);
+    }
+    return res;
   });
 });
 
@@ -678,6 +792,11 @@ handle("sessions:delete", async (sessionId) => {
     }
     // missingOk: a session that never wrote its dir (or is already gone) just has its store rows removed
     const res = await deleteSession(sessionId, { missingOk: true });
+    try {
+      dropAsides(asideDir(), sessionId);
+    } catch (err) {
+      console.warn(`[aside] could not remove saved side questions: ${err.message}`);
+    }
     if (res.leftover) console.warn(`[delete] could not remove ${res.leftover}`);
     if (res.store.error) console.warn(`[delete] session-store.db: ${res.store.error}`);
     return res;
@@ -993,6 +1112,7 @@ function createWindow() {
 }
 
 function killAll() {
+  for (const a of asides.values()) a.conn?.kill(); // their copies are purged at the next start
   for (const { conn, relay } of open.values()) {
     relay?.stop();
     conn.kill();
@@ -1023,7 +1143,8 @@ if (!app.requestSingleInstanceLock()) {
         { role: "windowMenu" },
       ]),
     );
-    purging = purgeDeleted().catch(() => {}); // what an earlier delete could not remove
+    // what an earlier delete could not remove, and side-question copies left by a crash
+    purging = Promise.all([purgeDeleted(), purgeSideQuestions()]).catch(() => {});
     createWindow();
     app.on("activate", () => BrowserWindow.getAllWindows().length === 0 && createWindow());
   });

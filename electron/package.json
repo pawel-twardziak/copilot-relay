@@ -31,6 +31,7 @@
       "main.mjs",
       "acp.mjs",
       "history.mjs",
+      "asides.mjs",
       "usage.mjs",
       "paths.mjs",
       "relay-client.mjs",
