@@ -176,13 +176,28 @@ restarts, because `list_sessions` gives the same information.
 - After a process is closed, `send_message` to the child fails with the existing "no session" text. The user can
   reopen it from the sidebar.
 
-## Must be verified on the live Copilot CLI early in the build
+## Verified on the live Copilot CLI (1.0.106-9, 2026-11-08)
 
-- The model's config option: its ID and whether setting it right after `session/new`, before the first prompt, takes
-  effect. If it doesn't, fall back to the CLI's `--model` flag, which requires an `args` option on `AcpConnection`.
-- The same check for `agent`.
-- Whether a child's MCP tools work when the alias is registered after `session/new` (this is how desktop sessions
-  behave today, so it should hold).
+- **Model.** `session/new` returns `configOptions` with an entry `{ id: "model", category: "model", type: "select" }`
+  whose values are model IDs such as `claude-sonnet-5.5`, `claude-haiku-4.5`, `gpt-6-luna`. The catalog also lists
+  `auto` twice (two entries with the same value). `session/set_config_option { sessionId, configId: "model", value }`
+  sent right after `session/new`, before any prompt, takes effect: the response shows `currentValue` changed, and
+  the first prompt's reply named the new model (set to `claude-haiku-4.5`, reply "I'm powered by Claude Haiku 4.5").
+  The same IDs appear in `models.availableModels[].modelId`. No `--model` fallback is needed.
+- **Agent.** The option `{ id: "agent", category: "_agent", type: "select" }` exists only when the cwd has custom
+  agents (`.github/agents/*.agent.md` or `~/.copilot/agents`); in this repo it is absent. Its values are
+  `""` (name "Copilot", the default) plus one entry per custom agent, with `value` equal to the agent's name. Setting
+  it right after `session/new` takes effect: the response shows `currentValue: "pineapple"`, and the first prompt
+  (a persona that answers only `PINEAPPLE`) was answered `PINEAPPLE`. Setting an unknown agent fails with
+  `-32602 Invalid agent 'x': ... Custom agent 'x' not found`, so a bad agent name is rejected by the CLI and
+  `agent` can be set even when the option is not listed. Match the option by `id === "agent"`, not by category.
+  No `--agent` fallback is needed.
+- **MCP alias.** With `mcpServers: [{ type: "http", name: "relay", url: ".../mcp?peer=<alias>" }]` passed to
+  `session/new` and the alias registered afterwards through `/api/peer/stream?...&alias=`, the agent listed and called
+  the relay tools (`relay-list_sessions` tool call was issued). The call itself was answered with a cancelled
+  permission, as instructed, so the tool result was not read; tool listing after a late alias is confirmed.
+- Other options seen: `mode` (agent/plan/autopilot URIs), `reasoning_effort` (category `thought_level`), `allow_all`
+  (category `permissions`).
 
 ## Testing
 
