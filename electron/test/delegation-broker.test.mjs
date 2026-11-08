@@ -1,6 +1,6 @@
 // Tests for the durable delegation service (src/delegation.mjs, src/delegation-store.mjs).
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
@@ -192,4 +192,32 @@ test("a child that re-registers before the sweep produces no notice", async () =
   await tick(30);
   assert.equal(parentPush.length, 0);
   assert.equal(store.pending("cli:parent").length, 0);
+});
+
+test("a corrupt store file is preserved aside and not overwritten", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deleg-"));
+  dirs.push(dir);
+  const file = path.join(dir, "delegations.json");
+  writeFileSync(file, "{ not json");
+  const orig = console.error;
+  console.error = () => {};
+  let store;
+  try {
+    store = new DelegationStore(file);
+  } finally {
+    console.error = orig;
+  }
+  store.link("c", "p", "n");
+  const aside = readdirSync(dir).filter((f) => f.startsWith("delegations.json.corrupt-"));
+  assert.equal(aside.length, 1);
+  assert.equal(readFileSync(path.join(dir, aside[0]), "utf8"), "{ not json");
+  assert.equal(new DelegationStore(file).parentOf("c"), "p");
+});
+
+test("a non-ENOENT read error throws instead of starting empty", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "deleg-"));
+  dirs.push(dir);
+  const sub = path.join(dir, "isdir");
+  mkdirSync(sub);
+  assert.throws(() => new DelegationStore(sub), /EISDIR/);
 });

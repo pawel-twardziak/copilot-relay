@@ -8,11 +8,22 @@ export class DelegationStore {
   constructor(file = process.env.COPILOT_RELAY_DELEGATIONS_FILE ?? stateFile("delegations.json")) {
     this.file = file;
     this.data = { links: {}, outbox: {} };
+    let raw;
     try {
-      const d = JSON.parse(readFileSync(file, "utf8"));
-      this.data = { links: d.links ?? {}, outbox: d.outbox ?? {} };
-    } catch {
-      /* missing or unreadable: start empty */
+      raw = readFileSync(file, "utf8");
+    } catch (e) {
+      // only a missing file means "start empty"; any other error must not lead to overwriting unread data
+      if (e?.code !== "ENOENT") throw e;
+    }
+    if (raw !== undefined) {
+      try {
+        const d = JSON.parse(raw);
+        this.data = { links: d.links ?? {}, outbox: d.outbox ?? {} };
+      } catch (e) {
+        const aside = `${file}.corrupt-${Date.now()}`;
+        renameSync(file, aside);
+        console.error(`delegation store ${file} is unreadable (${e.message}); kept as ${aside}, starting empty`);
+      }
     }
   }
 
