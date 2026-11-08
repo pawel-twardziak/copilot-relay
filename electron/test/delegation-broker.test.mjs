@@ -221,3 +221,25 @@ test("a non-ENOENT read error throws instead of starting empty", () => {
   mkdirSync(sub);
   assert.throws(() => new DelegationStore(sub), /EISDIR/);
 });
+
+// ---------- MCP list and tool guard ----------
+import { delegationToolsAllowed, formatList } from "../../src/mcp.mjs";
+
+test("list_sessions marks parent and child with current names", () => {
+  const registry = new Registry();
+  registry.upsert({ key: "cli:parent", name: "parent-name", kind: "cli" });
+  registry.upsert({ key: "cli:child", name: "child-name", kind: "cli", parentKey: "cli:parent" });
+  registry.upsert({ key: "cli:other", name: "other-name", kind: "cli" });
+  assert.match(formatList(registry, "cli:child"), /- parent-name .*your parent/);
+  assert.match(formatList(registry, "cli:parent"), /- child-name .*your child/);
+  assert.doesNotMatch(formatList(registry, "cli:child"), /other-name.*your (parent|child)/);
+  assert.doesNotMatch(formatList(registry, "cli:other"), /your (parent|child)/);
+  registry.rename("cli:parent", "renamed");
+  assert.match(formatList(registry, "cli:child"), /- renamed .*your parent/);
+});
+
+test("delegation tools exist only for desktop aliases", () => {
+  assert.equal(delegationToolsAllowed("app:123"), true);
+  assert.equal(delegationToolsAllowed("cli:abc"), false);
+  assert.equal(delegationToolsAllowed(null), false);
+});

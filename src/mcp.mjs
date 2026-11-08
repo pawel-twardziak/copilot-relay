@@ -13,11 +13,21 @@ import { z } from "zod";
 const text = (t) => ({ content: [{ type: "text", text: t }] });
 const IDLE_MS = 30 * 60_000;
 
-function formatList(registry, selfKey) {
-  const others = registry.list().filter((p) => p.key !== selfKey);
+/** Delegation tools are for desktop-app sessions only (identity `app:<uuid>` given by the MCP URL). */
+export function delegationToolsAllowed(peerParam) {
+  return typeof peerParam === "string" && peerParam.startsWith("app:");
+}
+
+export function formatList(registry, selfKey) {
+  const all = registry.list();
+  const selfParent = all.find((p) => p.key === selfKey)?.parentKey;
+  const others = all.filter((p) => p.key !== selfKey);
   if (!others.length) return "(no other sessions online)";
   return others
-    .map((p) => `- ${p.name} [${p.kind}${p.online ? "" : ", offline"}]${p.role ? `: ${p.role}` : ""} (cwd: ${p.cwd || "?"})`)
+    .map((p) => {
+      const rel = selfParent && p.key === selfParent ? " — your parent" : p.parentKey && p.parentKey === selfKey ? " — your child" : "";
+      return `- ${p.name} [${p.kind}${p.online ? "" : ", offline"}]${p.role ? `: ${p.role}` : ""} (cwd: ${p.cwd || "?"})${rel}`;
+    })
     .join("\n");
 }
 
@@ -26,13 +36,17 @@ function formatMessages(msgs) {
   return msgs.map((m) => m.prompt).join("\n\n---\n\n");
 }
 
-function buildServer(registry, getKey, { mailbox }) {
+function buildServer(registry, getKey, { mailbox, delegation = null, fixedKey = null }) {
   const server = new McpServer(
     { name: "copilot-relay", version: "0.2.0" },
     {
       instructions:
         "copilot-relay lets Copilot sessions message each other. list_sessions shows who is online; " +
-        "send_message delivers asynchronously — never wait for a reply in the same turn unless using wait_for_message.",
+        "send_message delivers asynchronously — never wait for a reply in the same turn unless using wait_for_message." +
+        (delegation && delegationToolsAllowed(fixedKey)
+          ? " create_session asks the user to approve a new delegated session (you cannot approve it yourself); " +
+            "a delegated session ends its work with report_result."
+          : ""),
     },
   );
 
@@ -55,6 +69,42 @@ function buildServer(registry, getKey, { mailbox }) {
     },
     async ({ to, text: t }) => text(registry.send(getKey(), to, t)),
   );
+
+  if (delegation && delegationToolsAllowed(fixedKey)) {
+    server.registerTool(
+      "create_session",
+      {
+        description:
+          "Ask the user to approve a new delegated Copilot session that works on a task and reports back to you. " +
+          "The user must approve; the outcome arrives later as a message from relay. Do not wait for it. " +
+          "A delegated session cannot create further sessions.",
+        inputSchema: {
+          name: z.string().describe("Name for the new session"),
+          task: z.string().describe("The task the new session should work on"),
+          agent: z.string().optional().describe("Optional agent to use"),
+          model: z.string().optional().describe("Optional model to use"),
+        },
+      },
+      async ({ name, task, agent, model }) => {
+        const key = getKey();
+        if (!key) return text("You are not registered with the relay broker.");
+        return text(delegation.requestCreate(key, { name, task, agent: agent ?? "", model: model ?? "" }));
+      },
+    );
+    server.registerTool(
+      "report_result",
+      {
+        description:
+          "Delegated sessions only: send your final result to the session that created you. Use it once, when the task is done.",
+        inputSchema: { text: z.string().describe("The result to report") },
+      },
+      async ({ text: t }) => {
+        const key = getKey();
+        if (!key) return text("You are not registered with the relay broker.");
+        return text(delegation.report(key, t));
+      },
+    );
+  }
 
   if (mailbox) {
     server.registerTool(
@@ -90,7 +140,7 @@ function buildServer(registry, getKey, { mailbox }) {
   return server;
 }
 
-export function createMcpHandler(registry) {
+export function createMcpHandler(registry, delegation = null) {
   /** @type {Map<string, {transport: StreamableHTTPServerTransport, last: number}>} */
   const sessions = new Map();
 
@@ -106,7 +156,7 @@ export function createMcpHandler(registry) {
     // Broker-owned sessions: stateless, identity from the URL.
     if (fixedKey) {
       if (req.method !== "POST") return res.writeHead(405, { Allow: "POST" }).end();
-      const server = buildServer(registry, () => registry.resolve(fixedKey), { mailbox: false });
+      const server = buildServer(registry, () => registry.resolve(fixedKey), { mailbox: false, delegation, fixedKey });
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       res.on("close", () => {
         transport.close();

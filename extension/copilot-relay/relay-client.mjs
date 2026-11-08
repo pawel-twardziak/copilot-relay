@@ -14,7 +14,10 @@ export class RelayClient {
    * @param {string} [o.brokerScript] path to server.mjs – auto-started if the broker is down
    * @param {string} [o.nodePath]  Node executable used to start the broker
    * @param {(m:{from:string,text:string,prompt:string})=>void} o.onMessage
-   * @param {(name:string)=>void} [o.onRegistered]
+   * @param {string} [o.parentKey] key of the session that delegated this one (sent on the first connection only)
+   * @param {(req:object)=>void} [o.onSessionRequest] the broker forwards a session_request from this peer
+   * @param {()=>void} [o.onReported] this delegated session's report was stored
+   * @param {(name:string, payload?:{parentKey:?string,reported:boolean})=>void} [o.onRegistered]
    * @param {(name:string)=>void} [o.onRenamed]   renamed elsewhere (GUI)
    * @param {(msg:string)=>void} [o.log]
    */
@@ -24,6 +27,7 @@ export class RelayClient {
     // explicitly requested name (env) is sent only on the first connection; afterwards the broker's
     // persistent store is the source of truth (so a rename from the GUI survives reconnects)
     this.requestedName = o.name ?? null;
+    this.requestedParent = o.parentKey ?? null; // like requestedName: first connection only
     this.log ??= () => {};
     this.stopped = false;
     this.connected = false;
@@ -60,6 +64,15 @@ export class RelayClient {
 
   async human() {
     await this.#post("/api/peer/human", { key: this.key }).catch(() => {});
+  }
+
+  async ack(id) {
+    await this.#post("/api/peer/ack", { key: this.key, id }).catch(() => {});
+  }
+
+  /** Tell the broker what became of a session request: { requestId, kind, name, text }. */
+  async outcome(o) {
+    await this.#post("/api/peer/delegation-outcome", { key: this.key, ...o }).catch(() => {});
   }
 
   #fetch(p, init) {
@@ -108,6 +121,7 @@ export class RelayClient {
     this.abort = new AbortController();
     const qs = new URLSearchParams({ key: this.key, cwd: this.cwd ?? "" });
     if (this.requestedName) qs.set("name", this.requestedName);
+    if (this.requestedParent) qs.set("parent", this.requestedParent);
     if (this.alias) qs.set("alias", this.alias);
     const res = await this.#fetch(`/api/peer/stream?${qs}`, { signal: this.abort.signal, headers: { accept: "text/event-stream" } });
     if (!res.ok || !res.body) throw new Error(`broker answered ${res.status}`);
@@ -132,11 +146,16 @@ export class RelayClient {
         if (event === "registered") {
           this.name = payload.name;
           this.requestedName = null;
-          this.onRegistered?.(payload.name);
+          this.requestedParent = null;
+          this.onRegistered?.(payload.name, payload);
         } else if (event === "renamed") {
           const changed = payload.name !== this.name;
           this.name = payload.name;
           if (changed && !this.selfRenaming) this.onRenamed?.(payload.name);
+        } else if (event === "session_request") {
+          this.onSessionRequest?.(payload);
+        } else if (event === "reported") {
+          this.onReported?.();
         } else if (event === "message") {
           this.onMessage(payload);
         }
