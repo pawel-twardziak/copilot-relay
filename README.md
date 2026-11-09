@@ -221,8 +221,10 @@ default 12), refilled by a human prompt in either of the two. `report_result` an
 | `POST /api/send` `{ to: "x" \| "*", text }` | human message to a peer |
 | `POST /api/permission`, `POST /api/cancel` | ACP permission answers / cancel |
 | `GET /events` | GUI SSE stream (with history replay) |
-| `GET /api/peer/stream?key=&name=&cwd=&alias=` | extension / desktop app: register + receive pushes (SSE); `alias` maps an MCP `?peer=` token to `key` |
+| `GET /api/peer/stream?key=&name=&cwd=&alias=&parent=` | extension / desktop app: register + receive pushes (SSE); `alias` maps an MCP `?peer=` token to `key`; `parent` links a delegated session to the key of the session that created it |
 | `POST /api/peer/send` / `rename` / `human`, `GET /api/peer/list` | extension calls |
+| `POST /api/peer/ack` `{ key, id }` | a stored report or notice has been taken: remove it from disk |
+| `POST /api/peer/delegation-outcome` `{ key, requestId, kind, name, text }` | desktop app: what became of a session request |
 | `/mcp` | MCP endpoint (stateful; `?peer=<key>` is used internally for ACP sessions) |
 
 ## Config (`relay.config.json`, all optional)

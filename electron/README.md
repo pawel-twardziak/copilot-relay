@@ -119,6 +119,9 @@ an ordinary session: it appears in the list, you can open it, read what it did, 
   resumable. A child with no running turn and no open question for 15 minutes loses its process but stays in the
   list. A child that ends without reporting (closed, stopped, or the app crashed) sends the parent one
   "ended without reporting" notice, which wakes it.
+- **Reloading the window** (**View → Reload**, Ctrl+R) stops delegated sessions, after a confirmation, because a
+  reloaded window cannot show their cards. Waiting requests for a new session are dropped too. Stopped children stay
+  resumable. With no child open and no waiting request, a reload asks nothing.
 - **Quitting** while a child has not reported asks for confirmation; **Cancel** keeps everything running. Children are
   never resumed automatically.
 - `create_session` and `report_result` exist only for sessions opened in this app, not for terminal sessions or
