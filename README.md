@@ -62,6 +62,8 @@ and `copilot --resume`. To change it:
 
 Terminal sessions (extension) get `relay_list_sessions`, `relay_send_message(to, text)` and `relay_set_name(name, role?)`.
 MCP clients get `list_sessions`, `send_message`, `set_name`, `read_inbox` and `wait_for_message(timeout_seconds)`.
+Desktop-app sessions also get `create_session(name, task, agent?, model?)` and `report_result(text)`, see
+[Delegated sessions](electron/README.md#delegated-sessions).
 
 ### Other MCP clients (e.g. VS Code `mcp.json`)
 
@@ -77,6 +79,12 @@ would then have two sets of relay tools.
 [`electron/`](electron/README.md) contains a standalone desktop app for Windows, macOS and Linux. It resumes any
 existing Copilot CLI session, or starts a new one in a chosen folder, over ACP. Copilot doesn't load extensions in
 ACP mode, so the app connects its sessions to the broker itself, with the same names and the same tools.
+
+In the app, a session can also ask for a *delegated* session for one task (`create_session`), optionally with its own
+agent and model. Every creation needs a click on **Approve** in the app. The child is an ordinary session in the
+**same folder and branch as its parent, with no isolation**, and sends its result back with `report_result`. Limits
+are 3 children per parent and 5 in the app (`maxChildrenPerParent` and `maxChildrenTotal` in the app's settings file).
+See [Delegated sessions](electron/README.md#delegated-sessions).
 
 ```bash
 npm run app:install   # once
@@ -200,6 +208,9 @@ Run this from the repo directory. To remove it: `Unregister-ScheduledTask -TaskN
 A global agent→agent budget (`maxAgentMessagesPerUserTurn`, default 12) resets whenever a human prompts any
 session, whether in a terminal (detected by the extension's `onUserPromptSubmitted` hook) or in the GUI.
 
+Messages between a delegated session and its parent are charged to a separate pair budget (`maxAgentMessagesPerPair`,
+default 12), refilled by a human prompt in either of the two. `report_result` and relay notices are charged to nothing.
+
 ## HTTP API
 
 | call | purpose |
@@ -217,11 +228,11 @@ session, whether in a terminal (detected by the extension's `onUserPromptSubmitt
 ## Config (`relay.config.json`, all optional)
 
 `port` (env `COPILOT_RELAY_PORT` wins), `cwd` (default dir for GUI sessions), `maxAgentMessagesPerUserTurn`,
-`autoApproveTools`, `startupSessions: [{ name, role?, cwd?, model? }]`.
+`maxAgentMessagesPerPair`, `autoApproveTools`, `startupSessions: [{ name, role?, cwd?, model? }]`.
 
 ## Limitations (prototype)
 
-- No persistence. Restarting the broker forgets peers. Extensions reconnect automatically under the same name, but messages sent while the broker is down are lost.
+- No persistence, apart from names and delegated-session links and reports. Restarting the broker forgets peers. Extensions reconnect automatically under the same name, but ordinary messages sent while the broker is down are lost.
 - A terminal peer that disconnects is kept for 30 s, with messages queued, and then removed.
 - `/clear` in a terminal reloads the extension, which then registers as a new peer.
 - Copilot CLI extensions and ACP are preview features (tested against CLI 1.0.95-3).
