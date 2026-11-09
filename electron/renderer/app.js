@@ -339,7 +339,7 @@ class SessionView {
       const p = e.target.closest("[data-path]");
       if (!a && !p) return;
       e.preventDefault();
-      this.openLink(a ? a.getAttribute("href") : p.dataset.path);
+      this.openLink(a ? a.getAttribute("href") : p.dataset.path, a?._base ?? this.cwd);
     };
     this.log.addEventListener("click", onLink);
     this.log.addEventListener("auxclick", onLink);
@@ -400,13 +400,59 @@ class SessionView {
     }
   }
 
-  async openLink(href) {
+  async openLink(href, base = this.cwd) {
     if (!href || href.startsWith("#")) return;
     try {
-      const r = await api.openLink(this.cwd, href);
+      const r = await api.openLink(base, href);
       if (r === "revealed") this.statusEl.textContent = `Shown in the file manager instead of opened: ${href} is not a document type the app opens directly.`;
     } catch (e) {
       this.statusEl.textContent = e.message;
+    }
+  }
+
+  /** Turn paths in `root` that name an existing file (relative ones against `base`, null = absolute only) into links.
+   *  One check per call; a node that changed while it ran is left alone. The base lives on the property a._base,
+   *  never a DOM attribute: sanitised agent HTML may carry data-*. */
+  async linkPaths(root, base) {
+    const unique = new Set();
+    const found = [];
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => (n.parentElement?.closest("a, button") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+    });
+    const nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    for (const node of nodes) {
+      const text = node.nodeValue;
+      const code = node.parentElement?.closest("code");
+      const cands = FileLinks.pathCandidates(text, { whole: !!code && !code.closest("pre"), max: 500 }).filter((c) => {
+        if (unique.has(c.path)) return true;
+        if (unique.size >= 500) return false;
+        unique.add(c.path);
+        return true;
+      });
+      if (cands.length) found.push({ node, text, cands });
+    }
+    if (!found.length) return;
+    let existing;
+    try {
+      existing = new Set(await api.checkFiles(base, [...unique]));
+    } catch {
+      return; // a missing link is harmless
+    }
+    for (const { node, text, cands } of found) {
+      if (!node.isConnected || node.nodeValue !== text) continue;
+      const hits = cands.filter((c) => existing.has(c.path));
+      if (!hits.length) continue;
+      const frag = document.createDocumentFragment();
+      let last = 0;
+      for (const c of hits) {
+        const a = h("a", { href: c.raw }, c.raw);
+        if (base !== this.cwd) a._base = base;
+        frag.append(text.slice(last, c.start), a);
+        last = c.end;
+      }
+      frag.append(text.slice(last));
+      node.replaceWith(frag);
     }
   }
 
@@ -857,6 +903,7 @@ class SessionView {
     const human = m.human ?? m.from === "user";
     const el = bubble("relay", m.text, m.from);
     this.mentionThumbs(el, m.text);
+    this.linkPaths(el.querySelector(".body"), m.fromCwd ?? null);
     el._human = human; // typed by you in the relay GUI: yours for Left Shift+Up/Down
     this.runPrompt(m.prompt, el, human ? "human" : "relay", delivery);
   }
@@ -904,6 +951,11 @@ class SessionView {
     else if (r?.type === "user") linkify(r.body);
     if (r?.type === "agent") this.imageRefs(r.body);
     else if (r?.type === "user") this.mentionThumbs(r.el, r.text);
+    if (r?.type === "agent") this.linkPaths(r.body, this.cwd);
+    else if (r?.type === "user") {
+      const head = FileLinks.parseRelayHeader(r.text);
+      this.linkPaths(r.body, head.from ? head.folder : this.cwd);
+    }
     this.run = null;
   }
 
@@ -974,6 +1026,7 @@ class SessionView {
     t.body.replaceChildren(...this.toolBody(d));
     decoratePres(t.body);
     linkify(t.body);
+    if (status === "completed" || status === "failed") this.linkPaths(t.body, this.cwd);
   }
 
   toolBody(d) {
@@ -1225,6 +1278,7 @@ class SessionView {
     }
     const el = bubble("user", text);
     this.mentionThumbs(el, text);
+    this.linkPaths(el.querySelector(".body"), this.cwd);
     this.runPrompt(text, el, "app");
   }
 
@@ -1314,7 +1368,7 @@ function renderRun(r, final = false) {
     decoratePres(r.body);
     if (final) linkify(r.body, { codeOnly: true }); // marked already links plain URLs in Markdown text
   } else {
-    r.body.textContent = r.text;
+    r.body.textContent = r.type === "user" ? FileLinks.parseRelayHeader(r.text).display : r.text;
     if (final && r.type === "user") linkify(r.body); // a prompt replayed from the history (live ones are bubbles)
   }
   if (r.type === "user") r.el.hidden = !r.text.trim(); // replayed prompts can be empty (e.g. attachments only)
