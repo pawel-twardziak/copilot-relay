@@ -164,6 +164,10 @@ function createFilePreview({ api, h, md, onStatus, onChange = () => {} }) {
   /** The one place that turns a read result into what is on screen. `keepScroll` (a refresh) keeps the scroll position. */
   function renderFile(result, line, keepScroll = false) {
     const top = keepScroll ? content.querySelector(".fp-scroll, .fp-md")?.scrollTop : undefined;
+    const hadFocus = keepScroll && content.contains(document.activeElement); // replacing the node would drop the keyboard focus
+    const refocus = () => {
+      if (hadFocus) content.querySelector(".fp-scroll, .fp-md")?.focus({ preventScroll: true });
+    };
     errEl.hidden = true;
     fullText = result.tier === "plain" ? result.text : null;
     const isMd = /\.(md|markdown)$/i.test(result.name) && result.tier === "highlight";
@@ -178,13 +182,14 @@ function createFilePreview({ api, h, md, onStatus, onChange = () => {} }) {
       const box = markdownView(result.text);
       content.replaceChildren(box);
       if (top != null) box.scrollTop = top;
-      return;
+      return refocus();
     }
     mdBtn.textContent = "Show rendered";
     const language = result.tier === "highlight" ? FileLinks.previewLanguage(result.name) : null;
     const { scroll, reveal } = codeView(result.text, language, line, result.tier === "plain");
     content.replaceChildren(scroll);
     reveal(top);
+    refocus();
   }
 
   /** A file that cannot be shown (gone, or no longer text): its name and path stay, `text` says why. */
