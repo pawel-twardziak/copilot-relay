@@ -108,7 +108,7 @@ function relayPrepare() {
 
 function relayStart(sessionId, cwd, { cfg, alias }, { name, parentKey } = {}) {
   if (!alias) return null;
-  const status = (extra = {}) => send("relay:status", { sessionId, name: client.name, connected: client.connected, ...extra });
+  const status = (extra = {}) => send("relay:status", { sessionId, name: client.name, connected: client.connected, parentSessionId: open.get(sessionId)?.parentSessionId ?? null, ...extra });
   const client = new RelayClient({
     url: cfg.url,
     key: `cli:${sessionId}`,

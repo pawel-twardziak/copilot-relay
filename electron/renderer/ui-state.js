@@ -72,6 +72,19 @@ function zoomAt({ scale, x, y }, factor, cx, cy) {
   return { scale: next, x: cx - (cx - x) * k, y: cy - (cy - y) * k };
 }
 
-const UiState = { listModel, CHAT_SCALE, stepScale, imageMentions, VIEWER_ZOOM, fitScale, zoomAt };
+/** False for a report the view has already taken (the broker redelivers until it is acknowledged). No id: always true. */
+function acceptDelivery(seen, id) {
+  if (id == null) return true;
+  if (seen.has(id)) return false;
+  seen.add(id);
+  return true;
+}
+
+/** Whether a delegated child has been idle long enough (15 minutes by default) to close its process. */
+function shouldCloseIdle({ parentSessionId, busy, inboxLength, pendingPermissions, active, lastActivity }, now, ms = 900_000) {
+  return Boolean(parentSessionId) && !busy && !inboxLength && !pendingPermissions && !active && now - lastActivity >= ms;
+}
+
+const UiState = { listModel, CHAT_SCALE, stepScale, imageMentions, VIEWER_ZOOM, fitScale, zoomAt, acceptDelivery, shouldCloseIdle };
 globalThis.UiState = UiState;
 if (typeof module !== "undefined") module.exports = UiState;

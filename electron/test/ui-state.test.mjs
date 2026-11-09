@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { test } from "node:test";
 
 const UiState = createRequire(import.meta.url)("../renderer/ui-state.js");
-const { listModel, stepScale, imageMentions, fitScale, zoomAt } = UiState;
+const { listModel, stepScale, imageMentions, fitScale, zoomAt, acceptDelivery, shouldCloseIdle } = UiState;
 
 const S = (sessionId, cwd, updatedAt, title = sessionId) => ({ sessionId, cwd, updatedAt, title });
 const sessions = [
@@ -121,3 +121,23 @@ test("zoomAt clamps to 10-1000 %", () => {
 test("imageMentions ignores URLs (a relay message must not make the app fetch them)", () => {
   assert.deepEqual(imageMentions("@https://evil.example/p.png @http://x/y.gif @file:///p/a.png @b.png"), ["file:///p/a.png", "b.png"]);
 });
+
+test("a redelivered report is accepted once; messages without an id always pass", () => {
+  const seen = new Set();
+  assert.equal(acceptDelivery(seen, "d1"), true);
+  assert.equal(acceptDelivery(seen, "d1"), false);
+  assert.equal(acceptDelivery(seen, undefined), true);
+});
+
+const idle = { parentSessionId: "p", busy: false, inboxLength: 0, pendingPermissions: 0, active: false, lastActivity: 0 };
+test("an idle child closes after 15 minutes", () => {
+  assert.equal(shouldCloseIdle(idle, 900_000), true);
+  assert.equal(shouldCloseIdle(idle, 899_999), false);
+});
+for (const [what, change] of [
+  ["a busy child", { busy: true }],
+  ["a child with a queued message", { inboxLength: 1 }],
+  ["a child waiting for a permission", { pendingPermissions: 1 }],
+  ["the child on screen", { active: true }],
+  ["a session that is not a child", { parentSessionId: null }],
+]) test(`${what} is not closed`, () => assert.equal(shouldCloseIdle({ ...idle, ...change }, 1e9), false));

@@ -226,8 +226,13 @@ let activeId = null;
 const RELAY_PREFIX = /^\[from [^\]\n]+\]\n/;
 
 class SessionView {
-  constructor({ sessionId, cwd, title }) {
+  constructor({ sessionId, cwd, title, parentSessionId, seenDeliveries, pendingNotes }) {
     Object.assign(this, { sessionId, cwd, title: title ?? "" });
+    this.parentSessionId = parentSessionId ?? null; // set for a session created by another one (delegated child)
+    this.seenDeliveries = seenDeliveries ?? new Set(); // report ids already taken (the broker redelivers until acked)
+    this.pendingNotes = pendingNotes ?? []; // non-waking notices, passed to the model with the next prompt
+    this.openCards = new Set(); // permission and delegation cards still waiting for an answer
+    this.lastActivity = Date.now(); // for the idle close of delegated children
     this.busy = false;
     this.dead = false;
     this.run = null; // current streamed block { type, el, text }
@@ -254,6 +259,11 @@ class SessionView {
     this.sendBtn = h("button", { class: "primary", onclick: () => this.send() }, "Send");
     this.stopBtn = h("button", { onclick: () => this.cancel(), disabled: true }, "Stop");
     this.statusEl = h("div", { class: "status-line" });
+    this.stopChildrenBtn = h(
+      "button",
+      { class: "danger", hidden: true, title: "Close every session this one has created (they stay resumable)", onclick: () => api.stopChildren(this.sessionId).catch((e) => this.error(e.message)) },
+      "Stop all children",
+    );
     this.agentOption = undefined; // latest ACP "agent" config option
     this.agentPicker = h("select", { class: "agent-picker", hidden: true });
     this.agentPicker.addEventListener("change", () => this.chooseAgent(this.agentPicker.value));
@@ -273,6 +283,7 @@ class SessionView {
         this.relayChip,
         this.usageChip,
         this.selects,
+        this.stopChildrenBtn,
         h("button", { title: "Copy the whole conversation as Markdown", onclick: (e) => this.copyThread(e.currentTarget) }, "Copy thread"),
         h("button", { class: "danger", title: "Close this session in the app (it stays resumable)", onclick: () => closeView(this.sessionId) }, "Close"),
         h("button", { class: "danger", title: "Delete this whole session from disk", onclick: () => deleteSessionFlow({ sessionId: this.sessionId, cwd: this.cwd, title: this.title }) }, "Delete"),
@@ -563,7 +574,7 @@ class SessionView {
   ownMessages() {
     // a message you typed in the relay GUI is yours: live it is .msg.relay with _human, replayed a plain .msg.user
     return [...this.log.querySelectorAll(".msg.user, .msg.relay")].filter((el) => {
-      const text = el._matchText?.() ?? "";
+      const text = (el._ownText ?? el._matchText)?.() ?? "";
       if (el.classList.contains("relay") && !el._human) return false;
       return !el.hidden && text.trim() && !RELAY_PREFIX.test(text);
     });
@@ -578,7 +589,7 @@ class SessionView {
     if (!this.recallEl) this.draft = this.input.value;
     const el = list[i] ?? null;
     this.setRecalled(el);
-    this.input.value = el ? el._matchText() : this.draft;
+    this.input.value = el ? (el._ownText ?? el._matchText)() : this.draft;
     this.input.setSelectionRange(this.input.value.length, this.input.value.length);
     this.hidePopup();
     this.autosize();
@@ -751,6 +762,7 @@ class SessionView {
 
   setBusy(b) {
     this.busy = b;
+    this.lastActivity = Date.now();
     const off = b || this.dead || this.deleting; // this.deleting: the whole session is being deleted
     this.el.classList.toggle("busy", off); // disables the fork/delete actions
     this.sendBtn.disabled = off;
@@ -781,8 +793,13 @@ class SessionView {
   }
 
   // --- copilot-relay
-  relayStatus({ name, connected, note }) {
+  relayStatus({ name, connected, note, parentSessionId }) {
     if (name) this.relayName = name;
+    // only ever set: a status sent before the broker's registration has no link yet, and a rename carries none
+    if (parentSessionId && parentSessionId !== this.parentSessionId) {
+      this.parentSessionId = parentSessionId;
+      renderList();
+    }
     this.relayChip.hidden = false;
     this.relayChip.classList.toggle("off", !connected);
     this.relayChip.textContent = connected ? `relay: ${this.relayName}` : "relay: offline";
@@ -818,6 +835,13 @@ class SessionView {
 
   /** A message from another session (or the relay GUI) arrived; it becomes a prompt when the session is idle. */
   incoming(m) {
+    if (!UiState.acceptDelivery(this.seenDeliveries, m.deliveryId)) return;
+    if (m.wake === false) {
+      // informational: no turn of its own, the model gets it with the next prompt
+      this.system(m.text);
+      this.pendingNotes.push(m.prompt);
+      return;
+    }
     this.inbox.push(m);
     if (!this.busy) this.pump();
     else this.statusEl.textContent = `Working… (${this.inbox.length} relay message(s) waiting)`;
@@ -826,6 +850,8 @@ class SessionView {
   pump() {
     if (this.busy || this.dead || this.deleting || !this.inbox.length) return;
     const m = this.inbox.shift();
+    // its prompt starts now: the broker may forget it (a failed ack only means it is delivered again later)
+    if (m.deliveryId) api.relayAck(this.sessionId, m.deliveryId).catch(() => {});
     // set by the broker for messages typed by a person in the relay GUI; a broker older than this app doesn't send it,
     // then the reserved-for-people name decides. It only re-opens the relay budget: relay text never attaches files.
     const human = m.human ?? m.from === "user";
@@ -883,6 +909,7 @@ class SessionView {
 
   // --- ACP session/update
   onUpdate(u) {
+    this.lastActivity = Date.now();
     const text = u.content?.type === "text" ? u.content.text : "";
     switch (u.sessionUpdate) {
       case "user_message_chunk":
@@ -984,6 +1011,12 @@ class SessionView {
       { class: "perm" },
       h("div", { class: "q" }, h("b", {}, "Permission needed: "), toolCall?.title ?? "tool call", permissionDetail(toolCall?.rawInput)),
     );
+    // main has answered this one as cancelled (or the process is gone): nothing is left to decide
+    card._dismiss = () => {
+      card.classList.add("done");
+      opts.replaceChildren(h("span", {}, "→ turn ended"));
+      this.closeCard(card);
+    };
     const opts = h(
       "div",
       { class: "opts" },
@@ -996,6 +1029,7 @@ class SessionView {
               await api.answerPermission(this.sessionId, reqId, o.optionId).catch((e) => this.error(e.message));
               card.classList.add("done");
               opts.replaceChildren(h("span", {}, `→ ${o.name}`));
+              this.closeCard(card);
             },
           },
           o.name,
@@ -1006,7 +1040,56 @@ class SessionView {
     decoratePres(card);
     linkify(card);
     this.append(card);
+    this.openCard(card);
     this.statusEl.textContent = "Waiting for your permission…";
+  }
+
+  /** This session asks for a new session. Everything on the card is model-written: plain text only, never Markdown. */
+  delegationCard({ requestId, name, task, agent, model, cwd }) {
+    this.flush();
+    const field = (label, value) => [h("dt", {}, label), h("dd", {}, value)];
+    const answer = async (approved) => {
+      this.closeCard(card);
+      opts.replaceChildren(h("span", {}, approved ? "Creating the session…" : "Rejecting…"));
+      let result;
+      try {
+        const stillOpen = await api.answerDelegation(requestId, approved);
+        result = !stillOpen ? "This request is no longer open." : approved ? "→ Approved" : "→ Rejected";
+      } catch (e) {
+        result = `Could not answer: ${e.message}`;
+      }
+      card.classList.add("done");
+      opts.replaceChildren(h("span", {}, result));
+    };
+    const opts = h("div", { class: "opts" }, h("button", { class: "primary", onclick: () => answer(true) }, "Approve"), h("button", { onclick: () => answer(false) }, "Reject"));
+    const card = h(
+      "div",
+      { class: "perm delegation" },
+      h("div", { class: "q" }, h("b", {}, "New session requested")),
+      h("dl", { class: "fields" }, field("Name", name), field("Agent", agent || "default"), field("Model", model || "inherited"), field("Folder", cwd)),
+      h("div", { class: "task" }, task),
+      opts,
+    );
+    this.append(card);
+    this.openCard(card);
+  }
+
+  get needsAttention() {
+    return !this.dead && this.openCards.size > 0;
+  }
+
+  openCard(card) {
+    this.openCards.add(card);
+    renderList();
+  }
+
+  closeCard(card) {
+    if (this.openCards.delete(card)) renderList();
+  }
+
+  /** The turn is over: main no longer waits for its permission questions. Delegation cards are not tied to a turn. */
+  dismissPermissions() {
+    for (const card of [...this.openCards]) card._dismiss?.();
   }
 
   setConfig(configOptions) {
@@ -1147,15 +1230,26 @@ class SessionView {
   /** @param {"app"|"human"|"relay"} source who wrote the prompt (decides the relay budget and image attachments) */
   async runPrompt(text, bubble, source) {
     this.flush();
-    this.append(bubble);
-    this.log.scrollTop = this.log.scrollHeight;
-    this.setBusy(true);
-    this.prompting = true;
     // CLI commands (/context ...) are not recorded in events.jsonl; compare the recorded count to tell
     const isCmd = SlashCommands.isCommandPrompt(text);
+    let sent = text;
+    // not on a command: text in front of it would turn it into an ordinary prompt, the notes wait for the next one
+    if (this.pendingNotes.length && !isCmd) {
+      sent = this.pendingNotes.join("\n\n") + "\n\n" + text;
+      this.pendingNotes = [];
+      // history records what was sent, so fork/delete match that; the bubble and Left Shift+Up keep what you wrote.
+      // Before append: markTurn hands _matchText on to the turn's reply.
+      bubble._ownText = bubble._matchText;
+      bubble._matchText = () => sent;
+    }
+    this.append(bubble);
+    this.log.scrollTop = this.log.scrollHeight;
+    this.lastActivity = Date.now();
+    this.setBusy(true);
+    this.prompting = true;
     const before = isCmd ? await api.userMessages(this.sessionId).catch(() => null) : null;
     try {
-      const stop = await api.prompt(this.sessionId, text, source);
+      const stop = await api.prompt(this.sessionId, sent, source);
       this.flush();
       if (stop === "cancelled") this.system("Stopped.");
       else if (stop && stop !== "end_turn") this.system(`Turn ended: ${stop}`);
@@ -1163,6 +1257,7 @@ class SessionView {
       this.error(e.message);
     } finally {
       this.prompting = false;
+      this.dismissPermissions();
       // the view was closed or its session deleted meanwhile: nothing to update (a refresh would also replace the
       // delete's warning in the status line)
       if (views.get(this.sessionId) === this) {
@@ -1183,6 +1278,7 @@ class SessionView {
   markDead({ code, signal, stderr }) {
     this.flush();
     this.dead = true;
+    this.dismissPermissions();
     this.error(`Copilot process exited (${code ?? signal}).${stderr ? "\n" + stderr : ""}\nClick the session in the list to resume it again.`);
     this.setBusy(false);
   }
@@ -1294,11 +1390,12 @@ function dropView(id) {
 /** Rebuild a closed session's view from its files (after its history changed or a delete failed); relay messages
  *  that were waiting in the old view move to the new one. */
 async function reopenView(old, error) {
-  const { sessionId, cwd, title, inbox } = old;
+  const { sessionId, cwd, title, inbox, parentSessionId, seenDeliveries, pendingNotes } = old;
   const typed = old.recallEl ? old.draft : old.input.value; // what you typed (not a recalled earlier message)
   if (views.get(sessionId) === old) views.delete(sessionId);
   old.el.remove();
-  await openSession({ sessionId, cwd, title });
+  // handed over before the replay: a report redelivered while the session reopens must already count as seen
+  await openSession({ sessionId, cwd, title, parentSessionId, seenDeliveries, pendingNotes });
   const v = views.get(sessionId);
   if (!v) return;
   if (error) v.error(error);
@@ -1359,6 +1456,13 @@ function togglePin(id) {
   renderList();
 }
 
+/** The name of a child's parent in the sidebar: its title, else its relay name, else the start of its id. */
+function parentLabel(id) {
+  const p = views.get(id);
+  const title = p?.title || sessions.find((s) => s.sessionId === id)?.title;
+  return title ? shortTitle(title) : (p?.relayName ?? id.slice(0, 8));
+}
+
 /** showProject: the session is listed outside its project (pinned), so its folder goes into the meta line. */
 function item(s, v, { showProject = false } = {}) {
   const pinned = ui.pinned.has(s.sessionId);
@@ -1373,8 +1477,14 @@ function item(s, v, { showProject = false } = {}) {
         // opening it now would only make a dead view (main refuses); a failed delete reopens it itself
         onclick: () => (deleting.has(s.sessionId) ? setStatus("This session is being deleted.", true) : openSession(s)),
       },
-      h("div", { class: "t" }, v && !v.dead && h("span", { class: "dot" + (v.busy ? " busy" : "") }), h("b", {}, shortTitle(v?.title || s.title))),
-      h("div", { class: "m" }, [showProject && baseName(s.cwd), s.updatedAt ? ago(s.updatedAt) : "", s.sessionId.slice(0, 8)].filter(Boolean).join(" · ")),
+      h(
+        "div",
+        { class: "t" },
+        v && !v.dead && h("span", { class: "dot" + (v.busy ? " busy" : "") }),
+        h("b", {}, shortTitle(v?.title || s.title)),
+        v?.needsAttention && h("span", { class: "attention", title: "Waiting for your answer" }, "!"),
+      ),
+      h("div", { class: "m" }, [v?.parentSessionId && `child of ${parentLabel(v.parentSessionId)}`, showProject && baseName(s.cwd), s.updatedAt ? ago(s.updatedAt) : "", s.sessionId.slice(0, 8)].filter(Boolean).join(" · ")),
     ),
     h(
       "div",
@@ -1675,6 +1785,9 @@ function renderList() {
   const q = $("#search").value.trim().toLowerCase();
   const out = [];
 
+  const parents = new Set([...views.values()].filter((v) => !v.dead).map((v) => v.parentSessionId));
+  for (const v of views.values()) v.stopChildrenBtn.hidden = !parents.has(v.sessionId);
+
   const openOnes = [...views.values()].map((v) => sessions.find((s) => s.sessionId === v.sessionId) ?? { sessionId: v.sessionId, cwd: v.cwd, title: v.title });
   if (openOnes.length) {
     out.push(h("div", { class: "group-title" }, h("span", {}, "Open in app")));
@@ -1775,6 +1888,24 @@ function flushEarly(v) {
 api.onRelayMessage((m) => forView(m.sessionId, (v) => v.incoming(m)));
 api.onRelayStatus((s) => forView(s.sessionId, (v) => v.relayStatus(s)));
 
+// delegated sessions: only the app's approval answers a request (see delegation:answer in main)
+api.onDelegationRequest((r) => forView(r.parentSessionId, (v) => v.delegationCard(r)));
+api.onDelegationCreated(({ sessionId, cwd, configOptions, parentSessionId, title }) => {
+  // as in newSession, but the view is not activated: approving a child doesn't take you away from what is on screen
+  if (views.has(sessionId)) return;
+  const v = new SessionView({ sessionId, cwd, title, parentSessionId });
+  views.set(sessionId, v);
+  flushEarly(v);
+  v.setConfig(configOptions);
+  v.system(`New session in ${cwd}`);
+  if (!v.busy) v.setBusy(false); // (an early message may already have started its turn)
+  scheduleRefresh();
+});
+api.onDelegationClosed(({ sessionId }) => {
+  dropView(sessionId); // safe for a view that was never built (a failed creation)
+  renderList();
+});
+
 // latest usage per session, so a re-opened/replaced view starts with it; sidebar shows the latest quota line
 const lastUsage = new Map();
 let lastQuota = null;
@@ -1872,5 +2003,13 @@ document.addEventListener("keydown", (e) => {
   }
 });
 setInterval(renderList, 60_000); // keep "x min ago" fresh
+// a delegated child with nothing to do closes by itself (it stays resumable from the list)
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, v] of views) {
+    const state = { parentSessionId: v.parentSessionId, busy: v.busy, inboxLength: v.inbox.length, pendingPermissions: v.openCards.size, active: id === activeId, lastActivity: v.lastActivity };
+    if (UiState.shouldCloseIdle(state, now)) closeView(id);
+  }
+}, 60_000);
 setStatus("Loading sessions…");
 refresh();
