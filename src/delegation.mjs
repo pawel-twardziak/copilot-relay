@@ -48,13 +48,15 @@ export class Delegation {
     };
     this.store.enqueue(item); // on disk before any delivery attempt
     this.store.markReported(callerKey);
-    this.#deliver(item);
+    const delivered = this.#deliver(item);
     try {
       child.control?.("reported", {});
     } catch {
       /* the report is stored either way */
     }
-    return "Report delivered to your parent session.";
+    return delivered
+      ? "Report delivered to your parent session."
+      : "Report stored. Your parent session will receive it when it returns.";
   }
 
   outcome(parentKey, { kind, text }) {
@@ -83,9 +85,10 @@ export class Delegation {
     return this.store.remove(id);
   }
 
-  childGone(childKey) {
+  /** @param {string} [name] the child's name when it was removed (the registry no longer knows it by then) */
+  childGone(childKey, name) {
     if (this.store.isReported(childKey)) return;
-    this.#endedNotice(childKey);
+    this.#endedNotice(childKey, name);
   }
 
   #sweep(parentKey) {
@@ -95,10 +98,10 @@ export class Delegation {
     }
   }
 
-  #endedNotice(childKey) {
+  #endedNotice(childKey, currentName) {
     const parentKey = this.store.parentOf(childKey);
     if (!parentKey || !this.store.markEndedNotice(childKey)) return;
-    const name = this.registry.get(childKey)?.name || this.store.nameOf(childKey) || "session";
+    const name = currentName || this.registry.get(childKey)?.name || this.store.nameOf(childKey) || "session";
     const text = `Session "${name}" ended without reporting a result. You can ask the user to reopen it.`;
     const item = { id: this.newId(), parentKey, from: "relay", text, prompt: `[from relay]\n${text}` };
     this.store.enqueue(item);
@@ -107,7 +110,7 @@ export class Delegation {
 
   #deliver(item) {
     // pushTo, not Registry.send: reports and notices are charged to no budget
-    this.registry.pushTo(item.parentKey, {
+    return this.registry.pushTo(item.parentKey, {
       from: item.from,
       human: false,
       text: item.text,

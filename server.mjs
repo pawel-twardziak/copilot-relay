@@ -34,7 +34,7 @@ const names = new NameStore(process.env.COPILOT_RELAY_NAMES_FILE || undefined);
 const persist = (p) => p.key?.startsWith("cli:") && names.set(p.key, p.name, p.role);
 registry.on("peer_renamed", persist);
 registry.on("peer_updated", persist);
-registry.on("peer_removed", (e) => delegation.childGone(e.key));
+registry.on("peer_removed", (e) => delegation.childGone(e.key, e.name));
 
 function pickName(key, explicit) {
   if (explicit) return explicit;

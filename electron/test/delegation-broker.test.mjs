@@ -7,6 +7,7 @@ import { afterEach, test } from "node:test";
 import { Delegation } from "../../src/delegation.mjs";
 import { DelegationStore } from "../../src/delegation-store.mjs";
 import { Registry } from "../../src/registry.mjs";
+import { onceDelivery } from "../../extension/copilot-relay/relay-client.mjs";
 
 const dirs = [];
 const tick = (ms = 20) => new Promise((r) => setTimeout(r, ms));
@@ -158,6 +159,61 @@ test("a child gone without a report notifies the parent once", () => {
   assert.equal(parentPush.length, 1);
   assert.equal(parentPush[0].wake, true);
   assert.match(parentPush[0].text, /Session "badacz" ended without reporting a result\. You can ask the user to reopen it\./);
+});
+
+test("the ended notice uses the child's name at removal, else the stored name", () => {
+  const renamed = setup();
+  renamed.d.childGone("cli:child", "badacz-2");
+  assert.match(renamed.parentPush[0].text, /Session "badacz-2" ended/);
+  const stored = setup();
+  stored.registry.remove("cli:child");
+  stored.d.childGone("cli:child");
+  assert.match(stored.parentPush.at(-1).text, /Session "badacz" ended/);
+});
+
+test("report says delivered when pushed, stored when the parent is away", () => {
+  const online = setup();
+  assert.match(online.d.report("cli:child", "wynik"), /delivered/i);
+  const away = setup();
+  away.registry.disconnect("cli:parent");
+  clearTimeout(away.registry.get("cli:parent").offlineTimer);
+  const answer = away.d.report("cli:child", "wynik");
+  assert.match(answer, /stored/i);
+  assert.doesNotMatch(answer, /delivered/i);
+});
+
+test("extension delivery injects a durable item once and acks it after the injection", async () => {
+  const sent = [];
+  const acks = [];
+  const deliver = onceDelivery({ send: async (m) => sent.push(m.prompt), ack: (id) => acks.push(id), onError: () => assert.fail("no error") });
+  await deliver({ prompt: "p", deliveryId: "d1" });
+  await deliver({ prompt: "p", deliveryId: "d1" });
+  assert.deepEqual(sent, ["p"]);
+  assert.deepEqual(acks, ["d1"]);
+});
+
+test("extension delivery leaves plain messages alone and lets a failed injection be redelivered", async () => {
+  const sent = [];
+  const acks = [];
+  const errors = [];
+  let fail = true;
+  const deliver = onceDelivery({
+    send: async (m) => {
+      if (fail) throw new Error("busy");
+      sent.push(m.prompt);
+    },
+    ack: (id) => acks.push(id),
+    onError: (e) => errors.push(e.message),
+  });
+  await deliver({ prompt: "p", deliveryId: "d1" });
+  assert.deepEqual(errors, ["busy"]);
+  assert.deepEqual(acks, []);
+  fail = false;
+  await deliver({ prompt: "p", deliveryId: "d1" });
+  await deliver({ prompt: "x" });
+  await deliver({ prompt: "x" });
+  assert.deepEqual(sent, ["p", "x", "x"]);
+  assert.deepEqual(acks, ["d1"]);
 });
 
 test("a child gone after reporting produces no notice", () => {

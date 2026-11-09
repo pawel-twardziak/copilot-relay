@@ -3,6 +3,25 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 
+/**
+ * Delivery handler for the extension: injects each message once per process and acknowledges durable items
+ * (`deliveryId`) when the injection has succeeded. A failed injection can be redelivered.
+ */
+export function onceDelivery({ send, ack, onError }) {
+  const handled = new Set();
+  return (m) => {
+    if (m.deliveryId && handled.has(m.deliveryId)) return;
+    if (m.deliveryId) handled.add(m.deliveryId);
+    return send(m).then(
+      () => m.deliveryId && ack(m.deliveryId),
+      (e) => {
+        handled.delete(m.deliveryId);
+        onError(e);
+      },
+    );
+  };
+}
+
 export class RelayClient {
   /**
    * @param {object} o

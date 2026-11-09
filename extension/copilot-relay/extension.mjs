@@ -6,7 +6,7 @@ import { joinSession } from "@github/copilot-sdk/extension";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { RelayClient } from "./relay-client.mjs";
+import { RelayClient, onceDelivery } from "./relay-client.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 let cfg = {};
@@ -136,9 +136,11 @@ if (process.env.COPILOT_RELAY_MANAGED || process.env.COPILOT_RELAY_DISABLED) {
     log: (m) => session.log(m, { ephemeral: true }).catch(() => {}),
     onRegistered: (name) => session.log(`copilot-relay: connected as "${name}" (change with /relay-name)`, { ephemeral: true }).catch(() => {}),
     onRenamed: (name) => session.log(`copilot-relay: this session was renamed to "${name}"`).catch(() => {}),
-    onMessage: (m) => {
-      session.send({ prompt: m.prompt, mode: "enqueue" }).catch((e) => session.log(`copilot-relay: delivery failed: ${e.message}`, { level: "error" }));
-    },
+    onMessage: onceDelivery({
+      send: (m) => session.send({ prompt: m.prompt, mode: "enqueue" }),
+      ack: (id) => client.ack(id),
+      onError: (e) => session.log(`copilot-relay: delivery failed: ${e.message}`, { level: "error" }),
+    }),
   });
   client.start();
 

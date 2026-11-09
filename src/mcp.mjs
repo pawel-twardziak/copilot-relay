@@ -96,7 +96,7 @@ function buildServer(registry, getKey, { mailbox, delegation = null, fixedKey = 
       {
         description:
           "Delegated sessions only: send your final result to the session that created you. Use it once, when the task is done.",
-        inputSchema: { text: z.string().describe("The result to report") },
+        inputSchema: { text: z.string().min(1).describe("The result to report") },
       },
       async ({ text: t }) => {
         const key = getKey();
