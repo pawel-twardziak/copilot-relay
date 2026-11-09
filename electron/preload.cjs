@@ -43,6 +43,10 @@ contextBridge.exposeInMainWorld("api", {
   openPath: (p) => call("shell:openPath", p),
   copy: (text) => call("clipboard:write", text),
   openLink: (cwd, target) => call("open:link", cwd, target),
+  // which of the mentioned paths (relative to base, or null) are existing files
+  checkFiles: (base, candidates) => call("files:check", base, candidates),
+  // text of a clicked file link: { notText } | { outside, path } until confirmed | { path, name, text?, tier, size, mtimeMs }
+  readFile: (baseCwd, target, opts) => call("files:read", baseCwd, target, opts),
   storage: () => call("storage:get"),
   openPastes: () => call("storage:openPastes"),
   clearPastes: () => call("storage:clearPastes"),

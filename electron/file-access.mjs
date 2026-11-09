@@ -1,11 +1,11 @@
 // Network-location rules and safe path resolution, without importing electron so tests can load it.
 // Text written by an agent must never make the main process touch a network location (a mapped drive, an NFS or
 // SMB mount, an automount) without a click: the guard runs on the path text before anything is lstat()ed.
-import { lstat, readlink } from "node:fs/promises";
+import { lstat, open, readlink, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { isInside } from "./paths.mjs";
+import { isInside, lexicalPath } from "./paths.mjs";
 
 const LINUX_NETWORK_TYPES = new Set("nfs nfs4 cifs smb3 smbfs ncpfs 9p ceph glusterfs lustre afs autofs".split(" "));
 const LINUX_FUSE_NETWORK = new Set("sshfs rclone s3fs smbnetfs davfs".split(" "));
@@ -174,4 +174,81 @@ async function realpathGuarded(p, allow, depth) {
     if (!cur) return null;
   }
   return cur;
+}
+
+const MAX_CONCURRENT_CHECKS = 16;
+const SNIFF_BYTES = 64 * 1024;
+const HIGHLIGHT_MAX = 2 * 1024 * 1024;
+const PLAIN_MAX = 20 * 1024 * 1024;
+
+/** Does a relative candidate need a base to mean anything? "file:", "~" and absolute paths do not. */
+function isSelfContained(c, platform) {
+  const t = String(c ?? "").trim();
+  return /^file:/i.test(t) || t === "~" || /^~[\\/]/.test(t) || (platform === "win32" ? path.win32 : path.posix).isAbsolute(t);
+}
+
+/**
+ * Which of the candidate paths (from message text) are existing regular files? Decided from the text first
+ * (relative ones need a base; allow() is asked about every step of the walk before it is lstat()ed), so an unchecked
+ * candidate never touches the disk. Returns the accepted candidates as written, in order.
+ */
+export async function checkCandidates(candidates, { base, home, allow, platform = process.platform }) {
+  const accepted = new Array(candidates.length).fill(false);
+  const one = async (c) => {
+    if (base == null && !isSelfContained(c, platform)) return false;
+    const abs = lexicalPath(c, base ?? home, home, platform, { decode: false });
+    if (!abs) return false;
+    try {
+      const real = await localRealpath(abs, { allow });
+      return !!real && (await stat(real)).isFile();
+    } catch {
+      return false; // refused by allow(), unreadable or gone
+    }
+  };
+  let next = 0;
+  const worker = async () => {
+    while (next < candidates.length) {
+      const i = next++;
+      accepted[i] = await one(candidates[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(MAX_CONCURRENT_CHECKS, candidates.length) }, worker));
+  return candidates.filter((_, i) => accepted[i]);
+}
+
+/** Read a file for the preview pane. Binary (a NUL in the first 64 KB) is decided before size, and a too-large file is never read whole. */
+export async function readPreview(realPath) {
+  const fh = await open(realPath, "r");
+  try {
+    const { size, mtimeMs } = await fh.stat();
+    const head = Buffer.alloc(Math.min(size, SNIFF_BYTES));
+    const { bytesRead } = await fh.read(head, 0, head.length, 0);
+    if (head.subarray(0, bytesRead).includes(0)) return { tier: "binary", size, mtimeMs };
+    if (size > PLAIN_MAX) return { tier: "too-large", size, mtimeMs };
+    const buf = await fh.readFile();
+    // TextDecoder replaces invalid UTF-8 and drops a leading BOM
+    return { tier: size > HIGHLIGHT_MAX ? "plain" : "highlight", text: new TextDecoder("utf-8").decode(buf), size, mtimeMs };
+  } finally {
+    await fh.close();
+  }
+}
+
+/**
+ * The text of a clicked link for the preview. Outside the viewing session's folder (compared by real paths) nothing
+ * is read until confirmed; the folder the link was written against (baseCwd) never lifts that.
+ */
+export async function resolvePreview({ baseCwd, target, viewingCwd, confirmed }, { isNetwork }) {
+  const t = String(target ?? "").trim();
+  // web and other URI schemes: "main.mjs:42" (file:line) and "C:\x" (drive) are paths, not schemes
+  if (/^[a-z][a-z0-9+.-]*:(?!\d)/i.test(t) && !/^file:/i.test(t) && !/^[a-z]:[\\/]/i.test(t)) return { notText: true };
+  const real = await resolveTarget(baseCwd, t);
+  if (await isNetwork(real)) return { notText: true };
+  if (!(await stat(real)).isFile()) return { notText: true };
+  if (!confirmed) {
+    const root = viewingCwd ? await localRealpath(path.resolve(viewingCwd)).catch(() => null) : null;
+    if (!root || !isInside(real, root)) return { outside: true, path: real };
+  }
+  const r = await readPreview(real);
+  if (r.tier === "binary") return { notText: true };
+  return { path: real, name: path.basename(real), ...r };
 }

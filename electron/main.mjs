@@ -1,11 +1,11 @@
 // Electron main process: owns the `copilot --acp` processes and bridges them to the window over IPC.
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, shell } from "electron";
-import { expandHome, isRemote, localRealpath, resolveTarget } from "./file-access.mjs";
+import { allowsAutomaticCheck, checkCandidates, createLocationTable, expandHome, isNetworkLocation, isRemote, localRealpath, resolvePreview, resolveTarget } from "./file-access.mjs";
 import { isInside, lexicalPath } from "./paths.mjs";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { lstat, mkdtemp, open as openFile, readdir, rm, rmdir, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, open as openFile, readdir, readFile, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -183,8 +183,12 @@ async function getLister() {
 // context/credits/quota figures for the window, debounced per session
 const usage = createUsagePusher({ send: (sessionId, view) => send("usage:update", { sessionId, view }) });
 
+// Session folders seen so far: together with the home folder the only places a file mention is checked without a click
+const knownFolders = new Set();
+
 /** Wire a session's connection to the window. */
 function attach(sessionId, conn, cwd, relay, link) {
+  if (cwd) knownFolders.add(cwd);
   const entry = { conn, cwd, permissions: new Map(), relay: relayStart(sessionId, cwd, relay, link), toolTitles: new Map(), configOptions: [] };
   open.set(sessionId, entry);
   // one path for live and replayed updates (see sessions:new)
@@ -255,6 +259,7 @@ handle("sessions:list", async () => {
   for (let page = 0; page < 50; page++) {
     const res = await conn.request("session/list", cursor ? { cursor } : {});
     all.push(...(res.sessions ?? []));
+    for (const x of res.sessions ?? []) if (x.cwd) knownFolders.add(x.cwd);
     cursor = res.nextCursor;
     if (!cursor) break;
   }
@@ -944,6 +949,35 @@ handle("open:link", async (cwd, target) => {
   if (err) throw new Error(err);
   return "opened";
 });
+
+// Network locations (mounts, mapped drives), read at most every 30 s. `mount` can hang on a dead NFS server: it is
+// killed after 5 s and a failure gives a null table (then only the trusted roots are checked automatically).
+const locations = createLocationTable({
+  platform: process.platform,
+  readFile: (p) => readFile(p, "utf8"),
+  exec: (file, args) =>
+    new Promise((resolve, reject) => execFile(file, args, { timeout: 5000, windowsHide: true }, (err, stdout) => (err ? reject(err) : resolve(String(stdout))))),
+});
+const isNetwork = async (real) => {
+  const table = await locations.get();
+  return table ? isNetworkLocation(real, table) : false;
+};
+
+// Which file mentions of a message exist? Agent text decides the paths, so nothing is looked at on disk unless the
+// path is local and (without a location table) inside the home or a session folder.
+handle("files:check", async (base, candidates) => {
+  const home = os.homedir();
+  const table = await locations.get();
+  const trustedRoots = [home, ...knownFolders];
+  const allow = (p) => allowsAutomaticCheck(p, { table, trustedRoots, platform: process.platform });
+  const list = (Array.isArray(candidates) ? candidates : []).map(String);
+  return checkCandidates(list, { base: base ? String(base) : null, home, allow, platform: process.platform });
+});
+
+// A click on a file link: the text for the preview pane, { outside } until confirmed for files outside the viewing folder
+handle("files:read", async (baseCwd, target, { viewingCwd, confirmed = false } = {}) =>
+  resolvePreview({ baseCwd, target, viewingCwd, confirmed: confirmed === true }, { isNetwork }),
+);
 
 handle("paste:saveImage", async (bytes, mime) => {
   if (!(bytes instanceof Uint8Array) || !bytes.length) throw new Error("Empty image");
