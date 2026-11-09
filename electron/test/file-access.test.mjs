@@ -6,6 +6,7 @@ import { test } from "node:test";
 import {
   allowsAutomaticCheck,
   checkCandidates,
+  createFileWatcher,
   createLocationTable,
   isNetworkLocation,
   localRealpath,
@@ -370,4 +371,88 @@ test("without a location table only trusted roots (and the way to them) are chec
 test("a location table that hangs yields null at the deadline", async () => {
   const table = createLocationTable({ platform: "darwin", readFile: async () => "", exec: () => new Promise(() => {}), timeoutMs: 20 });
   assert.equal(await table.get(), null);
+});
+
+// --- createFileWatcher ---------------------------------------------------------------------------------------
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** A fake fs.watch: records every watcher so a test can fire events and see whether it was closed. */
+function fakeWatch() {
+  const watchers = [];
+  const watch = (dir, opts, listener) => {
+    const w = { dir, opts, listener, closed: false, handlers: {}, close() { this.closed = true; }, on(ev, fn) { this.handlers[ev] = fn; return this; } };
+    watchers.push(w);
+    return w;
+  };
+  return { watch, watchers };
+}
+
+test("events for the file are debounced into one change", async () => {
+  const { watch, watchers } = fakeWatch();
+  const seen = [];
+  const w = createFileWatcher({ onChange: (p) => seen.push(p), debounceMs: 20, watch });
+  w.set("/d/a.txt");
+  assert.equal(watchers[0].dir, "/d");
+  for (let i = 0; i < 3; i++) watchers[0].listener("change", "a.txt");
+  assert.deepEqual(seen, []);
+  await sleep(60);
+  assert.deepEqual(seen, ["/d/a.txt"]);
+});
+test("events for other files are ignored", async () => {
+  const { watch, watchers } = fakeWatch();
+  const seen = [];
+  createFileWatcher({ onChange: (p) => seen.push(p), debounceMs: 10, watch }).set("/d/a.txt");
+  watchers[0].listener("change", "b.txt");
+  await sleep(40);
+  assert.deepEqual(seen, []);
+});
+test("a null file name counts as a change", async () => {
+  const { watch, watchers } = fakeWatch();
+  const seen = [];
+  createFileWatcher({ onChange: (p) => seen.push(p), debounceMs: 10, watch }).set("/d/a.txt");
+  watchers[0].listener("rename", null);
+  await sleep(40);
+  assert.deepEqual(seen, ["/d/a.txt"]);
+});
+test("set replaces the watcher and closes the old one, dropping its pending change", async () => {
+  const { watch, watchers } = fakeWatch();
+  const seen = [];
+  const w = createFileWatcher({ onChange: (p) => seen.push(p), debounceMs: 20, watch });
+  w.set("/d/a.txt");
+  watchers[0].listener("change", "a.txt");
+  w.set("/e/b.txt");
+  assert.equal(watchers[0].closed, true);
+  assert.equal(watchers[1].dir, "/e");
+  await sleep(60);
+  assert.deepEqual(seen, []);
+  watchers[1].listener("change", "b.txt");
+  await sleep(60);
+  assert.deepEqual(seen, ["/e/b.txt"]);
+});
+test("set(null) closes the watcher and drops a pending change", async () => {
+  const { watch, watchers } = fakeWatch();
+  const seen = [];
+  const w = createFileWatcher({ onChange: (p) => seen.push(p), debounceMs: 20, watch });
+  w.set("/d/a.txt");
+  watchers[0].listener("change", "a.txt");
+  w.set(null);
+  assert.equal(watchers[0].closed, true);
+  await sleep(60);
+  assert.deepEqual(seen, []);
+});
+test("an error event closes the watcher and counts as one change", async () => {
+  const { watch, watchers } = fakeWatch();
+  const seen = [];
+  createFileWatcher({ onChange: (p) => seen.push(p), debounceMs: 10, watch }).set("/d/a.txt");
+  watchers[0].handlers.error(new Error("EPERM"));
+  assert.equal(watchers[0].closed, true);
+  await sleep(40);
+  assert.deepEqual(seen, ["/d/a.txt"]);
+});
+test("a watch that throws counts as one change instead of throwing", async () => {
+  const seen = [];
+  const w = createFileWatcher({ onChange: (p) => seen.push(p), debounceMs: 10, watch: () => { throw new Error("ENOENT"); } });
+  w.set("/d/a.txt");
+  await sleep(40);
+  assert.deepEqual(seen, ["/d/a.txt"]);
 });

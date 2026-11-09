@@ -31,6 +31,7 @@ function createFilePreview({ api, h, md, onStatus, onChange = () => {} }) {
   let fullText = null; // text of the windowed (plain tier) file on show, for Select all + copy
   let allSelected = false;
   let seq = 0; // a newer read or a close makes older reads stale
+  let refreshSeq = 0; // a newer refresh makes older refreshes stale
 
   const listOf = (id) => recent[id] ?? [];
   const save = () => {
@@ -125,9 +126,10 @@ function createFilePreview({ api, h, md, onStatus, onChange = () => {} }) {
     scroll.append(box);
     mark.hidden = !(line >= 1 && line <= n);
     if (!mark.hidden) mark.style.top = `${(line - 1) * LINE_H}px`;
-    // the caller attaches `scroll`, then calls reveal once it has a height
-    const reveal = () => {
-      if (!mark.hidden) scroll.scrollTop = Math.max(0, (line - 1) * LINE_H - scroll.clientHeight / 3);
+    // the caller attaches `scroll`, then calls reveal once it has a height; `keepTop` (a refresh) replaces the jump to the mark
+    const reveal = (keepTop) => {
+      if (keepTop != null) scroll.scrollTop = keepTop;
+      else if (!mark.hidden) scroll.scrollTop = Math.max(0, (line - 1) * LINE_H - scroll.clientHeight / 3);
       render();
     };
     return { scroll, reveal };
@@ -159,8 +161,9 @@ function createFilePreview({ api, h, md, onStatus, onChange = () => {} }) {
     return box;
   }
 
-  /** The one place that turns a read result into what is on screen (the refresh in a later change re-uses it). */
-  function renderFile(result, line) {
+  /** The one place that turns a read result into what is on screen. `keepScroll` (a refresh) keeps the scroll position. */
+  function renderFile(result, line, keepScroll = false) {
+    const top = keepScroll ? content.querySelector(".fp-scroll, .fp-md")?.scrollTop : undefined;
     errEl.hidden = true;
     fullText = result.tier === "plain" ? result.text : null;
     const isMd = /\.(md|markdown)$/i.test(result.name) && result.tier === "highlight";
@@ -172,14 +175,29 @@ function createFilePreview({ api, h, md, onStatus, onChange = () => {} }) {
     }
     if (isMd && !mdSource) {
       mdBtn.textContent = "Show source";
-      return content.replaceChildren(markdownView(result.text));
+      const box = markdownView(result.text);
+      content.replaceChildren(box);
+      if (top != null) box.scrollTop = top;
+      return;
     }
     mdBtn.textContent = "Show rendered";
     const language = result.tier === "highlight" ? FileLinks.previewLanguage(result.name) : null;
     const { scroll, reveal } = codeView(result.text, language, line, result.tier === "plain");
     content.replaceChildren(scroll);
-    reveal();
+    reveal(top);
   }
+
+  /** A file that cannot be shown (gone, or no longer text): its name and path stay, `text` says why. */
+  function showUnavailable(filePath, text) {
+    fullText = null;
+    nameEl.textContent = filePath.split(/[/\\]/).pop();
+    pathEl.textContent = filePath;
+    mdBtn.hidden = true;
+    message(text);
+  }
+
+  /** Watch the file on show; a path main has not read (an old entry) is refused, which only means no refresh. */
+  const watch = (filePath) => api.watchFile(filePath).catch(() => {});
 
   // --- the list -----------------------------------------------------------------------------------------
 
@@ -219,21 +237,16 @@ function createFilePreview({ api, h, md, onStatus, onChange = () => {} }) {
       if (!gone.has(v.sessionId)) gone.set(v.sessionId, new Set());
       gone.get(v.sessionId).add(entry.path);
       cur = { path: entry.path, line: entry.line, result: null };
-      nameEl.textContent = entry.path.split(/[/\\]/).pop();
-      pathEl.textContent = entry.path;
-      mdBtn.hidden = true;
-      message(e.message);
+      showUnavailable(entry.path, e.message);
+      watch(entry.path); // it may come back
       return renderList();
     }
     if (my !== seq) return;
     gone.get(v.sessionId)?.delete(entry.path);
     cur = { path: r.path ?? entry.path, line: entry.line, result: r };
-    if (r.notText || r.outside || r.tier === "binary") {
-      nameEl.textContent = entry.path.split(/[/\\]/).pop();
-      pathEl.textContent = entry.path;
-      mdBtn.hidden = true;
-      message("This file is no longer a text file.");
-    } else {
+    watch(cur.path);
+    if (r.notText || r.outside || r.tier === "binary") showUnavailable(entry.path, "This file is no longer a text file.");
+    else {
       mdSource = entry.line != null;
       renderFile(r, entry.line);
     }
@@ -292,6 +305,7 @@ function createFilePreview({ api, h, md, onStatus, onChange = () => {} }) {
     showOverlay(v);
     mdSource = line != null;
     cur = { path: r.path, line, result: r };
+    watch(r.path);
     setList(v.sessionId, FileLinks.recentAdd(listOf(v.sessionId), { path: r.path, line }));
     gone.get(v.sessionId)?.delete(r.path);
     renderFile(r, line);
@@ -299,7 +313,34 @@ function createFilePreview({ api, h, md, onStatus, onChange = () => {} }) {
     return true;
   }
 
+  /** The watched file changed: read it again and show it in place. The list, the mark and the scroll stay as they are. */
+  async function refresh(changed) {
+    if (el.hidden || !view || cur?.path !== changed) return;
+    const my = seq;
+    const mine = ++refreshSeq;
+    const v = view;
+    let r;
+    try {
+      r = await api.readFile(v.cwd, changed, { viewingCwd: v.cwd, confirmed: true });
+    } catch (e) {
+      if (my !== seq || mine !== refreshSeq || cur?.path !== changed) return;
+      if (!gone.has(v.sessionId)) gone.set(v.sessionId, new Set());
+      gone.get(v.sessionId).add(changed);
+      cur.result = null;
+      showUnavailable(changed, e.message);
+      return renderList();
+    }
+    if (my !== seq || mine !== refreshSeq || cur?.path !== changed) return; // the user has moved on
+    gone.get(v.sessionId)?.delete(changed);
+    cur.result = r;
+    if (r.notText || r.outside || r.tier === "binary") showUnavailable(changed, "This file is no longer a text file.");
+    else renderFile(r, cur.line, true);
+    renderList();
+  }
+  api.onFileChanged(refresh);
+
   function close() {
+    watch(null);
     seq++;
     errEl.hidden = true;
     fullText = null;

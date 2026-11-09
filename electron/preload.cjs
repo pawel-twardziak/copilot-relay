@@ -47,6 +47,9 @@ contextBridge.exposeInMainWorld("api", {
   checkFiles: (base, candidates) => call("files:check", base, candidates),
   // text of a clicked file link: { notText } | { outside, path } until confirmed | { path, name, text?, tier, size, mtimeMs }
   readFile: (baseCwd, target, opts) => call("files:read", baseCwd, target, opts),
+  // watch the file on show (a path files:read returned; null stops); onFileChanged gets the changed path
+  watchFile: (p) => call("files:watch", p),
+  onFileChanged: on("files:changed"),
   storage: () => call("storage:get"),
   openPastes: () => call("storage:openPastes"),
   clearPastes: () => call("storage:clearPastes"),

@@ -1,6 +1,6 @@
 // Electron main process: owns the `copilot --acp` processes and bridges them to the window over IPC.
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, shell } from "electron";
-import { allowsAutomaticCheck, checkCandidates, createLocationTable, expandHome, isNetworkLocation, isRemote, localRealpath, resolvePreview, resolveTarget } from "./file-access.mjs";
+import { allowsAutomaticCheck, checkCandidates, createFileWatcher, createLocationTable, expandHome, isNetworkLocation, isRemote, localRealpath, resolvePreview, resolveTarget } from "./file-access.mjs";
 import { isInside, lexicalPath } from "./paths.mjs";
 import { execFile, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -985,9 +985,21 @@ handle("files:check", async (base, candidates) => {
 });
 
 // A click on a file link: the text for the preview pane, { outside } until confirmed for files outside the viewing folder
-handle("files:read", async (baseCwd, target, { viewingCwd, confirmed = false } = {}) =>
-  resolvePreview({ baseCwd, target, viewingCwd, confirmed: confirmed === true }, { isNetwork }),
-);
+// Real paths files:read has returned in this run: the only ones files:watch accepts.
+const readablePaths = new Set();
+handle("files:read", async (baseCwd, target, { viewingCwd, confirmed = false } = {}) => {
+  const r = await resolvePreview({ baseCwd, target, viewingCwd, confirmed: confirmed === true }, { isNetwork });
+  if (r.path && !r.outside) readablePaths.add(r.path);
+  return r;
+});
+
+// The file on show in the preview; a change makes the renderer read it again (files:read decides what it may see).
+const fileWatcher = createFileWatcher({ onChange: (p) => send("files:changed", p) });
+handle("files:watch", async (p) => {
+  if (p == null) return fileWatcher.set(null);
+  if (typeof p !== "string" || !readablePaths.has(p)) throw new Error("This file was not opened in the preview");
+  fileWatcher.set(p);
+});
 
 handle("paste:saveImage", async (bytes, mime) => {
   if (!(bytes instanceof Uint8Array) || !bytes.length) throw new Error("Empty image");

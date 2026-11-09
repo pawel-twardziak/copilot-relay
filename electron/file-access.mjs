@@ -1,6 +1,7 @@
 // Network-location rules and safe path resolution, without importing electron so tests can load it.
 // Text written by an agent must never make the main process touch a network location (a mapped drive, an NFS or
 // SMB mount, an automount) without a click: the guard runs on the path text before anything is lstat()ed.
+import { watch as fsWatch } from "node:fs";
 import { lstat, open, readlink, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -260,4 +261,53 @@ export async function resolvePreview({ baseCwd, target, viewingCwd, confirmed },
   const r = await readPreview(real);
   if (r.tier === "binary") return { notText: true };
   return { path: real, name: path.basename(real), ...r };
+}
+
+/**
+ * Reports changes of one file. The parent folder is watched and events are filtered by base name, which survives
+ * an atomic save (write a temp file, rename it over the target). A null file name from the OS counts as a change,
+ * bursts of events become one change, and a watcher that fails closes and counts as one change so the view re-reads.
+ */
+export function createFileWatcher({ onChange, debounceMs = 150, watch = fsWatch }) {
+  let watcher = null;
+  let timer = null;
+  const stop = () => {
+    clearTimeout(timer);
+    timer = null;
+    const w = watcher;
+    watcher = null;
+    try {
+      w?.close();
+    } catch {}
+  };
+  return {
+    set(file) {
+      stop();
+      if (file == null) return;
+      const dir = path.dirname(file);
+      const base = path.basename(file);
+      const changed = () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          timer = null;
+          onChange(file);
+        }, debounceMs);
+      };
+      let mine;
+      try {
+        mine = watch(dir, { persistent: false }, (_event, name) => {
+          if (name == null || String(name) === base) changed();
+        });
+        mine.on?.("error", () => {
+          if (watcher !== mine) return;
+          stop();
+          changed();
+        });
+      } catch {
+        changed(); // the folder cannot be watched: show what is there now
+        return;
+      }
+      watcher = mine;
+    },
+  };
 }
