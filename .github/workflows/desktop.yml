@@ -22,9 +22,6 @@ jobs:
           - os: ubuntu-latest
             target: --linux AppImage deb
     runs-on: ${{ matrix.os }}
-    env:
-      # one folder on both systems, for electron-builder's tools and the Electron download
-      ELECTRON_BUILDER_CACHE: ${{ github.workspace }}/.cache/electron-builder
     defaults:
       run:
         working-directory: electron
@@ -46,13 +43,16 @@ jobs:
 
       # A build otherwise downloads its tools from GitHub Releases every time, and fails when those answer 504.
       # A tag can only restore caches saved on main or on itself, so "Run workflow" on main fills this for releases.
+      # The folder must stay outside the repo: its package.json says "type": "module", which breaks the CommonJS tools.
       - uses: actions/cache@v4
         with:
-          path: .cache/electron-builder
+          path: ${{ runner.temp }}/electron-builder-cache
           key: electron-builder-${{ runner.os }}-${{ hashFiles('electron/package-lock.json') }}
           restore-keys: electron-builder-${{ runner.os }}-
 
       - name: Build
+        env:
+          ELECTRON_BUILDER_CACHE: ${{ runner.temp }}/electron-builder-cache
         run: npm run dist -- ${{ matrix.target }}
 
       - uses: actions/upload-artifact@v4
