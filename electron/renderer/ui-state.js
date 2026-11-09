@@ -80,11 +80,35 @@ function acceptDelivery(seen, id) {
   return true;
 }
 
+// updates that belong to a running turn; the rest (commands, usage, title) can arrive at any time
+const TURN_UPDATES = new Set(["user_message_chunk", "agent_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update", "plan"]);
+
+/**
+ * When to acknowledge one delivered prompt to the broker: on its first turn update or its successful return,
+ * whichever comes first, once. A prompt that fails before any update is not acknowledged and its id is forgotten,
+ * so the broker's redelivery is accepted (see acceptDelivery).
+ */
+function deliveryAck(id, seen, ack) {
+  let acked = false;
+  const started = () => {
+    if (acked) return;
+    acked = true;
+    ack(id);
+  };
+  return {
+    update: (u) => TURN_UPDATES.has(u?.sessionUpdate) && started(),
+    returned: started,
+    failed: () => {
+      if (!acked) seen.delete(id);
+    },
+  };
+}
+
 /** Whether a delegated child has been idle long enough (15 minutes by default) to close its process. */
 function shouldCloseIdle({ parentSessionId, busy, inboxLength, pendingPermissions, active, lastActivity }, now, ms = 900_000) {
   return Boolean(parentSessionId) && !busy && !inboxLength && !pendingPermissions && !active && now - lastActivity >= ms;
 }
 
-const UiState = { listModel, CHAT_SCALE, stepScale, imageMentions, VIEWER_ZOOM, fitScale, zoomAt, acceptDelivery, shouldCloseIdle };
+const UiState = { listModel, CHAT_SCALE, stepScale, imageMentions, VIEWER_ZOOM, fitScale, zoomAt, acceptDelivery, deliveryAck, shouldCloseIdle };
 globalThis.UiState = UiState;
 if (typeof module !== "undefined") module.exports = UiState;

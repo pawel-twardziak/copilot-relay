@@ -7,10 +7,10 @@ export function limitError(entries, parentId, { perParent = 3, total = 5 } = {},
   const live = kids.length + creating.length;
   const own = kids.filter((e) => e.parentSessionId === parentId).length + creating.filter((id) => id === parentId).length;
   if (own >= perParent) {
-    return `This session already has ${own} delegated sessions running; the limit is ${perParent} per session. Wait for one to report back before creating another.`;
+    return `This session already has ${own} delegated sessions running; the limit is ${perParent} per session. A slot frees up when a delegated session of yours is closed, not when it reports.`;
   }
   if (live >= total) {
-    return `The app already has ${live} delegated sessions running; the limit is ${total} in total. Wait for one to finish before creating another.`;
+    return `The app already has ${live} delegated sessions running; the limit is ${total} in total. A slot frees up when a delegated session is closed, not when it reports.`;
   }
   return null;
 }
@@ -60,6 +60,25 @@ export function childPrompt({ parentName, task }) {
   );
 }
 
+/** Rejects with `message` if `promise` is not settled by `deadline` (ms since the epoch). */
+export function withDeadline(promise, deadline, message) {
+  let timer;
+  const expired = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), Math.max(0, deadline - Date.now()));
+  });
+  return Promise.race([promise, expired]).finally(() => clearTimeout(timer));
+}
+
+/** The question asked before a reload: { message, detail } (see the View menu in main.mjs). */
+export function reloadWarning(children, requests) {
+  const stopped = children ? `stops ${children} delegated ${children === 1 ? "session" : "sessions"}` : "";
+  const dropped = requests ? `discards ${requests} waiting ${requests === 1 ? "request" : "requests"} for a new session` : "";
+  return {
+    message: `Reloading ${[stopped, dropped].filter(Boolean).join(" and ")}.`,
+    detail: "A reloaded window cannot show their cards. Stopped sessions stay in the list and can be resumed.",
+  };
+}
+
 export function unreportedChildren(entries) {
   return [...entries].filter((e) => isChild(e) && !e.reported);
 }
@@ -75,6 +94,14 @@ export class PendingRequests {
     const req = this.#byId.get(id);
     this.#byId.delete(id);
     return req;
+  }
+
+  get size() {
+    return this.#byId.size;
+  }
+
+  clear() {
+    this.#byId.clear();
   }
 
   dropForParent(parentId) {

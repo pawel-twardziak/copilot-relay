@@ -850,15 +850,15 @@ class SessionView {
   pump() {
     if (this.busy || this.dead || this.deleting || !this.inbox.length) return;
     const m = this.inbox.shift();
-    // its prompt starts now: the broker may forget it (a failed ack only means it is delivered again later)
-    if (m.deliveryId) api.relayAck(this.sessionId, m.deliveryId).catch(() => {});
+    // the broker forgets it once its prompt has really started (a failed ack only means it is delivered again later)
+    const delivery = m.deliveryId ? UiState.deliveryAck(m.deliveryId, this.seenDeliveries, (id) => api.relayAck(this.sessionId, id).catch(() => {})) : null;
     // set by the broker for messages typed by a person in the relay GUI; a broker older than this app doesn't send it,
     // then the reserved-for-people name decides. It only re-opens the relay budget: relay text never attaches files.
     const human = m.human ?? m.from === "user";
     const el = bubble("relay", m.text, m.from);
     this.mentionThumbs(el, m.text);
     el._human = human; // typed by you in the relay GUI: yours for Left Shift+Up/Down
-    this.runPrompt(m.prompt, el, human ? "human" : "relay");
+    this.runPrompt(m.prompt, el, human ? "human" : "relay", delivery);
   }
 
   // --- streaming blocks
@@ -910,6 +910,7 @@ class SessionView {
   // --- ACP session/update
   onUpdate(u) {
     this.lastActivity = Date.now();
+    this.delivery?.update(u);
     const text = u.content?.type === "text" ? u.content.text : "";
     switch (u.sessionUpdate) {
       case "user_message_chunk":
@@ -1228,7 +1229,7 @@ class SessionView {
   }
 
   /** @param {"app"|"human"|"relay"} source who wrote the prompt (decides the relay budget and image attachments) */
-  async runPrompt(text, bubble, source) {
+  async runPrompt(text, bubble, source, delivery = null) {
     this.flush();
     // CLI commands (/context ...) are not recorded in events.jsonl; compare the recorded count to tell
     const isCmd = SlashCommands.isCommandPrompt(text);
@@ -1248,14 +1249,18 @@ class SessionView {
     this.setBusy(true);
     this.prompting = true;
     const before = isCmd ? await api.userMessages(this.sessionId).catch(() => null) : null;
+    this.delivery = delivery;
     try {
       const stop = await api.prompt(this.sessionId, sent, source);
+      delivery?.returned();
       this.flush();
       if (stop === "cancelled") this.system("Stopped.");
       else if (stop && stop !== "end_turn") this.system(`Turn ended: ${stop}`);
     } catch (e) {
+      delivery?.failed();
       this.error(e.message);
     } finally {
+      this.delivery = null;
       this.prompting = false;
       this.dismissPermissions();
       // the view was closed or its session deleted meanwhile: nothing to update (a refresh would also replace the
@@ -1336,9 +1341,9 @@ async function openSession(s) {
   }
   const v = new SessionView(s);
   views.set(s.sessionId, v);
+  v.setBusy(true); // before flushEarly: an early relay message must wait until the session is open
   flushEarly(v);
   activate(s.sessionId);
-  v.setBusy(true);
   v.statusEl.textContent = "Resuming session…";
   v.resuming = true;
   try {

@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { test } from "node:test";
 
 const UiState = createRequire(import.meta.url)("../renderer/ui-state.js");
-const { listModel, stepScale, imageMentions, fitScale, zoomAt, acceptDelivery, shouldCloseIdle } = UiState;
+const { listModel, stepScale, imageMentions, fitScale, zoomAt, acceptDelivery, deliveryAck, shouldCloseIdle } = UiState;
 
 const S = (sessionId, cwd, updatedAt, title = sessionId) => ({ sessionId, cwd, updatedAt, title });
 const sessions = [
@@ -127,6 +127,44 @@ test("a redelivered report is accepted once; messages without an id always pass"
   assert.equal(acceptDelivery(seen, "d1"), true);
   assert.equal(acceptDelivery(seen, "d1"), false);
   assert.equal(acceptDelivery(seen, undefined), true);
+});
+
+function tracked() {
+  const seen = new Set(["d1"]);
+  const acks = [];
+  return { seen, acks, d: deliveryAck("d1", seen, (id) => acks.push(id)) };
+}
+
+test("a delivery is acknowledged once, on its first turn update", () => {
+  const { acks, d } = tracked();
+  d.update({ sessionUpdate: "agent_message_chunk" });
+  d.update({ sessionUpdate: "tool_call" });
+  d.returned();
+  assert.deepEqual(acks, ["d1"]);
+});
+
+test("a delivery is acknowledged on return when no turn update came", () => {
+  const { acks, d } = tracked();
+  d.update({ sessionUpdate: "available_commands_update" });
+  d.update({ sessionUpdate: "usage_update" });
+  assert.deepEqual(acks, []);
+  d.returned();
+  assert.deepEqual(acks, ["d1"]);
+});
+
+test("a prompt that fails before any update is not acknowledged and can be redelivered", () => {
+  const { seen, acks, d } = tracked();
+  d.failed();
+  assert.deepEqual(acks, []);
+  assert.equal(acceptDelivery(seen, "d1"), true);
+});
+
+test("a prompt that fails after it started stays acknowledged and seen", () => {
+  const { seen, acks, d } = tracked();
+  d.update({ sessionUpdate: "agent_thought_chunk" });
+  d.failed();
+  assert.deepEqual(acks, ["d1"]);
+  assert.equal(acceptDelivery(seen, "d1"), false);
 });
 
 const idle = { parentSessionId: "p", busy: false, inboxLength: 0, pendingPermissions: 0, active: false, lastActivity: 0 };

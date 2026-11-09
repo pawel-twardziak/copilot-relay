@@ -6,8 +6,10 @@ import {
   childPrompt,
   findModelOption,
   limitError,
+  reloadWarning,
   resolveConfig,
   unreportedChildren,
+  withDeadline,
 } from "../delegation.mjs";
 
 const MODEL_ID = "model";
@@ -122,4 +124,37 @@ test("unreportedChildren returns children without a report from any iterable", (
     ["d", { parentSessionId: "q" }],
   ]);
   assert.deepEqual(unreportedChildren(entries.values()), [entries.get("a"), entries.get("d")]);
+});
+
+test("the limit notices name the limit and say a slot frees up when a session is closed", () => {
+  for (const [text, number] of [
+    [limitError(children("p", 3), "p"), /limit is 3/],
+    [limitError(children("q", 5), "p"), /limit is 5/],
+  ]) {
+    assert.match(text, number);
+    assert.match(text, /frees up when a delegated session.* is closed/);
+    assert.doesNotMatch(text, /report back|Wait for/);
+  }
+});
+
+test("the reload warning names what it stops and discards", () => {
+  assert.equal(reloadWarning(1, 0).message, "Reloading stops 1 delegated session.");
+  assert.equal(reloadWarning(2, 1).message, "Reloading stops 2 delegated sessions and discards 1 waiting request for a new session.");
+  assert.equal(reloadWarning(0, 2).message, "Reloading discards 2 waiting requests for a new session.");
+});
+
+test("PendingRequests reports its size and can be emptied", () => {
+  const p = new PendingRequests();
+  p.add({ requestId: "a", parentSessionId: "x" });
+  p.add({ requestId: "b", parentSessionId: "y" });
+  assert.equal(p.size, 2);
+  p.clear();
+  assert.equal(p.size, 0);
+  assert.equal(p.take("a"), undefined);
+});
+
+test("withDeadline passes a result through and rejects when the deadline passes", async () => {
+  assert.equal(await withDeadline(Promise.resolve(7), Date.now() + 1000, "late"), 7);
+  await assert.rejects(withDeadline(new Promise(() => {}), Date.now() + 5, "late"), /late/);
+  await assert.rejects(withDeadline(Promise.reject(new Error("own")), Date.now() + 1000, "late"), /own/);
 });
