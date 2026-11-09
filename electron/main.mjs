@@ -348,7 +348,6 @@ const fmtBytes = (b) => (b < 1024 * 1024 ? `${Math.round(b / 1024)} KB` : `${(b 
 // mime → file extension for saving pasted images (derived, so the two can't drift apart)
 const EXT_FOR_MIME = Object.fromEntries(Object.entries(IMAGE_TYPES).filter(([ext]) => ext !== "jpeg").map(([ext, mime]) => [mime, ext]));
 
-/** "~/x" and "~\\x" mean the home folder, as in a shell. */
 // Model APIs reject images over about 5 MB *after* base64 encoding (4/3 of the file size), and an oversized
 // image fails the whole turn. Files are checked against the encoded size, and the prompt has a total budget.
 const MAX_IMAGE_BYTES = Math.floor((5 * 1024 * 1024 * 3) / 4) - 64 * 1024; // ≈3.7 MB file → <5 MB base64

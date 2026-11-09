@@ -42,12 +42,23 @@ export function parseWinDrives(json) {
   return (Array.isArray(data) ? data : [data]).filter((d) => d?.DriveType === 3).map((d) => String(d.DeviceID).toUpperCase());
 }
 
+/** Is `abs` the mount point or below it? A real path boundary: "/mnt/nfs/..x" is inside, "/mnt/nfsx" is not. */
+function underMount(abs, mount, platform) {
+  const win = platform === "win32";
+  const p = win ? path.win32 : path.posix;
+  const fold = (x) => (win || platform === "darwin" ? x.toLowerCase() : x);
+  const rel = p.relative(fold(mount), fold(abs));
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${p.sep}`) && !p.isAbsolute(rel));
+}
+
+/** An unresolved ".." (and anything unknown) counts as network: the caller must hand over resolved paths. */
 export function isNetworkLocation(abs, table, platform = process.platform) {
+  if (/(^|[\\/])\.\.([\\/]|$)/.test(abs)) return true;
   if (platform === "win32") {
     const drive = /^([a-z]:)/i.exec(abs)?.[1].toUpperCase();
     return !drive || !table.fixedDrives.includes(drive); // UNC and anything without a known fixed drive
   }
-  return table.mounts.some((m) => isInside(abs, m, platform));
+  return table.mounts.some((m) => underMount(abs, m, platform));
 }
 
 /** Without a table (it could not be read) only the trusted roots pass, compared by text. */
@@ -91,6 +102,7 @@ export function isRemote(p) {
   return /^(\\\\|\/\/)/.test(p);
 }
 
+/** "~/x" and "~\\x" mean the home folder, as in a shell. */
 export const expandHome = (p) => (p === "~" ? os.homedir() : /^~[\\/]/.test(p) ? path.join(os.homedir(), p.slice(2)) : p);
 
 /** Resolve a link target from agent output to an existing local path: file:// URL, absolute or relative to the session folder. */
@@ -141,6 +153,8 @@ async function realpathGuarded(p, allow, depth) {
   let cur = root;
   for (const part of p.slice(root.length).split(/[\\/]+/).filter(Boolean)) {
     const next = path.join(cur, part);
+    // every component is checked as text before it is lstat()ed: a link to an ancestor of a mount leads into it
+    if (!allow(next)) throw new Error(`Network paths are not opened: ${next}`);
     let st;
     try {
       st = await lstat(next); // async: a slow mount must not freeze the main process

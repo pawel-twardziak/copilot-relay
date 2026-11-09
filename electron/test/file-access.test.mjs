@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -98,6 +98,35 @@ test("resolveTarget still finds relative, :line and #L targets", async () => {
     assert.equal(await resolveTarget(dir, "a b.txt#L5-L9"), path.join(real, "a b.txt"));
     await assert.rejects(resolveTarget(dir, "nope.txt"), /File not found/);
     await assert.rejects(resolveTarget(dir, "//host/share/x"), /Network paths/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+test("dot-prefixed names under a mount are inside it", () => {
+  const o = { table: { mounts: ["/mnt/nfs"] }, trustedRoots: [], platform: "linux" };
+  assert.equal(allowsAutomaticCheck("/mnt/nfs/..x/y", o), false);
+  assert.equal(allowsAutomaticCheck("/mnt/nfs/...", o), false);
+  assert.equal(allowsAutomaticCheck("/mnt/nfsx/..x", o), true);
+});
+test("darwin compares mounts case-insensitively", () => {
+  assert.equal(isNetworkLocation("/volumes/S/a", { mounts: ["/Volumes/s"] }, "darwin"), true);
+  assert.equal(isNetworkLocation("/volumes/S/a", { mounts: ["/Volumes/s"] }, "linux"), false);
+});
+test("an unresolved .. counts as network", () => {
+  const o = { table: { mounts: ["/mnt/nfs"] }, trustedRoots: [], platform: "linux" };
+  assert.equal(allowsAutomaticCheck("/mnt/nfs/sub/../a", o), false);
+  assert.equal(allowsAutomaticCheck("/home/../mnt/nfs/a", o), false);
+});
+test("guard refuses a link to an ancestor followed by the mount", async () => {
+  const dir = await realpath(await mkdtemp(path.join(os.tmpdir(), "fa-")));
+  try {
+    await mkdir(path.join(dir, "net"));
+    await writeFile(path.join(dir, "net", "f.txt"), "x");
+    await symlink(dir, path.join(dir, "link"));
+    const table = { mounts: [path.join(dir, "net")] };
+    const allow = (p) => !isNetworkLocation(p, table, "linux");
+    await assert.rejects(localRealpath(path.join(dir, "link", "net", "f.txt"), { allow }), /Network paths/);
+    assert.equal(await localRealpath(path.join(dir, "link"), { allow }), dir);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
