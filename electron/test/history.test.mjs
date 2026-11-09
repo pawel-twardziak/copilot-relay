@@ -229,6 +229,15 @@ describe("cutIndex", () => {
   });
 });
 
+describe("cutIndex with a folder line", () => {
+  test("bubble text still matches a user.message that has one", () => {
+    const events = fixtureEvents("x");
+    events[9] = ev("user.message", { content: '[from tester]\n[folder "/a b"]\nhello' });
+    assert.equal(cutIndex(events, { ordinal: 2, text: "hello", where: "beforeUser" }), 9);
+    assert.equal(cutIndex(events, { ordinal: 7, text: "hello", where: "beforeUser" }), 9);
+  });
+});
+
 describe("describeCut", () => {
   test("reports removed user messages and events", () => {
     const { id } = makeSession();
@@ -278,6 +287,14 @@ describe("forkSession", () => {
       assert.equal(fs.readFileSync(path.join(newDir, sub, "note.txt"), "utf8"), `${sub} content`);
     }
     assert.deepEqual(snapshot(dir), before);
+  });
+
+  test("fork prefill drops the folder line and keeps [from x]", () => {
+    const events = fixtureEvents("x");
+    events[9] = ev("user.message", { content: '[from tester]\n[folder "/a b"]\nPlease review' });
+    const { id } = makeSession({ events });
+    const res = forkSession(id, { ordinal: 2, text: "Please review", where: "beforeUser" }, now);
+    assert.equal(res.prefill, "[from tester]\nPlease review");
   });
 
   test("fork afterReply keeps the reply and has no prefill", () => {

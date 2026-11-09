@@ -121,7 +121,7 @@ function relayStart(sessionId, cwd, { cfg, alias }, { name, parentKey } = {}) {
     nodePath: cfg.nodePath,
     // `human` is set by the broker (true only for messages typed by a person in the relay GUI), not by the sender's name
     // human: true/false from this broker, undefined from an older one (the renderer then falls back to the sender name)
-    onMessage: (m) => send("relay:message", { sessionId, from: m.from, human: m.human, text: m.text, prompt: m.prompt, deliveryId: m.deliveryId, wake: m.wake }),
+    onMessage: (m) => send("relay:message", { sessionId, from: m.from, human: m.human, text: m.text, prompt: m.prompt, fromCwd: m.fromCwd, deliveryId: m.deliveryId, wake: m.wake }),
     onSessionRequest: (req) => sessionRequested(sessionId, req),
     onReported: () => {
       const entry = open.get(sessionId);
@@ -701,8 +701,10 @@ async function createChild(req) {
     await Promise.race([slashRename(sessionId, entry, finalName).catch((e) => console.warn(`[delegation] /rename: ${e.message}`)), new Promise((r) => setTimeout(r, RENAME_TIMEOUT_MS))]);
     tellParent(req, "created", `Session "${finalName}" was created and has started on its task. It will send you its result with report_result.`, finalName);
     // parent's current name; if it closed meanwhile, the last one known (the child still runs and its report is durable)
-    const parentName = (open.get(parentSessionId) ?? parent).relay?.name;
-    send("relay:message", { sessionId, from: parentName, human: false, text: task, prompt: childPrompt({ parentName, task }), wake: true });
+    const parentEntry = open.get(parentSessionId) ?? parent;
+    const parentName = parentEntry.relay?.name;
+    const folder = parentEntry.cwd;
+    send("relay:message", { sessionId, from: parentName, fromCwd: folder, human: false, text: task, prompt: childPrompt({ parentName, task, folder }), wake: true });
   } catch (e) {
     await discard();
     tellParent(req, "failed", `Session "${name}" was not created: ${friendly(e)}`);

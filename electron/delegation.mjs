@@ -51,9 +51,10 @@ export function resolveConfig(options, { agent, model, inheritedModel } = {}) {
   return { sets };
 }
 
-export function childPrompt({ parentName, task }) {
+export function childPrompt({ parentName, task, folder }) {
   return (
     `[from ${parentName}]\n` +
+    (folder ? `[folder ${JSON.stringify(folder)}]\n` : "") +
     `You were started by the session "${parentName}" to do the task below. ` +
     `${parentName} cannot see this session's chat, so when you are done, send the result with the report_result tool, exactly once.\n\n` +
     task

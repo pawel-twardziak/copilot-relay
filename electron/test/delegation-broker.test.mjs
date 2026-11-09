@@ -299,3 +299,26 @@ test("delegation tools exist only for desktop aliases", () => {
   assert.equal(delegationToolsAllowed("cli:abc"), false);
   assert.equal(delegationToolsAllowed(null), false);
 });
+
+test("a report from a child with a folder carries fromCwd and keeps it through the on-disk queue", () => {
+  const { d, file, registry, parentPush } = setup();
+  registry.upsert({ key: "cli:child", name: "badacz", kind: "cli", cwd: "/kid dir", push: () => true });
+  d.report("cli:child", "wynik");
+  assert.equal(parentPush[0].fromCwd, "/kid dir");
+  assert.match(parentPush[0].prompt, /^\[from badacz\]\n\[folder "\/kid dir"\]\nwynik/);
+  const push = [];
+  const registry2 = new Registry();
+  registry2.upsert({ key: "cli:parent", name: "mama", kind: "cli", push: (m) => (push.push(m), true) });
+  new Delegation({ registry: registry2, store: new DelegationStore(file), sweepDelayMs: 1000 }).attached("cli:parent");
+  assert.equal(push[0].fromCwd, "/kid dir");
+  assert.match(push[0].prompt, /^\[from badacz\]\n\[folder "\/kid dir"\]\nwynik/);
+});
+
+test("a report from a child without a folder has no fromCwd; relay notices never get one", () => {
+  const { d, parentPush } = setup();
+  d.report("cli:child", "wynik");
+  assert.equal("fromCwd" in parentPush[0], false);
+  assert.match(parentPush[0].prompt, /^\[from badacz\]\nwynik/);
+  d.outcome("cli:parent", { requestId: "r", kind: "created", name: "badacz", text: "ok" });
+  assert.equal("fromCwd" in parentPush[1], false);
+});

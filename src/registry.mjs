@@ -14,6 +14,9 @@ const RESERVED = new Set(["user", "relay"]);
 export const isReservedName = (name) => RESERVED.has(sanitizeName(name));
 const OFFLINE_GRACE_MS = Number(process.env.COPILOT_RELAY_OFFLINE_GRACE_MS ?? 30_000);
 
+/** First lines of a relay prompt: the sender, and the sender's folder when it has one (relative paths resolve against it). */
+export const relayPrefix = (name, cwd) => `[from ${name}]\n` + (cwd ? `[folder ${JSON.stringify(cwd)}]\n` : "");
+
 export function sanitizeName(s) {
   const n = String(s ?? "")
     .toLowerCase()
@@ -184,10 +187,11 @@ export class Registry extends EventEmitter {
     this.emit("message", { from: from.name, to: to.name, fromKey: from.key, toKey: to.key, text, budget: linked ? remaining - 1 : this.budget });
     this.#deliver(to, {
       from: from.name,
+      ...(from.cwd ? { fromCwd: from.cwd } : {}),
       human: false,
       text,
       prompt:
-        `[from ${from.name}]\n${text}\n\n` +
+        `${relayPrefix(from.name, from.cwd)}${text}\n\n` +
         `(Relay note: ${from.name} cannot see your chat output — only your user can. ` +
         `If this message asks you something or expects an answer, reply with the relay send_message tool ` +
         `(relay_send_message), to: "${from.name}"; a summary in your chat does not reach them.)`,
@@ -238,7 +242,7 @@ export class Registry extends EventEmitter {
         /* fall through to inbox */
       }
     }
-    peer.inbox.push({ from: msg.from, human: msg.human === true, text: msg.text, prompt: msg.prompt, ts: Date.now() });
+    peer.inbox.push({ from: msg.from, fromCwd: msg.fromCwd, human: msg.human === true, text: msg.text, prompt: msg.prompt, ts: Date.now() });
     this.emit("peer_updated", this.describe(peer));
     for (const w of peer.waiters.splice(0)) w();
   }

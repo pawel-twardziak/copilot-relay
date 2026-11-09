@@ -116,6 +116,11 @@ test("the child prompt names the parent, the task and report_result", () => {
   assert.match(t, /cannot see/);
 });
 
+test("the child prompt carries the parent folder line when there is one", () => {
+  assert.match(childPrompt({ parentName: "glowna", task: "t", folder: "/p" }), /^\[from glowna\]\n\[folder "\/p"\]\n/);
+  assert.doesNotMatch(childPrompt({ parentName: "glowna", task: "t" }), /\[folder/);
+});
+
 test("unreportedChildren returns children without a report from any iterable", () => {
   const entries = new Map([
     ["a", { parentSessionId: "p", reported: false }],
