@@ -160,7 +160,7 @@ test("only existing files are returned", async () => {
   await withDir(async (dir) => {
     await writeFile(path.join(dir, "a.txt"), "x");
     await mkdir(path.join(dir, "dir"));
-    const got = await checkCandidates(["a.txt", "dir", "missing.txt"], { base: dir, home: dir, allow: () => true, platform: "linux" });
+    const got = await checkCandidates(["a.txt", "dir", "missing.txt"], { base: dir, home: dir, allow: () => true, platform: process.platform });
     assert.deepEqual(got, ["a.txt"]);
   });
 });
@@ -168,7 +168,7 @@ test("relative candidates need a base", async () => {
   await withDir(async (dir) => {
     await writeFile(path.join(dir, "a.txt"), "x");
     const abs = path.join(dir, "a.txt");
-    const got = await checkCandidates(["a.txt", abs], { base: null, home: dir, allow: () => true, platform: "linux" });
+    const got = await checkCandidates(["a.txt", abs], { base: null, home: dir, allow: () => true, platform: process.platform });
     assert.deepEqual(got, [abs]);
   });
 });
@@ -177,7 +177,7 @@ test("allow is consulted before the disk", async () => {
     await writeFile(path.join(dir, "a.txt"), "x");
     const asked = [];
     const allow = (p) => (asked.push(p), false);
-    const got = await checkCandidates([path.join(dir, "a.txt")], { base: null, home: dir, allow, platform: "linux" });
+    const got = await checkCandidates([path.join(dir, "a.txt")], { base: null, home: dir, allow, platform: process.platform });
     assert.deepEqual(got, []);
     assert.deepEqual(asked, [path.join(dir, "a.txt")]); // refused at the first question: nothing was lstat()ed
   });
@@ -188,7 +188,7 @@ test("allow guards every step of the walk", async () => {
     await writeFile(path.join(dir, "net", "f.txt"), "x");
     await symlink(dir, path.join(dir, "link"));
     const allow = (p) => !p.startsWith(path.join(dir, "net"));
-    const got = await checkCandidates([path.join(dir, "link", "net", "f.txt")], { base: null, home: dir, allow, platform: "linux" });
+    const got = await checkCandidates([path.join(dir, "link", "net", "f.txt")], { base: null, home: dir, allow, platform: process.platform });
     assert.deepEqual(got, []);
   });
 });
@@ -210,7 +210,7 @@ test("at most 16 lookups run at once", async () => {
       return true;
     };
     const names = Array.from({ length: 40 }, (_, i) => `f${i}.txt`);
-    const got = await checkCandidates(names, { base: dir, home: dir, allow, platform: "linux" });
+    const got = await checkCandidates(names, { base: dir, home: dir, allow, platform: process.platform });
     assert.equal(got.length, 40);
     assert.ok(peak > 1 && peak <= 16, `peak ${peak}`);
   });
@@ -361,10 +361,10 @@ test("without a location table only trusted roots (and the way to them) are chec
     await writeFile(path.join(dir, "root", "a.txt"), "x");
     await writeFile(path.join(dir, "sibling", "b.txt"), "x");
     const trustedRoots = [path.join(dir, "root")];
-    const allow = (p) => allowsAutomaticCheck(p, { table: null, trustedRoots, platform: "linux" });
+    const allow = (p) => allowsAutomaticCheck(p, { table: null, trustedRoots, platform: process.platform });
     const inside = path.join(dir, "root", "a.txt");
     const sibling = path.join(dir, "sibling", "b.txt");
-    const got = await checkCandidates([inside, sibling, "/etc/hostname"], { base: null, home: dir, allow, platform: "linux" });
+    const got = await checkCandidates([inside, sibling, "/etc/hostname"], { base: null, home: dir, allow, platform: process.platform });
     assert.deepEqual(got, [inside]);
   });
 });
