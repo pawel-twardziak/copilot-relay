@@ -5,7 +5,7 @@ import { isInside, lexicalPath } from "./paths.mjs";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { lstat, mkdtemp, open as openFile, readdir, readlink, rm, rmdir, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, open as openFile, readdir, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
