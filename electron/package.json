@@ -33,6 +33,7 @@
       "history.mjs",
       "usage.mjs",
       "paths.mjs",
+      "file-access.mjs",
       "delegation.mjs",
       "relay-client.mjs",
       "preload.cjs",

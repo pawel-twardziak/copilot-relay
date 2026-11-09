@@ -1,5 +1,6 @@
 // Electron main process: owns the `copilot --acp` processes and bridges them to the window over IPC.
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, shell } from "electron";
+import { expandHome, isRemote, localRealpath, resolveTarget } from "./file-access.mjs";
 import { isInside, lexicalPath } from "./paths.mjs";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -348,7 +349,6 @@ const fmtBytes = (b) => (b < 1024 * 1024 ? `${Math.round(b / 1024)} KB` : `${(b 
 const EXT_FOR_MIME = Object.fromEntries(Object.entries(IMAGE_TYPES).filter(([ext]) => ext !== "jpeg").map(([ext, mime]) => [mime, ext]));
 
 /** "~/x" and "~\\x" mean the home folder, as in a shell. */
-const expandHome = (p) => (p === "~" ? os.homedir() : /^~[\\/]/.test(p) ? path.join(os.homedir(), p.slice(2)) : p);
 // Model APIs reject images over about 5 MB *after* base64 encoding (4/3 of the file size), and an oversized
 // image fails the whole turn. Files are checked against the encoded size, and the prompt has a total budget.
 const MAX_IMAGE_BYTES = Math.floor((5 * 1024 * 1024 * 3) / 4) - 64 * 1024; // ≈3.7 MB file → <5 MB base64
@@ -918,74 +918,6 @@ const PACKAGE_DIRS = new Set(
 
 function openWeb(url) {
   if (WEB_LINK.test(url)) shell.openExternal(url);
-}
-
-/** UNC paths and file://host URLs would make Windows contact a remote SMB server (and send the user's NTLM hash). */
-function isRemote(p) {
-  return /^(\\\\|\/\/)/.test(p);
-}
-
-/** Resolve a link target from agent output to an existing local path: file:// URL, absolute or relative to the session folder. */
-async function resolveTarget(cwd, target) {
-  const raw = String(target ?? "").trim();
-  let candidates;
-  if (/^file:/i.test(raw)) {
-    const url = new URL(raw);
-    if (url.host && url.host !== "localhost") throw new Error(`Remote file links are not opened: ${raw}`);
-    url.hash = "";
-    candidates = [fileURLToPath(url)]; // decodes %xx once
-  } else {
-    // Markdown links come percent-encoded (marked encodes spaces and non-ASCII); plain paths may contain a
-    // literal '%' or '#'. Try the text as is and decoded, each with and without an editor-style line suffix.
-    const noLine = (x) => x.replace(/#L\d+(-L?\d+)?$/, "").replace(/(:\d+){1,2}$/, "");
-    let decoded = raw;
-    try {
-      decoded = decodeURIComponent(raw);
-    } catch {}
-    // "README.md#usage": strip a "#anchor" after "name.ext", except a bare number ("v1.2#3"); tried after the literal
-    // name, so "C#note.md" still opens
-    const noFragment = (x) => x.replace(/(\.[A-Za-z0-9]+)#(?!\d+$)[^\s\\/#]+$/u, "$1");
-    candidates = [...new Set([raw, noLine(raw), decoded, noLine(decoded), noFragment(decoded), noFragment(noLine(decoded))])];
-  }
-  const abs = candidates.map((c) => path.resolve(cwd || os.homedir(), expandHome(c)));
-  if (candidates.some(isRemote) || abs.some(isRemote)) throw new Error(`Network paths are not opened: ${raw}`);
-  for (const c of abs) {
-    const real = await localRealpath(c);
-    if (real) return real;
-  }
-  throw new Error(`File not found: ${abs[0]}`); // the path as clicked
-}
-
-/**
- * realpath that never touches the network: every symlink (or Windows junction) on the way is read with readlink
- * and refused if it points to a UNC / network path, before anything follows it. (fs.realpath or existsSync would
- * already open the SMB connection, which leaks the user's NTLM hash on Windows.) Returns null if the path doesn't exist.
- */
-async function localRealpath(p, depth = 0) {
-  if (depth > 32) throw new Error(`Too many symbolic links: ${p}`);
-  const { root } = path.parse(p);
-  let cur = root;
-  for (const part of p.slice(root.length).split(/[\\/]+/).filter(Boolean)) {
-    const next = path.join(cur, part);
-    let st;
-    try {
-      st = await lstat(next); // async: a slow mount must not freeze the main process
-    } catch {
-      return null;
-    }
-    if (!st.isSymbolicLink()) {
-      cur = next;
-      continue;
-    }
-    let target = await readlink(next);
-    if (/^\\\\\?\\UNC\\/i.test(target)) throw new Error(`Network paths are not opened: ${next} → ${target}`);
-    target = target.replace(/^\\\\\?\\/, ""); // \\?\C:\x (Windows long-path form) is local
-    const resolved = path.resolve(cur, target);
-    if (isRemote(target) || isRemote(resolved)) throw new Error(`Network paths are not opened: ${next} → ${target}`);
-    cur = await localRealpath(resolved, depth + 1);
-    if (!cur) return null;
-  }
-  return cur;
 }
 
 /** One entry point for every link click: web links go to the browser, safe files open, anything else is revealed. */
