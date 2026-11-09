@@ -45,13 +45,6 @@ function createFilePreview({ api, h, md, onStatus, onChange = () => {} }) {
     save();
     onChange(id);
   };
-  const decode = (s) => {
-    try {
-      return decodeURIComponent(s);
-    } catch {
-      return s;
-    }
-  };
   const dirOf = (p) => p.slice(0, Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\")) + 1) || p;
   const sizeText = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
   /** An error goes into the preview while it is open (the status line is hidden under it), else to the status line. */
@@ -141,7 +134,7 @@ function createFilePreview({ api, h, md, onStatus, onChange = () => {} }) {
     // stricter than the chat: raw HTML in a file must not fetch images or restyle the window
     box.innerHTML = md(text, {
       FORBID_TAGS: ["img", "picture", "source", "video", "audio", "style", "svg", "math", "link", "object", "embed", "iframe", "image"],
-      FORBID_ATTR: ["style", "srcset", "background", "poster"],
+      FORBID_ATTR: ["style", "srcset", "background", "poster", "src"],
     });
     for (const ref of box.querySelectorAll(".img-ref")) ref.replaceWith(h("span", { class: "img-alt" }, ref.dataset.alt ?? ""));
     box.addEventListener("click", (e) => {
@@ -150,13 +143,14 @@ function createFilePreview({ api, h, md, onStatus, onChange = () => {} }) {
       e.preventDefault();
       const href = a.getAttribute("href");
       if (!href || href.startsWith("#")) return;
-      if (/^[a-z][a-z0-9+.-]*:/i.test(href) && !/^file:/i.test(href)) {
+      // like main's open:link: "notes2.md:42" (file:line) and "C:\x.md" (drive) are paths, not schemes
+      if (/^[a-z][a-z0-9+.-]*:(?!\d)/i.test(href) && !/^file:/i.test(href) && !/^[a-z]:[\\/]/i.test(href)) {
         api.openLink(view.cwd, href).catch((err) => fail(err.message));
         return;
       }
       const base = dirOf(cur.path);
-      const target = decode(href);
-      openTarget(view, target, base).then((handled) => handled || api.openLink(base, target)).catch((err) => fail(err.message));
+      // main decodes percent escapes itself (resolveTarget), so the link text goes through as written
+      openTarget(view, href, base).then((handled) => handled || api.openLink(base, href)).catch((err) => fail(err.message));
     });
     return box;
   }

@@ -9,7 +9,13 @@ import { fileURLToPath } from "node:url";
 import { isInside, lexicalPath } from "./paths.mjs";
 
 const LINUX_NETWORK_TYPES = new Set("nfs nfs4 cifs smb3 smbfs ncpfs 9p ceph glusterfs lustre afs autofs".split(" "));
-const LINUX_FUSE_NETWORK = new Set("sshfs rclone s3fs smbnetfs davfs".split(" "));
+// Every fuse.<name> may reach a network (sshfs, rclone, gvfsd-fuse, glusterfs...) except these local ones; bare "fuse" and "fuseblk" are local
+const LINUX_FUSE_LOCAL = new Set("portal gocryptfs encfs ntfs-3g ntfs exfat lxcfs snapfuse bindfs mergerfs overlayfs fuse-overlayfs".split(" "));
+const isNetworkFuse = (type) => {
+  if (!type.startsWith("fuse.")) return false;
+  const name = type.slice(5).toLowerCase();
+  return name !== "" && !LINUX_FUSE_LOCAL.has(name) && !name.includes("appimage");
+};
 const MAC_NETWORK_TYPES = new Set("nfs smbfs afpfs webdav autofs".split(" "));
 
 /** Mount points of network file systems in /proc/self/mountinfo. */
@@ -19,7 +25,7 @@ export function parseLinuxMounts(text) {
     const [head, tail] = line.split(" - ");
     if (!head || !tail) continue;
     const type = tail.split(" ")[0];
-    const network = LINUX_NETWORK_TYPES.has(type) || (type.startsWith("fuse.") && LINUX_FUSE_NETWORK.has(type.slice(5)));
+    const network = LINUX_NETWORK_TYPES.has(type) || isNetworkFuse(type);
     const point = head.split(" ")[4];
     // mountinfo writes spaces and the like as octal escapes (\040)
     if (network && point) mounts.push(point.replace(/\\([0-7]{3})/g, (_, o) => String.fromCharCode(parseInt(o, 8))));
@@ -78,7 +84,7 @@ const WIN_DRIVES_COMMAND = "Get-CimInstance Win32_LogicalDisk | Select-Object De
  * get() resolves null when the source cannot be read, the platform is unknown or it takes longer than timeoutMs
  * (a `mount` stuck on a dead server may never return, whatever the process is told).
  */
-export function createLocationTable({ platform, readFile, exec, ttlMs = 30000, now = Date.now, timeoutMs = 5000 }) {
+export function createLocationTable({ platform, readFile, exec, powershell = "powershell.exe", ttlMs = 30000, now = Date.now, timeoutMs = 5000 }) {
   let cached = null;
   let at = 0;
   const load = () => {
@@ -91,7 +97,7 @@ export function createLocationTable({ platform, readFile, exec, ttlMs = 30000, n
       if (platform === "linux") return { mounts: parseLinuxMounts(await readFile("/proc/self/mountinfo")) };
       if (platform === "darwin") return { mounts: parseMacMounts(await exec("mount", [])) };
       if (platform === "win32") {
-        return { fixedDrives: parseWinDrives(await exec("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", WIN_DRIVES_COMMAND])) };
+        return { fixedDrives: parseWinDrives(await exec(powershell, ["-NoProfile", "-NonInteractive", "-Command", WIN_DRIVES_COMMAND])) };
       }
     } catch {}
     return null;

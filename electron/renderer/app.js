@@ -934,11 +934,12 @@ class SessionView {
       this.flush();
       const body = h("div", { class: type === "agent" ? "md" : "body" });
       const run = { type, body, text: "", messageId };
+      const shown = () => FileLinks.parseRelayHeader(run.text).display; // a replayed relay message hides its [folder "..."] line
       let el;
       if (type === "thought") el = h("details", { class: "thought" }, h("summary", {}, "Thinking"), body);
       else {
-        el = h("div", { class: `msg ${type}` }, body, copyBtn(() => run.text));
-        el._md = () => (!run.text.trim() ? null : type === "user" ? `**You:**\n\n${run.text}` : run.text);
+        el = h("div", { class: `msg ${type}` }, body, copyBtn(() => shown()));
+        el._md = () => (!shown().trim() ? null : type === "user" ? `**You:**\n\n${shown()}` : shown());
         if (type === "user") el._matchText = () => run.text; // replayed text arrives after append
       }
       run.el = el;

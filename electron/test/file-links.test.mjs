@@ -121,3 +121,11 @@ test("language by name", () => {
   assert.equal(previewLanguage("Makefile"), "makefile");
   assert.equal(previewLanguage("a.unknownext"), null);
 });
+
+test("a long run of punctuation is trimmed in linear time", () => {
+  for (const [text, want] of [[`${".".repeat(200000)}x`, 1], [".".repeat(200000), 0]]) {
+    const t = Date.now();
+    assert.equal(pathCandidates(text).length, want);
+    assert.ok(Date.now() - t < 500, `took ${Date.now() - t} ms`);
+  }
+});

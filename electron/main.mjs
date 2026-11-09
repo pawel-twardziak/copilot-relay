@@ -954,8 +954,11 @@ handle("open:link", async (cwd, target) => {
 
 // Network locations (mounts, mapped drives), read at most every 30 s. `mount` can hang on a dead NFS server: it is
 // killed after 5 s and a failure gives a null table (then only the trusted roots are checked automatically).
+// powershell by absolute path: a search can include the working directory on Windows
+const powershell = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 const locations = createLocationTable({
   platform: process.platform,
+  powershell,
   timeoutMs: 5000, // also when the killed process never reports back (uninterruptible I/O)
   readFile: (p) => readFile(p, "utf8"),
   exec: (file, args) =>
@@ -971,12 +974,11 @@ const isNetwork = async (real) => {
 handle("files:check", async (base, candidates) => {
   const home = os.homedir();
   const table = await locations.get();
-  // real paths too, so a symlinked home is not refused at its first hop. A folder is resolved only when it is known
-  // to be local (a table says so; without one only home is trusted enough), as resolving touches the disk.
+  // real paths too, so a symlinked home is not refused at its first hop. Only needed without a table, where just home
+  // is trusted enough to resolve (resolving touches the disk); the session folders stay as text.
   const trustedRoots = new Set([home, ...knownFolders]);
-  for (const r of [home, ...knownFolders]) {
-    if (table ? isNetworkLocation(r, table) : r !== home) continue;
-    const real = await localRealpath(r, { allow: (p) => (table ? !isNetworkLocation(p, table) : true) }).catch(() => null);
+  if (!table) {
+    const real = await localRealpath(home).catch(() => null);
     if (real) trustedRoots.add(real);
   }
   const allow = (p) => allowsAutomaticCheck(p, { table, trustedRoots: [...trustedRoots], platform: process.platform });
@@ -984,9 +986,9 @@ handle("files:check", async (base, candidates) => {
   return checkCandidates(list, { base: base ? String(base) : null, home, allow, platform: process.platform });
 });
 
-// A click on a file link: the text for the preview pane, { outside } until confirmed for files outside the viewing folder
 // Real paths files:read has returned in this run: the only ones files:watch accepts.
 const readablePaths = new Set();
+// A click on a file link: the text for the preview pane, { outside } until confirmed for files outside the viewing folder
 handle("files:read", async (baseCwd, target, { viewingCwd, confirmed = false } = {}) => {
   const r = await resolvePreview({ baseCwd, target, viewingCwd, confirmed: confirmed === true }, { isNetwork });
   if (r.path && !r.outside) readablePaths.add(r.path);

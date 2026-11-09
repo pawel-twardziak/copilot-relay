@@ -456,3 +456,10 @@ test("a watch that throws counts as one change instead of throwing", async () =>
   await sleep(40);
   assert.deepEqual(seen, ["/d/a.txt"]);
 });
+
+test("linux table treats FUSE network file systems as network and local ones as local", () => {
+  const row = (type, i) => `${i} 25 0:${i} / /m/${type} rw - ${type} src rw\n`;
+  const types = ["fuse.gvfsd-fuse", "fuse.glusterfs", "fuse.something", "fuse.portal", "fuse.gocryptfs", "fuseblk", "fuse", "fuse.Foo.AppImage", "fuse.appimage"];
+  const t = types.map((x, i) => row(x, i + 1)).join("");
+  assert.deepEqual(parseLinuxMounts(t), ["/m/fuse.gvfsd-fuse", "/m/fuse.glusterfs", "/m/fuse.something"]);
+});

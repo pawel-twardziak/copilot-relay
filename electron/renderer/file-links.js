@@ -11,7 +11,13 @@ const WELL_KNOWN_NAMES = new Set([
 const SUFFIX_RE = /^(.+?)(?::(\d+)(?::\d+)?(?=:|$)|#L(\d+)(?:-L?\d+)?$)/;
 const NAME_WITH_EXT = /^[^\s/\\:]+\.([A-Za-z0-9]{1,10})$/;
 const LEADING = /^[([{<"'`]+/;
-const TRAILING = /[.,;:!?)\]}>"'`]+$/;
+const TRAILING_CHARS = new Set(".,;:!?)]}>\"'`");
+/** Drops trailing punctuation (a backward scan: a regex with $ is quadratic on a long run). */
+const trimTrailing = (s) => {
+  let end = s.length;
+  while (end > 0 && TRAILING_CHARS.has(s[end - 1])) end--;
+  return s.slice(0, end);
+};
 
 /** Splits a trailing line suffix off a path. raw is the path plus its suffix. */
 function splitSuffix(token) {
@@ -54,7 +60,7 @@ function pathCandidates(text, { whole = false, max = 500 } = {}) {
   const seen = new Set();
   for (const m of s.matchAll(/\S+/g)) {
     const lead = LEADING.exec(m[0])?.[0].length ?? 0;
-    const token = m[0].slice(lead).replace(TRAILING, "");
+    const token = trimTrailing(m[0].slice(lead));
     const c = splitSuffix(token);
     if (!looksLikePath(c.path)) continue;
     if (!seen.has(c.path)) {
