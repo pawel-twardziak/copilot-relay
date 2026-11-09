@@ -73,6 +73,9 @@ function userIndex(events, ordinal, text) {
   return found[0];
 }
 
+/** A relay message without its second-line `[folder "…"]` (kept in the history, not in an input box). */
+const withoutFolderLine = (s) => s.replace(/^(\[from [^\]\n]*\]\n)\[folder "(?:[^"\\\n]|\\.)*"\]\n/, "$1");
+
 /** Index in `events` where history is cut, or throw if the bubble can't be matched. */
 export function cutIndex(events, { ordinal, text, where }) {
   if (!["beforeUser", "beforeReply", "afterReply"].includes(where)) throw new Error(`Unknown cut position: ${where}`);
@@ -174,7 +177,7 @@ export function forkSession(id, target, now = new Date()) {
       { mode: 0o600 },
     );
     const cwd = yamlGet(ws, "cwd") || events[0].data?.context?.cwd || null;
-    const prefill = target.where === "beforeUser" ? String(events[idx].data?.content ?? "") : "";
+    const prefill = target.where === "beforeUser" ? withoutFolderLine(String(events[idx].data?.content ?? "")) : "";
     return { sessionId, cwd, name, prefill };
   } catch (err) {
     fs.rmSync(dst, { recursive: true, force: true });

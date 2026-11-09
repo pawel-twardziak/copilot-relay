@@ -15,6 +15,7 @@
     "dist:linux": "npm run dist -- --linux"
   },
   "dependencies": {
+    "@highlightjs/cdn-assets": "^11.12.0",
     "dompurify": "^3.4.17",
     "marked": "^18.1.2"
   },
@@ -33,6 +34,7 @@
       "history.mjs",
       "usage.mjs",
       "paths.mjs",
+      "file-access.mjs",
       "delegation.mjs",
       "relay-client.mjs",
       "preload.cjs",

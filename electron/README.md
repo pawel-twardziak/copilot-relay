@@ -82,6 +82,22 @@ identity it has in a terminal (`cli:<sessionId>`), so it keeps its relay name. I
   `relay: offline` and the app keeps retrying.
 - Turn it off in **⚙ Settings → Connect sessions to copilot-relay**. The change applies to sessions opened afterwards.
 
+## File links and preview
+
+File paths in the chat (`src/app.mjs`, `src/app.mjs:42`, `~/notes.md`, Markdown `file://` links) become links when the file exists.
+A click opens a full-screen preview instead of the system app.
+
+- Text up to 2 MB is shown highlighted, up to 20 MB as plain text, larger files only offer **Open in system app**.
+  Markdown can be switched between rendered and source. A `:42` suffix marks that line and scrolls to it.
+- The files opened in a session stay in a list on the left of the preview (20 per session, kept between runs).
+  The **Files (n)** button in the session header reopens it.
+- The preview refreshes when the file changes on disk, including an atomic save, and keeps the scroll position. A deleted
+  file is marked unavailable and stays in the list until you close it.
+- A file outside the session's folder is not opened in the preview without your confirmation. A binary file inside the
+  folder skips the preview and goes straight to the usual open behaviour. A plain-text `file://` URL is not linked. Paths on a network
+  location (NFS, SMB, mapped drives) are never checked or read automatically and are not linked; file text from the agent
+  never makes the app touch one.
+
 ## Delegated sessions
 
 A session can ask for a new session dedicated to one task, a *delegated* (child) session. Unlike a subagent, a child is

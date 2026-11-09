@@ -131,7 +131,16 @@ marked.use({ renderer: { image: ({ href, text }) => `<span class="img-ref" data-
 DOMPurify.addHook("uponSanitizeAttribute", (node, data) => {
   if (node.nodeName === "A" && data.attrName === "href" && /^file:/i.test(data.attrValue)) data.forceKeepAttr = true;
 });
-const md = (text) => DOMPurify.sanitize(marked.parse(text ?? ""), { ADD_ATTR: ["target"] });
+const md = (text, options) => DOMPurify.sanitize(marked.parse(text ?? ""), { ADD_ATTR: ["target"], ...options });
+
+// The full-screen file preview; one for the whole window, it closes when the active session changes.
+const filePreview = createFilePreview({
+  api,
+  h,
+  md,
+  onStatus: (text) => setStatus(text, true),
+  onChange: (id) => views.get(id)?.updateFilesBtn(),
+});
 
 // image types and size limit come from the main process, which attaches the images (one source of truth)
 let imageConfigPromise;
@@ -271,6 +280,7 @@ class SessionView {
     this.cmdMatches = [];
     this.cmdIndex = 0;
     this.cmdToken = null;
+    this.filesBtn = h("button", { title: "Files opened from this conversation", hidden: true, onclick: () => filePreview.show(this) });
     this.cmdPopup = h("div", { class: "cmd-popup", role: "listbox", hidden: true, onmousedown: (e) => e.preventDefault() });
 
     this.el = h(
@@ -284,6 +294,7 @@ class SessionView {
         this.usageChip,
         this.selects,
         this.stopChildrenBtn,
+        this.filesBtn,
         h("button", { title: "Copy the whole conversation as Markdown", onclick: (e) => this.copyThread(e.currentTarget) }, "Copy thread"),
         h("button", { class: "danger", title: "Close this session in the app (it stays resumable)", onclick: () => closeView(this.sessionId) }, "Close"),
         h("button", { class: "danger", title: "Delete this whole session from disk", onclick: () => deleteSessionFlow({ sessionId: this.sessionId, cwd: this.cwd, title: this.title }) }, "Delete"),
@@ -339,12 +350,19 @@ class SessionView {
       const p = e.target.closest("[data-path]");
       if (!a && !p) return;
       e.preventDefault();
-      this.openLink(a ? a.getAttribute("href") : p.dataset.path);
+      this.openLink(a ? a.getAttribute("href") : p.dataset.path, a?._base ?? this.cwd);
     };
     this.log.addEventListener("click", onLink);
     this.log.addEventListener("auxclick", onLink);
     this.setTitle(title);
+    this.updateFilesBtn();
     $("#main").append(this.el);
+  }
+
+  updateFilesBtn() {
+    const n = filePreview.count(this.sessionId);
+    this.filesBtn.hidden = n === 0;
+    this.filesBtn.textContent = `Files (${n})`;
   }
 
   /** Web links open in the browser; anything else is treated as a file path (relative to the session folder). */
@@ -400,13 +418,60 @@ class SessionView {
     }
   }
 
-  async openLink(href) {
+  async openLink(href, base = this.cwd) {
     if (!href || href.startsWith("#")) return;
     try {
-      const r = await api.openLink(this.cwd, href);
+      if (await filePreview.open(this, href, base)) return;
+      const r = await api.openLink(base, href);
       if (r === "revealed") this.statusEl.textContent = `Shown in the file manager instead of opened: ${href} is not a document type the app opens directly.`;
     } catch (e) {
       this.statusEl.textContent = e.message;
+    }
+  }
+
+  /** Turn paths in `root` that name an existing file (relative ones against `base`, null = absolute only) into links.
+   *  One check per call; a node that changed while it ran is left alone. The base lives on the property a._base,
+   *  never a DOM attribute: sanitised agent HTML may carry data-*. */
+  async linkPaths(root, base) {
+    const unique = new Set();
+    const found = [];
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => (n.parentElement?.closest("a, button") ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+    });
+    const nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    for (const node of nodes) {
+      const text = node.nodeValue;
+      const code = node.parentElement?.closest("code");
+      const cands = FileLinks.pathCandidates(text, { whole: !!code && !code.closest("pre"), max: 500 }).filter((c) => {
+        if (unique.has(c.path)) return true;
+        if (unique.size >= 500) return false;
+        unique.add(c.path);
+        return true;
+      });
+      if (cands.length) found.push({ node, text, cands });
+    }
+    if (!found.length) return;
+    let existing;
+    try {
+      existing = new Set(await api.checkFiles(base, [...unique]));
+    } catch {
+      return; // a missing link is harmless
+    }
+    for (const { node, text, cands } of found) {
+      if (!node.isConnected || node.nodeValue !== text) continue;
+      const hits = cands.filter((c) => existing.has(c.path));
+      if (!hits.length) continue;
+      const frag = document.createDocumentFragment();
+      let last = 0;
+      for (const c of hits) {
+        const a = h("a", { href: c.raw }, c.raw);
+        if (base !== this.cwd) a._base = base;
+        frag.append(text.slice(last, c.start), a);
+        last = c.end;
+      }
+      frag.append(text.slice(last));
+      node.replaceWith(frag);
     }
   }
 
@@ -857,6 +922,7 @@ class SessionView {
     const human = m.human ?? m.from === "user";
     const el = bubble("relay", m.text, m.from);
     this.mentionThumbs(el, m.text);
+    this.linkPaths(el.querySelector(".body"), m.fromCwd ?? null);
     el._human = human; // typed by you in the relay GUI: yours for Left Shift+Up/Down
     this.runPrompt(m.prompt, el, human ? "human" : "relay", delivery);
   }
@@ -868,11 +934,12 @@ class SessionView {
       this.flush();
       const body = h("div", { class: type === "agent" ? "md" : "body" });
       const run = { type, body, text: "", messageId };
+      const shown = () => FileLinks.parseRelayHeader(run.text).display; // a replayed relay message hides its [folder "..."] line
       let el;
       if (type === "thought") el = h("details", { class: "thought" }, h("summary", {}, "Thinking"), body);
       else {
-        el = h("div", { class: `msg ${type}` }, body, copyBtn(() => run.text));
-        el._md = () => (!run.text.trim() ? null : type === "user" ? `**You:**\n\n${run.text}` : run.text);
+        el = h("div", { class: `msg ${type}` }, body, copyBtn(() => shown()));
+        el._md = () => (!shown().trim() ? null : type === "user" ? `**You:**\n\n${shown()}` : shown());
         if (type === "user") el._matchText = () => run.text; // replayed text arrives after append
       }
       run.el = el;
@@ -904,6 +971,11 @@ class SessionView {
     else if (r?.type === "user") linkify(r.body);
     if (r?.type === "agent") this.imageRefs(r.body);
     else if (r?.type === "user") this.mentionThumbs(r.el, r.text);
+    if (r?.type === "agent") this.linkPaths(r.body, this.cwd);
+    else if (r?.type === "user") {
+      const head = FileLinks.parseRelayHeader(r.text);
+      this.linkPaths(r.body, head.from ? head.folder : this.cwd);
+    }
     this.run = null;
   }
 
@@ -974,6 +1046,7 @@ class SessionView {
     t.body.replaceChildren(...this.toolBody(d));
     decoratePres(t.body);
     linkify(t.body);
+    if (status === "completed" || status === "failed") this.linkPaths(t.body, this.cwd);
   }
 
   toolBody(d) {
@@ -1225,6 +1298,7 @@ class SessionView {
     }
     const el = bubble("user", text);
     this.mentionThumbs(el, text);
+    this.linkPaths(el.querySelector(".body"), this.cwd);
     this.runPrompt(text, el, "app");
   }
 
@@ -1314,7 +1388,7 @@ function renderRun(r, final = false) {
     decoratePres(r.body);
     if (final) linkify(r.body, { codeOnly: true }); // marked already links plain URLs in Markdown text
   } else {
-    r.body.textContent = r.text;
+    r.body.textContent = r.type === "user" ? FileLinks.parseRelayHeader(r.text).display : r.text;
     if (final && r.type === "user") linkify(r.body); // a prompt replayed from the history (live ones are bubbles)
   }
   if (r.type === "user") r.el.hidden = !r.text.trim(); // replayed prompts can be empty (e.g. attachments only)
@@ -1324,6 +1398,7 @@ function renderRun(r, final = false) {
 // opening / closing
 
 function activate(id) {
+  filePreview.close();
   activeId = id;
   for (const [sid, v] of views) v.el.classList.toggle("active", sid === id);
   $("#empty").style.display = id ? "none" : "";
@@ -1548,6 +1623,7 @@ async function deleteSessionFlow(s) {
     if (ui.pinned.delete(s.sessionId)) saveUi();
     const dropped = v && views.get(s.sessionId) === v ? v.inbox.length : 0; // relay messages it never got
     dropView(s.sessionId); // only now: on a failure the session stays visible
+    filePreview.forget(s.sessionId);
     sessions = sessions.filter((x) => x.sessionId !== s.sessionId);
     const problems = [
       dropped && `${dropped} relay message(s) waiting for it were discarded`,
@@ -1984,7 +2060,7 @@ document.addEventListener(
   (e) => {
     if (!e.ctrlKey) return;
     e.preventDefault();
-    if (leftCtrl.down && !viewer.isOpen && e.deltaY) changeChatScale(e.deltaY < 0 ? 1 : -1);
+    if (leftCtrl.down && !viewer.isOpen && !filePreview.isOpen && e.deltaY) changeChatScale(e.deltaY < 0 ? 1 : -1);
   },
   { passive: false, capture: true },
 );
@@ -1996,7 +2072,7 @@ document.addEventListener(
     const dir = ZOOM_KEYS[e.code] ?? ZOOM_KEYS[e.key];
     if (dir === undefined) return;
     e.preventDefault();
-    if (leftCtrl.down && !viewer.isOpen) changeChatScale(dir);
+    if (leftCtrl.down && !viewer.isOpen && !filePreview.isOpen) changeChatScale(dir);
   },
   true,
 );

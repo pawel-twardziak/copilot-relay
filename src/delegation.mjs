@@ -1,6 +1,7 @@
 // Delegated sessions: a parent session asks for a child, the child reports back. Links and undelivered
 // reports/notices are durable (DelegationStore); delivery is at-least-once until the parent's app acknowledges.
 import { randomUUID } from "node:crypto";
+import { relayPrefix } from "./registry.mjs";
 
 export class Delegation {
   constructor({ registry, store, sweepDelayMs = 30_000, newId = randomUUID }) {
@@ -39,9 +40,10 @@ export class Delegation {
       id: this.newId(),
       parentKey,
       from: child.name,
+      ...(child.cwd ? { fromCwd: child.cwd } : {}),
       text,
       prompt:
-        `[from ${child.name}]\n${text}\n\n` +
+        `${relayPrefix(child.name, child.cwd)}${text}\n\n` +
         `(Relay note: ${child.name} cannot see your chat output — only your user can. ` +
         `If this message asks you something or expects an answer, reply with the relay send_message tool ` +
         `(relay_send_message), to: "${child.name}"; a summary in your chat does not reach them.)`,
@@ -112,6 +114,7 @@ export class Delegation {
     // pushTo, not Registry.send: reports and notices are charged to no budget
     return this.registry.pushTo(item.parentKey, {
       from: item.from,
+      ...(item.fromCwd ? { fromCwd: item.fromCwd } : {}),
       human: false,
       text: item.text,
       prompt: item.prompt,

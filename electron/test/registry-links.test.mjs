@@ -89,3 +89,33 @@ test("links, control and describe", () => {
   assert.equal(r.get("c").control, null);
   r.remove("c");
 });
+
+test("a sender with a folder: the push carries fromCwd and the prompt a folder line", () => {
+  const r = new Registry();
+  const got = [];
+  r.upsert({ key: "x", name: "x", kind: "cli", cwd: "/a b", push: ok });
+  r.upsert({ key: "y", name: "y", kind: "cli", push: (m) => (got.push(m), true) });
+  r.send("x", "y", "hello");
+  assert.equal(got[0].fromCwd, "/a b");
+  assert.match(got[0].prompt, /^\[from x\]\n\[folder "\/a b"\]\nhello/);
+});
+
+test("a sender without a folder: no fromCwd and no folder line", () => {
+  const r = new Registry();
+  const got = [];
+  r.upsert({ key: "x", name: "x", kind: "cli", push: ok });
+  r.upsert({ key: "y", name: "y", kind: "cli", push: (m) => (got.push(m), true) });
+  r.send("x", "y", "hello");
+  assert.equal("fromCwd" in got[0], false);
+  assert.match(got[0].prompt, /^\[from x\]\nhello/);
+});
+
+test("a message queued while the recipient is offline keeps fromCwd in the inbox", () => {
+  const r = new Registry();
+  r.upsert({ key: "x", name: "x", kind: "cli", cwd: "/a b", push: ok });
+  r.upsert({ key: "y", name: "y", kind: "mcp" });
+  r.send("x", "y", "hello");
+  const item = r.get("y").inbox[0];
+  assert.equal(item.fromCwd, "/a b");
+  assert.match(item.prompt, /^\[from x\]\n\[folder "\/a b"\]\nhello/);
+});
