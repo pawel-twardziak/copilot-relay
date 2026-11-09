@@ -954,9 +954,10 @@ handle("open:link", async (cwd, target) => {
 // killed after 5 s and a failure gives a null table (then only the trusted roots are checked automatically).
 const locations = createLocationTable({
   platform: process.platform,
+  timeoutMs: 5000, // also when the killed process never reports back (uninterruptible I/O)
   readFile: (p) => readFile(p, "utf8"),
   exec: (file, args) =>
-    new Promise((resolve, reject) => execFile(file, args, { timeout: 5000, windowsHide: true }, (err, stdout) => (err ? reject(err) : resolve(String(stdout))))),
+    new Promise((resolve, reject) => execFile(file, args, { timeout: 5000, killSignal: "SIGKILL", windowsHide: true }, (err, stdout) => (err ? reject(err) : resolve(String(stdout))))),
 });
 const isNetwork = async (real) => {
   const table = await locations.get();
@@ -968,8 +969,15 @@ const isNetwork = async (real) => {
 handle("files:check", async (base, candidates) => {
   const home = os.homedir();
   const table = await locations.get();
-  const trustedRoots = [home, ...knownFolders];
-  const allow = (p) => allowsAutomaticCheck(p, { table, trustedRoots, platform: process.platform });
+  // real paths too, so a symlinked home is not refused at its first hop. A folder is resolved only when it is known
+  // to be local (a table says so; without one only home is trusted enough), as resolving touches the disk.
+  const trustedRoots = new Set([home, ...knownFolders]);
+  for (const r of [home, ...knownFolders]) {
+    if (table ? isNetworkLocation(r, table) : r !== home) continue;
+    const real = await localRealpath(r, { allow: (p) => (table ? !isNetworkLocation(p, table) : true) }).catch(() => null);
+    if (real) trustedRoots.add(real);
+  }
+  const allow = (p) => allowsAutomaticCheck(p, { table, trustedRoots: [...trustedRoots], platform: process.platform });
   const list = (Array.isArray(candidates) ? candidates : []).map(String);
   return checkCandidates(list, { base: base ? String(base) : null, home, allow, platform: process.platform });
 });

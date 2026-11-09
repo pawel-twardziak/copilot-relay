@@ -352,3 +352,22 @@ test("a deleted file rejects with File not found", async () => {
     await assert.rejects(resolvePreview({ baseCwd: dir, target: "gone.txt", viewingCwd: dir }, { isNetwork: notNetwork }), /File not found/);
   });
 });
+
+test("without a location table only trusted roots (and the way to them) are checked", async () => {
+  await withDir(async (dir) => {
+    await mkdir(path.join(dir, "root"));
+    await mkdir(path.join(dir, "sibling"));
+    await writeFile(path.join(dir, "root", "a.txt"), "x");
+    await writeFile(path.join(dir, "sibling", "b.txt"), "x");
+    const trustedRoots = [path.join(dir, "root")];
+    const allow = (p) => allowsAutomaticCheck(p, { table: null, trustedRoots, platform: "linux" });
+    const inside = path.join(dir, "root", "a.txt");
+    const sibling = path.join(dir, "sibling", "b.txt");
+    const got = await checkCandidates([inside, sibling, "/etc/hostname"], { base: null, home: dir, allow, platform: "linux" });
+    assert.deepEqual(got, [inside]);
+  });
+});
+test("a location table that hangs yields null at the deadline", async () => {
+  const table = createLocationTable({ platform: "darwin", readFile: async () => "", exec: () => new Promise(() => {}), timeoutMs: 20 });
+  assert.equal(await table.get(), null);
+});

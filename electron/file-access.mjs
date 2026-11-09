@@ -61,9 +61,12 @@ export function isNetworkLocation(abs, table, platform = process.platform) {
   return table.mounts.some((m) => underMount(abs, m, platform));
 }
 
-/** Without a table (it could not be read) only the trusted roots pass, compared by text. */
+/**
+ * Without a table (it could not be read) only the trusted roots pass, compared by text. Their strict ancestors pass
+ * too: the walk to a file inside a root lstat()s every component on the way ("/home", "/tmp"); siblings still fail.
+ */
 export function allowsAutomaticCheck(abs, { table, trustedRoots, platform = process.platform }) {
-  if (!table) return trustedRoots.some((r) => isInside(abs, r, platform));
+  if (!table) return trustedRoots.some((r) => isInside(abs, r, platform) || isInside(r, abs, platform));
   return !isNetworkLocation(abs, table, platform);
 }
 
@@ -71,12 +74,18 @@ const WIN_DRIVES_COMMAND = "Get-CimInstance Win32_LogicalDisk | Select-Object De
 
 /**
  * Cached view of the network locations. readFile(path) and exec(file, args) return text asynchronously.
- * get() resolves null when the source cannot be read or the platform is unknown.
+ * get() resolves null when the source cannot be read, the platform is unknown or it takes longer than timeoutMs
+ * (a `mount` stuck on a dead server may never return, whatever the process is told).
  */
-export function createLocationTable({ platform, readFile, exec, ttlMs = 30000, now = Date.now }) {
+export function createLocationTable({ platform, readFile, exec, ttlMs = 30000, now = Date.now, timeoutMs = 5000 }) {
   let cached = null;
   let at = 0;
-  const load = async () => {
+  const load = () => {
+    let timer;
+    const deadline = new Promise((resolve) => (timer = setTimeout(resolve, timeoutMs, null)));
+    return Promise.race([read(), deadline]).finally(() => clearTimeout(timer));
+  };
+  const read = async () => {
     try {
       if (platform === "linux") return { mounts: parseLinuxMounts(await readFile("/proc/self/mountinfo")) };
       if (platform === "darwin") return { mounts: parseMacMounts(await exec("mount", [])) };
