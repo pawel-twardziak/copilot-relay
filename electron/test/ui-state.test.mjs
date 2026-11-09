@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { test } from "node:test";
 
 const UiState = createRequire(import.meta.url)("../renderer/ui-state.js");
-const { listModel, stepScale, imageMentions, fitScale, zoomAt } = UiState;
+const { listModel, stepScale, imageMentions, fitScale, zoomAt, acceptDelivery, deliveryAck, shouldCloseIdle } = UiState;
 
 const S = (sessionId, cwd, updatedAt, title = sessionId) => ({ sessionId, cwd, updatedAt, title });
 const sessions = [
@@ -121,3 +121,61 @@ test("zoomAt clamps to 10-1000 %", () => {
 test("imageMentions ignores URLs (a relay message must not make the app fetch them)", () => {
   assert.deepEqual(imageMentions("@https://evil.example/p.png @http://x/y.gif @file:///p/a.png @b.png"), ["file:///p/a.png", "b.png"]);
 });
+
+test("a redelivered report is accepted once; messages without an id always pass", () => {
+  const seen = new Set();
+  assert.equal(acceptDelivery(seen, "d1"), true);
+  assert.equal(acceptDelivery(seen, "d1"), false);
+  assert.equal(acceptDelivery(seen, undefined), true);
+});
+
+function tracked() {
+  const seen = new Set(["d1"]);
+  const acks = [];
+  return { seen, acks, d: deliveryAck("d1", seen, (id) => acks.push(id)) };
+}
+
+test("a delivery is acknowledged once, on its first turn update", () => {
+  const { acks, d } = tracked();
+  d.update({ sessionUpdate: "agent_message_chunk" });
+  d.update({ sessionUpdate: "tool_call" });
+  d.returned();
+  assert.deepEqual(acks, ["d1"]);
+});
+
+test("a delivery is acknowledged on return when no turn update came", () => {
+  const { acks, d } = tracked();
+  d.update({ sessionUpdate: "available_commands_update" });
+  d.update({ sessionUpdate: "usage_update" });
+  assert.deepEqual(acks, []);
+  d.returned();
+  assert.deepEqual(acks, ["d1"]);
+});
+
+test("a prompt that fails before any update is not acknowledged and can be redelivered", () => {
+  const { seen, acks, d } = tracked();
+  d.failed();
+  assert.deepEqual(acks, []);
+  assert.equal(acceptDelivery(seen, "d1"), true);
+});
+
+test("a prompt that fails after it started stays acknowledged and seen", () => {
+  const { seen, acks, d } = tracked();
+  d.update({ sessionUpdate: "agent_thought_chunk" });
+  d.failed();
+  assert.deepEqual(acks, ["d1"]);
+  assert.equal(acceptDelivery(seen, "d1"), false);
+});
+
+const idle = { parentSessionId: "p", busy: false, inboxLength: 0, pendingPermissions: 0, active: false, lastActivity: 0 };
+test("an idle child closes after 15 minutes", () => {
+  assert.equal(shouldCloseIdle(idle, 900_000), true);
+  assert.equal(shouldCloseIdle(idle, 899_999), false);
+});
+for (const [what, change] of [
+  ["a busy child", { busy: true }],
+  ["a child with a queued message", { inboxLength: 1 }],
+  ["a child waiting for a permission", { pendingPermissions: 1 }],
+  ["the child on screen", { active: true }],
+  ["a session that is not a child", { parentSessionId: null }],
+]) test(`${what} is not closed`, () => assert.equal(shouldCloseIdle({ ...idle, ...change }, 1e9), false));

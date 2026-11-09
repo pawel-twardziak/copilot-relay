@@ -1,5 +1,5 @@
 // Electron main process: owns the `copilot --acp` processes and bridges them to the window over IPC.
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, shell } from "electron";
 import { isInside, lexicalPath } from "./paths.mjs";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -11,12 +11,15 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { AcpConnection } from "./acp.mjs";
 import { countUserMessages, deleteSession, describeCut, forkSession, isSessionId, purgeDeleted, sessionDir, truncateSession } from "./history.mjs";
 import { createUsagePusher } from "./usage.mjs";
+import { PendingRequests, childPrompt, findModelOption, limitError, reloadWarning, resolveConfig, unreportedChildren, withDeadline } from "./delegation.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 let win = null;
 let lister = null; // one long-lived connection used for session/list
-const open = new Map(); // sessionId -> { conn, cwd, permissions: Map<reqId, rpcId>, relay }
+const open = new Map(); // sessionId -> { conn, cwd, permissions: Map<reqId, rpcId>, relay, configOptions, parentSessionId?, reported? }
 let permSeq = 0;
+const pendingRequests = new PendingRequests(); // delegated-session requests waiting for the user's answer
+const creating = []; // parent IDs of approved creations still in progress: they count against the limits
 
 // relay-client.mjs is copied from ../extension by `npm start` / `npm run dist`; without it the relay is off
 const { RelayClient } = await import("./relay-client.mjs").catch(() => ({}));
@@ -103,23 +106,41 @@ function relayPrepare() {
   return { cfg, alias, mcpServers: [{ type: "http", name: "relay", url: `${cfg.url}/mcp?peer=${encodeURIComponent(alias)}`, headers: [] }] };
 }
 
-function relayStart(sessionId, cwd, { cfg, alias }) {
+function relayStart(sessionId, cwd, { cfg, alias }, { name, parentKey } = {}) {
   if (!alias) return null;
-  const status = (extra = {}) => send("relay:status", { sessionId, name: client.name, connected: client.connected, ...extra });
+  const status = (extra = {}) => send("relay:status", { sessionId, name: client.name, connected: client.connected, parentSessionId: open.get(sessionId)?.parentSessionId ?? null, ...extra });
   const client = new RelayClient({
     url: cfg.url,
     key: `cli:${sessionId}`,
     alias,
     cwd,
+    name,
+    parentKey,
     brokerScript: cfg.brokerScript,
     nodePath: cfg.nodePath,
     // `human` is set by the broker (true only for messages typed by a person in the relay GUI), not by the sender's name
     // human: true/false from this broker, undefined from an older one (the renderer then falls back to the sender name)
-    onMessage: (m) => send("relay:message", { sessionId, from: m.from, human: m.human, text: m.text, prompt: m.prompt }),
-    onRegistered: () => status(),
+    onMessage: (m) => send("relay:message", { sessionId, from: m.from, human: m.human, text: m.text, prompt: m.prompt, deliveryId: m.deliveryId, wake: m.wake }),
+    onSessionRequest: (req) => sessionRequested(sessionId, req),
+    onReported: () => {
+      const entry = open.get(sessionId);
+      if (entry?.relay === client) entry.reported = true;
+    },
+    // every registration, also after a reconnect or a resume: the broker's record of the link is the durable one
+    onRegistered: (_name, payload) => {
+      const entry = open.get(sessionId);
+      if (entry?.relay === client) {
+        entry.parentSessionId = payload?.parentKey?.replace(/^cli:/, "");
+        entry.reported = Boolean(payload?.reported);
+      }
+      status();
+      markRegistered();
+    },
     onRenamed: () => status(),
     log: (note) => status({ note }),
   });
+  let markRegistered;
+  client.registered = new Promise((resolve) => (markRegistered = resolve));
   client.start();
   return client;
 }
@@ -128,10 +149,10 @@ const send = (channel, payload) => win && !win.isDestroyed() && win.webContents.
 
 // ---------- connections ----------
 
-async function connect(cwd) {
+async function connect(cwd, deadline) {
   const conn = new AcpConnection({ command: copilotCommand(), cwd });
   try {
-    await conn.start();
+    await (deadline ? withDeadline(conn.start(), deadline, SETUP_TIMEOUT_TEXT) : conn.start());
   } catch (e) {
     conn.kill();
     // A start can fail because Copilot is missing (wrong path), crashed, or is signed out and quit; the error text
@@ -162,13 +183,14 @@ async function getLister() {
 const usage = createUsagePusher({ send: (sessionId, view) => send("usage:update", { sessionId, view }) });
 
 /** Wire a session's connection to the window. */
-function attach(sessionId, conn, cwd, relay) {
-  const entry = { conn, cwd, permissions: new Map(), relay: relayStart(sessionId, cwd, relay), toolTitles: new Map() };
+function attach(sessionId, conn, cwd, relay, link) {
+  const entry = { conn, cwd, permissions: new Map(), relay: relayStart(sessionId, cwd, relay, link), toolTitles: new Map(), configOptions: [] };
   open.set(sessionId, entry);
   // one path for live and replayed updates (see sessions:new)
   entry.update = (u) => {
     if (u?.sessionUpdate === "tool_call" && u.title) entry.toolTitles.set(u.toolCallId, u.title);
     if (u?.sessionUpdate === "usage_update" && open.get(sessionId) === entry) usage.context(sessionId, { used: u.used, size: u.size });
+    if (u?.sessionUpdate === "config_option_update" && Array.isArray(u.configOptions)) entry.configOptions = u.configOptions;
     // /rename answers with a chat line ("Session renamed to: …"); the new title arrives as session_info_update
     if (entry.renaming && u?.sessionUpdate === "agent_message_chunk") return;
     send("acp:update", { sessionId, update: u });
@@ -180,10 +202,11 @@ function attach(sessionId, conn, cwd, relay) {
     // the relay's own tools run without asking, as with the terminal extension. The tool_call update carries
     // the server-prefixed name ("relay-send_message"), the permission request only the bare tool name.
     const title = entry.toolTitles.get(params.toolCall?.toolCallId) ?? params.toolCall?.title;
-    if (entry.relay && /^relay-(send_message|list_sessions)$/.test(title ?? "")) {
+    if (entry.relay && /^relay-(send_message|list_sessions|create_session|report_result)$/.test(title ?? "")) {
       const opt = params.options?.find((o) => o.kind === "allow_once");
       if (opt) return conn.respond(rpcId, { outcome: { outcome: "selected", optionId: opt.optionId } });
     }
+    if (entry.parentSessionId) notifyIfUnfocused("A delegated session needs permission", "Open Copilot Sessions to answer.");
     const reqId = `p${++permSeq}`;
     entry.permissions.set(reqId, rpcId);
     send("acp:permission", { sessionId, reqId, toolCall: params.toolCall, options: params.options });
@@ -193,6 +216,7 @@ function attach(sessionId, conn, cwd, relay) {
     if (open.get(sessionId)?.conn !== conn) return;
     open.delete(sessionId);
     usage.forget(sessionId);
+    pendingRequests.dropForParent(sessionId);
     send("acp:exit", { sessionId, code, signal, stderr: stderr?.trim().slice(-800) });
   });
   return entry;
@@ -236,9 +260,13 @@ handle("sessions:list", async () => {
   return all;
 });
 
-handle("sessions:new", async (cwd) => {
+const CHILD_SETUP_TIMEOUT_MS = 30_000; // from the approval until the child's agent and model are set
+const SETUP_TIMEOUT_TEXT = `Copilot did not answer within ${CHILD_SETUP_TIMEOUT_MS / 1000} seconds.`;
+
+/** Start a Copilot process with a new session and attach it. `link` ({ name, parentKey }) is for delegated sessions. */
+async function createSession(cwd, link = {}, deadline) {
   requireDir(cwd);
-  const conn = await connect(cwd);
+  const conn = await connect(cwd, deadline);
   const relay = relayPrepare();
   // the agent may send updates (available_commands_update…) before it answers session/new: keep them
   const early = [];
@@ -247,16 +275,23 @@ handle("sessions:new", async (cwd) => {
   };
   conn.on("notification", hold);
   try {
-    const res = await conn.request("session/new", { cwd, mcpServers: relay.mcpServers });
-    const entry = attach(res.sessionId, conn, cwd, relay);
+    const started = conn.request("session/new", { cwd, mcpServers: relay.mcpServers });
+    const res = await (deadline ? withDeadline(started, deadline, SETUP_TIMEOUT_TEXT) : started);
+    const entry = attach(res.sessionId, conn, cwd, relay, link);
+    entry.configOptions = res.configOptions ?? [];
     conn.off("notification", hold);
     for (const p of early) if (p?.sessionId === res.sessionId) entry.update(p.update);
     usage.refresh(res.sessionId);
-    return { sessionId: res.sessionId, cwd, configOptions: res.configOptions ?? [] };
+    return { sessionId: res.sessionId, cwd, configOptions: entry.configOptions, entry };
   } catch (e) {
     conn.kill();
     throw e;
   }
+}
+
+handle("sessions:new", async (cwd) => {
+  const { sessionId, cwd: dir, configOptions } = await createSession(cwd);
+  return { sessionId, cwd: dir, configOptions }; // the entry stays here: it can't cross IPC
 });
 
 // sessions being opened (id -> number of opens in flight) / deleted: a delete must not race a resume that hasn't
@@ -289,6 +324,7 @@ async function openSession(sessionId, cwd) {
   const entry = attach(sessionId, conn, cwd, relay);
   try {
     const res = await conn.request("session/load", { sessionId, cwd, mcpServers: relay.mcpServers });
+    entry.configOptions = res?.configOptions ?? entry.configOptions;
     if (open.get(sessionId) === entry) usage.refresh(sessionId);
     return { sessionId, cwd, configOptions: res?.configOptions ?? [] };
   } catch (e) {
@@ -530,14 +566,18 @@ handle("sessions:rename", async (sessionId, name) => {
   name = String(name ?? "").replace(/\s+/g, " ").trim();
   if (!name) throw new Error("The name can't be empty.");
   if (name.length > 200) throw new Error("The name is too long (200 characters at most).");
+  await slashRename(sessionId, entry, name);
+  return name;
+});
+
+async function slashRename(sessionId, entry, name) {
   entry.prompting = entry.renaming = true;
   try {
     await entry.conn.request("session/prompt", { sessionId, prompt: [{ type: "text", text: `/rename ${name}` }] });
   } finally {
     entry.prompting = entry.renaming = false;
   }
-  return name;
-});
+}
 
 /** Stop the session's turn: pending permission questions are answered as cancelled, then session/cancel. */
 function cancelTurn(sessionId, e) {
@@ -555,6 +595,7 @@ async function closeEntry(sessionId) {
   // removed from `open` first, so the connection's exit handler stays silent (no acp:exit)
   open.delete(sessionId);
   usage.forget(sessionId);
+  pendingRequests.dropForParent(sessionId);
   e.relay?.stop();
   await Promise.race([e.conn.request("session/close", { sessionId }).catch(() => {}), new Promise((r) => setTimeout(r, 2000))]);
   e.conn.kill();
@@ -563,6 +604,133 @@ async function closeEntry(sessionId) {
 
 handle("sessions:close", async (sessionId) => {
   await closeEntry(sessionId);
+});
+
+// ---------- delegated sessions ----------
+
+const REGISTER_TIMEOUT_MS = 10_000;
+const RENAME_TIMEOUT_MS = 10_000;
+
+function delegationLimitError(parentSessionId) {
+  const s = loadSettings();
+  return limitError(open.values(), parentSessionId, { perParent: s.maxChildrenPerParent, total: s.maxChildrenTotal }, creating);
+}
+
+/** Tell the requesting session what became of its request. A parent that has closed meanwhile is skipped. */
+function tellParent(req, kind, text, name = req.name) {
+  open.get(req.parentSessionId)?.relay?.outcome({ requestId: req.requestId, kind, name, text });
+}
+
+function sessionRequested(parentSessionId, { requestId, name, task, agent, model }) {
+  const parent = open.get(parentSessionId);
+  if (!parent) return;
+  const req = { requestId, parentSessionId, name, task, agent, model };
+  const over = delegationLimitError(parentSessionId);
+  if (over) return tellParent(req, "limit", over);
+  pendingRequests.add(req);
+  notifyIfUnfocused("A session asks to start a new session", name);
+  send("delegation:request", { ...req, cwd: parent.cwd });
+}
+
+/** Resolves true once the relay client has registered, false after `ms`. */
+function waitRegistered(client, ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), ms);
+    client.registered.then(() => {
+      clearTimeout(timer);
+      resolve(true);
+    });
+  });
+}
+
+async function setConfigOption(sessionId, entry, configId, value) {
+  const res = await entry.conn.request("session/set_config_option", { sessionId, configId, value });
+  if (res?.configOptions) entry.configOptions = res.configOptions;
+  return res?.configOptions ?? null;
+}
+
+/** Create the approved child and link it to its parent. Never throws: every failure ends as an outcome for the parent. */
+async function createChild(req) {
+  const { parentSessionId, name, task, agent, model } = req;
+  const parent = open.get(parentSessionId);
+  if (!parent) return;
+  const over = delegationLimitError(parentSessionId);
+  if (over) return tellParent(req, "limit", over);
+
+  creating.push(parentSessionId); // before the first await: two approvals at once must not both pass the check above
+  let held = true;
+  const release = () => {
+    if (held) creating.splice(creating.indexOf(parentSessionId), 1);
+    held = false;
+  };
+  const deadline = Date.now() + CHILD_SETUP_TIMEOUT_MS;
+  let child = null;
+  let announced = false; // the renderer knows this child and has to be told when it goes away
+  const discard = async () => {
+    if (!child) return;
+    await closeEntry(child.sessionId).catch(() => {});
+    if (announced) send("delegation:closed", { sessionId: child.sessionId });
+  };
+  try {
+    child = await createSession(parent.cwd, { name, parentKey: `cli:${parentSessionId}` }, deadline);
+    const { sessionId, entry } = child;
+    if (!entry.relay) throw new Error("The relay is switched off in this app, so the new session cannot be linked to its parent.");
+    // once registered, the entry itself counts as a child: its place in `creating` would count it twice
+    entry.relay.registered.then(release);
+
+    const config = resolveConfig(entry.configOptions, { agent, model, inheritedModel: findModelOption(parent.configOptions)?.currentValue });
+    if (config.error) {
+      await discard();
+      return tellParent(req, "invalid", `Session "${name}" was not created: ${config.error}`);
+    }
+    for (const { configId, value } of config.sets) await withDeadline(setConfigOption(sessionId, entry, configId, value), deadline, SETUP_TIMEOUT_TEXT);
+
+    send("delegation:created", { sessionId, cwd: child.cwd, configOptions: entry.configOptions, parentSessionId, title: name });
+    announced = true;
+
+    if (!(await waitRegistered(entry.relay, REGISTER_TIMEOUT_MS))) {
+      await discard();
+      return tellParent(req, "failed", `Session "${name}" was not created: it did not connect to the relay broker in time.`);
+    }
+    const finalName = entry.relay.name;
+    // Copilot titles a session after its first prompt unless it was named. A failed or unanswered rename only costs the title.
+    await Promise.race([slashRename(sessionId, entry, finalName).catch((e) => console.warn(`[delegation] /rename: ${e.message}`)), new Promise((r) => setTimeout(r, RENAME_TIMEOUT_MS))]);
+    tellParent(req, "created", `Session "${finalName}" was created and has started on its task. It will send you its result with report_result.`, finalName);
+    // parent's current name; if it closed meanwhile, the last one known (the child still runs and its report is durable)
+    const parentName = (open.get(parentSessionId) ?? parent).relay?.name;
+    send("relay:message", { sessionId, from: parentName, human: false, text: task, prompt: childPrompt({ parentName, task }), wake: true });
+  } catch (e) {
+    await discard();
+    tellParent(req, "failed", `Session "${name}" was not created: ${friendly(e)}`);
+  } finally {
+    release();
+  }
+}
+
+// reachable only from the window (preload): nothing the broker or a session sends can answer a request
+handle("delegation:answer", async (requestId, approved) => {
+  const req = pendingRequests.take(requestId);
+  if (!req) return false;
+  if (approved === true) await createChild(req);
+  else tellParent(req, "rejected", `The user rejected the request to create session "${req.name}".`);
+  return true;
+});
+
+handle("delegation:stopChildren", async (parentSessionId) => {
+  const children = [...open].filter(([, e]) => e.parentSessionId === parentSessionId).map(([id]) => id);
+  await Promise.all(
+    children.map(async (sessionId) => {
+      await closeEntry(sessionId).catch(() => {});
+      send("delegation:closed", { sessionId });
+    }),
+  );
+});
+
+handle("relay:ack", async (sessionId, id) => {
+  const relay = open.get(sessionId)?.relay;
+  if (!relay) return false;
+  await relay.ack(id);
+  return true;
 });
 
 // ---------- history: fork / delete from a message ----------
@@ -687,9 +855,7 @@ handle("sessions:delete", async (sessionId) => {
 });
 
 handle("sessions:setConfig", async (sessionId, configId, value) => {
-  const { conn } = getOpen(sessionId);
-  const res = await conn.request("session/set_config_option", { sessionId, configId, value });
-  return res?.configOptions ?? null;
+  return setConfigOption(sessionId, getOpen(sessionId), configId, value);
 });
 
 handle("permission:answer", async (sessionId, reqId, optionId) => {
@@ -990,7 +1156,52 @@ function createWindow() {
     Menu.buildFromTemplate(items).popup({ window: win });
   });
   win.loadFile(path.join(here, "renderer", "index.html"));
+  win.on("close", (e) => {
+    if (!confirmLeavingChildren()) e.preventDefault();
+  });
   win.on("closed", () => (win = null));
+}
+
+// Quitting kills every Copilot process, so a child that has not reported would be lost. The close and before-quit
+// events come in either order (macOS: before-quit first), so the answer is remembered for the rest of the quit.
+let leavingConfirmed = false;
+function confirmLeavingChildren() {
+  if (leavingConfirmed) return true;
+  const count = unreportedChildren(open.values()).length;
+  if (count === 0) return true;
+  const options = {
+    type: "warning",
+    buttons: ["Quit", "Cancel"],
+    defaultId: 1,
+    cancelId: 1,
+    message: `${count} delegated ${count === 1 ? "session has" : "sessions have"} not reported yet.`,
+    detail: "Quitting stops their work.",
+  };
+  const parent = win && !win.isDestroyed() ? win : null;
+  const choice = parent ? dialog.showMessageBoxSync(parent, options) : dialog.showMessageBoxSync(options);
+  leavingConfirmed = choice === 0;
+  return leavingConfirmed;
+}
+
+// After a reload the views are gone but main keeps every process: a child's permission card would be lost for good
+// and the idle sweep and Stop all children would not reach it. So its work is stopped first, with the user's consent.
+async function confirmedReload(reload) {
+  const parent = win && !win.isDestroyed() ? win : null;
+  if (!parent) return;
+  const children = [...open].filter(([, e]) => e.parentSessionId).map(([id]) => id);
+  if (children.length || pendingRequests.size) {
+    const choice = dialog.showMessageBoxSync(parent, { type: "warning", buttons: ["Reload", "Cancel"], defaultId: 1, cancelId: 1, ...reloadWarning(children.length, pendingRequests.size) });
+    if (choice !== 0) return;
+    await Promise.all(children.map((id) => closeEntry(id).catch(() => {})));
+    pendingRequests.clear();
+  }
+  if (!parent.isDestroyed()) reload(parent.webContents);
+}
+
+function notifyIfUnfocused(title, body) {
+  if (win && !win.isDestroyed() && win.isFocused()) return;
+  if (!Notification.isSupported()) return;
+  new Notification({ title, body }).show();
 }
 
 function killAll() {
@@ -1020,7 +1231,16 @@ if (!app.requestSingleInstanceLock()) {
         ...(process.platform === "darwin" ? [{ role: "appMenu" }] : []),
         { role: "fileMenu" },
         { role: "editMenu" },
-        { label: "View", submenu: [{ role: "reload" }, { role: "forceReload" }, { role: "toggleDevTools" }, { type: "separator" }, { role: "togglefullscreen" }] },
+        {
+          label: "View",
+          submenu: [
+            { label: "Reload", accelerator: "CmdOrCtrl+R", click: () => confirmedReload((wc) => wc.reload()) },
+            { label: "Force Reload", accelerator: "Shift+CmdOrCtrl+R", click: () => confirmedReload((wc) => wc.reloadIgnoringCache()) },
+            { role: "toggleDevTools" },
+            { type: "separator" },
+            { role: "togglefullscreen" },
+          ],
+        },
         { role: "windowMenu" },
       ]),
     );
@@ -1031,6 +1251,10 @@ if (!app.requestSingleInstanceLock()) {
   app.on("window-all-closed", () => {
     killAll();
     if (process.platform !== "darwin") app.quit();
+    else leavingConfirmed = false; // the app keeps running and everything was stopped: the next quit asks afresh
   });
-  app.on("before-quit", killAll);
+  app.on("before-quit", (e) => {
+    if (confirmLeavingChildren()) killAll();
+    else e.preventDefault();
+  });
 }

@@ -69,7 +69,8 @@ It runs on Windows, macOS and Linux.
 Copilot CLI doesn't load extensions in ACP mode, so the copilot-relay extension never runs in sessions opened
 here. The app does the extension's job itself. Every open session joins the relay broker under the same
 identity it has in a terminal (`cli:<sessionId>`), so it keeps its relay name. It also gets the relay tools
-(`relay-list_sessions`, `relay-send_message`) as an MCP server, and these run without a permission prompt.
+(`relay-list_sessions`, `relay-send_message`, and `relay-create_session` / `relay-report_result`, see
+[Delegated sessions](#delegated-sessions)) as an MCP server, and these run without a permission prompt.
 
 - The header shows the session's relay name (e.g. `relay: swift-otter`). Click it to rename the session.
 - Messages from other sessions appear as purple "from …" bubbles. Each becomes a new turn as soon as the
@@ -80,6 +81,51 @@ identity it has in a terminal (`cli:<sessionId>`), so it keeps its relay name. I
   and starts `../server.mjs` itself when run from the repo. If the broker is unreachable, the header shows
   `relay: offline` and the app keeps retrying.
 - Turn it off in **⚙ Settings → Connect sessions to copilot-relay**. The change applies to sessions opened afterwards.
+
+## Delegated sessions
+
+A session can ask for a new session dedicated to one task, a *delegated* (child) session. Unlike a subagent, a child is
+an ordinary session: it appears in the list, you can open it, read what it did, keep talking to it, and resume it later.
+
+- **`create_session(name, task, agent?, model?)`** is called by the parent. A card appears in the parent's view with
+  the name, the full task, the agent, the model (or "inherited") and the folder, with **Approve** and **Reject**.
+  **Every creation needs your click**: there is no "always allow", and no model or message can answer the card. The
+  parent is marked `!` in the list, and an OS notification fires if the window is not focused. The tool returns at
+  once; the outcome arrives later as a message from `relay`, so the parent can keep working.
+- **The child** gets only its task, not the parent's history, so the parent has to put the context it needs in the
+  task. If `model` is left out, the child uses the parent's current model. If `agent` is left out, it uses the
+  default Copilot agent; the parent's agent is not inherited. A model or agent the session doesn't offer creates no
+  child, and the parent is told the valid values. A child appears in the list without taking you away from what is
+  on screen, and cannot create further sessions.
+- **`report_result(text)`** is called by the child, once, when it is done. It has no recipient: the broker knows
+  the parent. The report wakes the parent as a "from …" bubble and is kept on disk until the parent's prompt has
+  started, so it survives a parent that is busy or closed, a broker restart and an app restart. A rare duplicate is
+  possible; a lost report is not. After the report, `send_message` works between parent and child as with any other
+  session; `list_sessions` marks "your parent" and "your child" with their current names.
+- **Permissions.** A child starts with no automatic approvals beyond the relay tools, and asks like any other session.
+  While it waits, it has a `!` in the list and an OS notification fires if the window is not focused. Nothing is
+  answered for you.
+- **No isolation.** A child works in **the same folder and on the same branch as its parent**. There is no worktree or
+  sandbox, and the tool has no folder parameter. Children that edit files can get in each other's way or in the
+  parent's.
+- **Limits.** At most 3 children per parent and 5 in the app. A child counts as long as its process is running, also
+  after it has reported, so a reported child that is still open keeps its place. A request over a limit shows no
+  card and the parent is told why. Messages between a parent and its child have their own budget of 12, refilled by a human prompt in either session;
+  reports and relay notices are charged to nothing.
+- **Settings.** There is no dialog for the limits. Add `maxChildrenPerParent` and `maxChildrenTotal` to the settings
+  file (its location is shown in **⚙ Settings → Files**). The pair budget is `maxAgentMessagesPerPair` in the
+  broker's `relay.config.json`.
+- **Ending a child.** **Stop all children** in the parent's header closes every child of that session; they stay
+  resumable. A child with no running turn and no open question for 15 minutes loses its process but stays in the
+  list. A child that ends without reporting (closed, stopped, or the app crashed) sends the parent one
+  "ended without reporting" notice, which wakes it.
+- **Reloading the window** (**View → Reload**, Ctrl+R) stops delegated sessions, after a confirmation, because a
+  reloaded window cannot show their cards. Waiting requests for a new session are dropped too. Stopped children stay
+  resumable. With no child open and no waiting request, a reload asks nothing.
+- **Quitting** while a child has not reported asks for confirmation; **Cancel** keeps everything running. Children are
+  never resumed automatically.
+- `create_session` and `report_result` exist only for sessions opened in this app, not for terminal sessions or
+  sessions started from the broker's web GUI.
 
 ## Run
 

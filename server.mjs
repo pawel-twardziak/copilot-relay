@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { AcpAgent } from "./src/acp-agent.mjs";
 import { isReservedName, Registry, sanitizeName } from "./src/registry.mjs";
 import { createMcpHandler } from "./src/mcp.mjs";
+import { Delegation } from "./src/delegation.mjs";
+import { DelegationStore } from "./src/delegation-store.mjs";
 import { NameStore, randomName } from "./src/name-store.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -18,14 +20,21 @@ const PORT = Number(process.env.COPILOT_RELAY_PORT ?? config.port ?? 7777);
 const AUTO_APPROVE = config.autoApproveTools ?? ["send_message", "list_sessions"];
 const DEFAULT_CWD = path.resolve(path.dirname(configPath), config.cwd ?? ".");
 
-const registry = new Registry({ maxAgentMessages: config.maxAgentMessagesPerUserTurn ?? 12 });
-const handleMcp = createMcpHandler(registry);
+const registry = new Registry({
+  maxAgentMessages: config.maxAgentMessagesPerUserTurn ?? 12,
+  maxPairMessages: config.maxAgentMessagesPerPair ?? 12,
+});
+// An unreadable delegation store throws here and stops the broker: never run on (and later overwrite) data we could not read.
+const delegationStore = new DelegationStore();
+const delegation = new Delegation({ registry, store: delegationStore });
+const handleMcp = createMcpHandler(registry, delegation);
 const names = new NameStore(process.env.COPILOT_RELAY_NAMES_FILE || undefined);
 
 // Persist names/roles of terminal sessions (key = Copilot sessionId, stable across --resume).
 const persist = (p) => p.key?.startsWith("cli:") && names.set(p.key, p.name, p.role);
 registry.on("peer_renamed", persist);
 registry.on("peer_updated", persist);
+registry.on("peer_removed", (e) => delegation.childGone(e.key, e.name));
 
 function pickName(key, explicit) {
   if (explicit) return explicit;
@@ -269,6 +278,13 @@ const server = http.createServer(async (req, res) => {
         if (q.get("alias")) registry.setAlias(q.get("alias"), key);
         sse(res);
         const write = (event, data) => !res.destroyed && res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+        // unlike `write`, `control` must throw on a dead stream: Delegation treats only a throw as "not delivered"
+        const control = (event, data) => {
+          if (res.destroyed) throw new Error("stream closed");
+          res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+        };
+        const parent = q.get("parent");
+        if (parent) delegation.link(key, parent); // before upsert: the first message may already depend on the link
         const onRenamed = (ev) => ev.key === key && write("renamed", { name: ev.name });
         registry.on("peer_renamed", onRenamed);
         const peer = registry.upsert({
@@ -278,6 +294,8 @@ const server = http.createServer(async (req, res) => {
           cwd: q.get("cwd") ?? "",
           role: names.get(key)?.role ?? "",
           push: (m) => write("message", m),
+          parentKey: parent || delegationStore.parentOf(key) || null,
+          control,
         });
         // explicit name (COPILOT_RELAY_NAME) on a fresh start wins even if the peer is still known
         const explicit = q.get("name");
@@ -289,7 +307,8 @@ const server = http.createServer(async (req, res) => {
           }
         }
         persist(peer);
-        write("registered", { name: peer.name });
+        write("registered", { name: peer.name, parentKey: peer.parentKey ?? null, reported: delegationStore.isReported(key) });
+        delegation.attached(key);
         const ping = setInterval(() => res.write(": ping\n\n"), 25_000);
         req.on("close", () => {
           clearInterval(ping);
@@ -312,7 +331,21 @@ const server = http.createServer(async (req, res) => {
       }
 
       case "POST /api/peer/human": {
-        registry.humanPrompt();
+        const { key } = (await readBody(req)) ?? {};
+        registry.humanPrompt(key);
+        return res.writeHead(204).end();
+      }
+
+      case "POST /api/peer/ack": {
+        const { key, id } = (await readBody(req)) ?? {};
+        return json(res, 200, { ok: delegation.ack(key, id) });
+      }
+
+      // The app reports what happened to a session request. Deliberately no endpoint approves a request.
+      case "POST /api/peer/delegation-outcome": {
+        const { key, requestId, kind, name, text } = (await readBody(req)) ?? {};
+        if (!key || !text) return json(res, 400, { error: "key and text required" });
+        delegation.outcome(key, { requestId, kind, name, text });
         return res.writeHead(204).end();
       }
 

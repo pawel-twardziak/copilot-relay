@@ -2,5 +2,6 @@
   "port": 7777,
   "cwd": "./workspace",
   "maxAgentMessagesPerUserTurn": 12,
+  "maxAgentMessagesPerPair": 12,
   "startupSessions": []
 }

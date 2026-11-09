@@ -33,6 +33,10 @@ contextBridge.exposeInMainWorld("api", {
   deleteSession: (sessionId) => call("sessions:delete", sessionId),
   setConfig: (sessionId, configId, value) => call("sessions:setConfig", sessionId, configId, value),
   answerPermission: (sessionId, reqId, optionId) => call("permission:answer", sessionId, reqId, optionId),
+  // a delivered report or notice has started its prompt: the broker may forget it
+  relayAck: (sessionId, id) => call("relay:ack", sessionId, id),
+  answerDelegation: (requestId, approved) => call("delegation:answer", requestId, approved),
+  stopChildren: (parentSessionId) => call("delegation:stopChildren", parentSessionId),
   pickDir: () => call("dialog:pickDir"),
   getSettings: () => call("settings:get"),
   setSettings: (s) => call("settings:set", s),
@@ -61,4 +65,7 @@ contextBridge.exposeInMainWorld("api", {
   onNotice: on("acp:notice"),
   onRelayMessage: on("relay:message"),
   onRelayStatus: on("relay:status"),
+  onDelegationRequest: on("delegation:request"),
+  onDelegationCreated: on("delegation:created"),
+  onDelegationClosed: on("delegation:closed"),
 });

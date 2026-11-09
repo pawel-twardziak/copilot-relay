@@ -23,7 +23,7 @@ export function randomName() {
 }
 
 export class NameStore {
-  constructor(file = defaultFile()) {
+  constructor(file = stateFile("names.json")) {
     this.file = file;
     try {
       this.data = JSON.parse(readFileSync(file, "utf8"));
@@ -60,7 +60,8 @@ export class NameStore {
   }
 }
 
-function defaultFile() {
+/** Path of a state file in the per-user state folder shared by the relay's stores. */
+export function stateFile(name) {
   const home = os.homedir();
   const base =
     process.platform === "win32"
@@ -68,5 +69,5 @@ function defaultFile() {
       : process.platform === "darwin"
         ? path.join(home, "Library", "Application Support")
         : process.env.XDG_STATE_HOME ?? path.join(home, ".local", "state");
-  return path.join(base, "copilot-relay", "names.json");
+  return path.join(base, "copilot-relay", name);
 }
