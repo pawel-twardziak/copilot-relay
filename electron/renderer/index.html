@@ -7,6 +7,7 @@
       content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src data: https:; font-src 'self' data:"
     />
     <title>Copilot Sessions</title>
+    <link rel="stylesheet" href="../node_modules/@highlightjs/cdn-assets/styles/github-dark.min.css" />
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
@@ -76,11 +77,44 @@
       <div class="viewer-cap"></div>
     </div>
 
+    <div id="file-preview" hidden tabindex="-1" role="dialog" aria-label="File preview">
+      <aside class="fp-list">
+        <div class="fp-list-title">Files</div>
+        <div class="fp-items"></div>
+      </aside>
+      <section class="fp-main">
+        <header class="fp-head">
+          <div class="fp-title">
+            <div class="fp-name"></div>
+            <div class="fp-path"></div>
+          </div>
+          <div class="fp-actions">
+            <button data-act="md" hidden></button>
+            <button data-act="system" title="Open with the default application">Open in system app</button>
+            <button data-act="close" title="Close (Esc)">✕</button>
+          </div>
+        </header>
+        <div class="fp-content"></div>
+      </section>
+      <div class="fp-confirm" hidden>
+        <div class="fp-confirm-box">
+          <p>This file is outside the session folder. Open it?</p>
+          <code class="fp-confirm-path"></code>
+          <div class="fp-confirm-actions">
+            <button data-act="deny">Cancel</button>
+            <button data-act="allow" class="primary">Open</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <script src="../node_modules/marked/lib/marked.umd.js"></script>
     <script src="../node_modules/dompurify/dist/purify.min.js"></script>
     <script src="commands.js"></script>
     <script src="file-links.js"></script>
     <script src="ui-state.js"></script>
+    <script src="../node_modules/@highlightjs/cdn-assets/highlight.min.js"></script>
+    <script src="file-preview.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

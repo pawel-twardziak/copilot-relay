@@ -133,6 +133,15 @@ DOMPurify.addHook("uponSanitizeAttribute", (node, data) => {
 });
 const md = (text) => DOMPurify.sanitize(marked.parse(text ?? ""), { ADD_ATTR: ["target"] });
 
+// The full-screen file preview; one for the whole window, it closes when the active session changes.
+const filePreview = createFilePreview({
+  api,
+  h,
+  md,
+  onStatus: (text) => setStatus(text, true),
+  onChange: (id) => views.get(id)?.updateFilesBtn(),
+});
+
 // image types and size limit come from the main process, which attaches the images (one source of truth)
 let imageConfigPromise;
 const imageConfig = () =>
@@ -271,6 +280,7 @@ class SessionView {
     this.cmdMatches = [];
     this.cmdIndex = 0;
     this.cmdToken = null;
+    this.filesBtn = h("button", { title: "Files opened from this conversation", hidden: true, onclick: () => filePreview.show(this) });
     this.cmdPopup = h("div", { class: "cmd-popup", role: "listbox", hidden: true, onmousedown: (e) => e.preventDefault() });
 
     this.el = h(
@@ -284,6 +294,7 @@ class SessionView {
         this.usageChip,
         this.selects,
         this.stopChildrenBtn,
+        this.filesBtn,
         h("button", { title: "Copy the whole conversation as Markdown", onclick: (e) => this.copyThread(e.currentTarget) }, "Copy thread"),
         h("button", { class: "danger", title: "Close this session in the app (it stays resumable)", onclick: () => closeView(this.sessionId) }, "Close"),
         h("button", { class: "danger", title: "Delete this whole session from disk", onclick: () => deleteSessionFlow({ sessionId: this.sessionId, cwd: this.cwd, title: this.title }) }, "Delete"),
@@ -344,7 +355,14 @@ class SessionView {
     this.log.addEventListener("click", onLink);
     this.log.addEventListener("auxclick", onLink);
     this.setTitle(title);
+    this.updateFilesBtn();
     $("#main").append(this.el);
+  }
+
+  updateFilesBtn() {
+    const n = filePreview.count(this.sessionId);
+    this.filesBtn.hidden = n === 0;
+    this.filesBtn.textContent = `Files (${n})`;
   }
 
   /** Web links open in the browser; anything else is treated as a file path (relative to the session folder). */
@@ -403,6 +421,7 @@ class SessionView {
   async openLink(href, base = this.cwd) {
     if (!href || href.startsWith("#")) return;
     try {
+      if (await filePreview.open(this, href, base)) return;
       const r = await api.openLink(base, href);
       if (r === "revealed") this.statusEl.textContent = `Shown in the file manager instead of opened: ${href} is not a document type the app opens directly.`;
     } catch (e) {
@@ -1378,6 +1397,7 @@ function renderRun(r, final = false) {
 // opening / closing
 
 function activate(id) {
+  filePreview.close();
   activeId = id;
   for (const [sid, v] of views) v.el.classList.toggle("active", sid === id);
   $("#empty").style.display = id ? "none" : "";
@@ -1602,6 +1622,7 @@ async function deleteSessionFlow(s) {
     if (ui.pinned.delete(s.sessionId)) saveUi();
     const dropped = v && views.get(s.sessionId) === v ? v.inbox.length : 0; // relay messages it never got
     dropView(s.sessionId); // only now: on a failure the session stays visible
+    filePreview.forget(s.sessionId);
     sessions = sessions.filter((x) => x.sessionId !== s.sessionId);
     const problems = [
       dropped && `${dropped} relay message(s) waiting for it were discarded`,
@@ -2038,7 +2059,7 @@ document.addEventListener(
   (e) => {
     if (!e.ctrlKey) return;
     e.preventDefault();
-    if (leftCtrl.down && !viewer.isOpen && e.deltaY) changeChatScale(e.deltaY < 0 ? 1 : -1);
+    if (leftCtrl.down && !viewer.isOpen && !filePreview.isOpen && e.deltaY) changeChatScale(e.deltaY < 0 ? 1 : -1);
   },
   { passive: false, capture: true },
 );
@@ -2050,7 +2071,7 @@ document.addEventListener(
     const dir = ZOOM_KEYS[e.code] ?? ZOOM_KEYS[e.key];
     if (dir === undefined) return;
     e.preventDefault();
-    if (leftCtrl.down && !viewer.isOpen) changeChatScale(dir);
+    if (leftCtrl.down && !viewer.isOpen && !filePreview.isOpen) changeChatScale(dir);
   },
   true,
 );
