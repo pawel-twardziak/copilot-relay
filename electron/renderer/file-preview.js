@@ -15,6 +15,8 @@ function createFilePreview({ api, h, md, onStatus, onChange = () => {} }) {
   const content = el.querySelector(".fp-content");
   const mdBtn = el.querySelector('[data-act="md"]');
   const confirmEl = el.querySelector(".fp-confirm");
+  const errEl = h("div", { class: "fp-error", hidden: true });
+  content.before(errEl);
   const confirmPath = el.querySelector(".fp-confirm-path");
 
   let recent = {};
@@ -26,6 +28,8 @@ function createFilePreview({ api, h, md, onStatus, onChange = () => {} }) {
   let cur = null; // { path, line, result } of the file on show
   let mdSource = false;
   let pending = null; // { view, href, base } waiting for the user's answer to the confirmation
+  let fullText = null; // text of the windowed (plain tier) file on show, for Select all + copy
+  let allSelected = false;
   let seq = 0; // a newer read or a close makes older reads stale
 
   const listOf = (id) => recent[id] ?? [];
@@ -49,6 +53,16 @@ function createFilePreview({ api, h, md, onStatus, onChange = () => {} }) {
   };
   const dirOf = (p) => p.slice(0, Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\")) + 1) || p;
   const sizeText = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
+  /** An error goes into the preview while it is open (the status line is hidden under it), else to the status line. */
+  const fail = (text) => {
+    if (el.hidden) return onStatus(text);
+    if (!cur && confirmEl.hidden) {
+      close();
+      return onStatus(text);
+    }
+    errEl.textContent = text;
+    errEl.hidden = false;
+  };
   const message = (text) => content.replaceChildren(h("div", { class: "fp-msg" }, text));
 
   // --- one file's content -------------------------------------------------------------------------------
@@ -122,7 +136,11 @@ function createFilePreview({ api, h, md, onStatus, onChange = () => {} }) {
   /** Rendered Markdown. Clicks stay inside the preview; images are not loaded, their alt text is shown. */
   function markdownView(text) {
     const box = h("div", { class: "fp-md", tabindex: "0" });
-    box.innerHTML = md(text);
+    // stricter than the chat: raw HTML in a file must not fetch images or restyle the window
+    box.innerHTML = md(text, {
+      FORBID_TAGS: ["img", "picture", "source", "video", "audio", "style", "svg", "math", "link", "object", "embed", "iframe", "image"],
+      FORBID_ATTR: ["style", "srcset", "background", "poster"],
+    });
     for (const ref of box.querySelectorAll(".img-ref")) ref.replaceWith(h("span", { class: "img-alt" }, ref.dataset.alt ?? ""));
     box.addEventListener("click", (e) => {
       const a = e.target.closest("a[href]");
@@ -131,18 +149,20 @@ function createFilePreview({ api, h, md, onStatus, onChange = () => {} }) {
       const href = a.getAttribute("href");
       if (!href || href.startsWith("#")) return;
       if (/^[a-z][a-z0-9+.-]*:/i.test(href) && !/^file:/i.test(href)) {
-        api.openLink(view.cwd, href).catch((err) => onStatus(err.message));
+        api.openLink(view.cwd, href).catch((err) => fail(err.message));
         return;
       }
       const base = dirOf(cur.path);
       const target = decode(href);
-      openTarget(view, target, base).then((handled) => handled || api.openLink(base, target)).catch((err) => onStatus(err.message));
+      openTarget(view, target, base).then((handled) => handled || api.openLink(base, target)).catch((err) => fail(err.message));
     });
     return box;
   }
 
   /** The one place that turns a read result into what is on screen (the refresh in a later change re-uses it). */
   function renderFile(result, line) {
+    errEl.hidden = true;
+    fullText = result.tier === "plain" ? result.text : null;
     const isMd = /\.(md|markdown)$/i.test(result.name) && result.tier === "highlight";
     mdBtn.hidden = !isMd;
     nameEl.textContent = result.name;
@@ -257,7 +277,7 @@ function createFilePreview({ api, h, md, onStatus, onChange = () => {} }) {
     try {
       r = await api.readFile(base, href, { viewingCwd: v.cwd, confirmed });
     } catch (e) {
-      onStatus(e.message);
+      fail(e.message);
       return true;
     }
     if (my !== seq) return true;
@@ -281,6 +301,8 @@ function createFilePreview({ api, h, md, onStatus, onChange = () => {} }) {
 
   function close() {
     seq++;
+    errEl.hidden = true;
+    fullText = null;
     pending = null;
     confirmEl.hidden = true;
     el.hidden = true;
@@ -294,13 +316,21 @@ function createFilePreview({ api, h, md, onStatus, onChange = () => {} }) {
   el.addEventListener("click", (e) => {
     const act = e.target.closest("button[data-act]")?.dataset.act;
     if (act === "close") close();
-    else if (act === "system" && cur) api.openLink(view.cwd, cur.path).catch((err) => onStatus(err.message));
+    else if (act === "system" && cur) api.openLink(view.cwd, cur.path).catch((err) => fail(err.message));
     else if (act === "md" && cur?.result) {
       mdSource = !mdSource;
       renderFile(cur.result, cur.line);
     } else if (act === "allow" && pending) {
       const p = pending;
-      openTarget(p.view, p.href, p.base, true).then((handled) => handled || api.openLink(p.base, p.href)).catch((err) => onStatus(err.message));
+      pending = null;
+      confirmEl.hidden = true;
+      errEl.hidden = true;
+      openTarget(p.view, p.href, p.base, true)
+        .then((handled) => handled || api.openLink(p.base, p.href))
+        .catch((err) => fail(err.message))
+        .finally(() => {
+          if (!cur && !el.hidden) close(); // nothing on show: do not leave an empty overlay
+        });
     } else if (act === "deny") cancelConfirm();
   });
 
@@ -313,6 +343,15 @@ function createFilePreview({ api, h, md, onStatus, onChange = () => {} }) {
       if (el.hidden) return;
       if ((e.ctrlKey || e.metaKey) && ZOOM_KEY.test(e.key)) return; // the app's zoom guard swallows these
       e.stopImmediatePropagation();
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "a") {
+        e.preventDefault(); // select the file, not the whole window
+        const node = content.querySelector(".fp-text, .fp-md");
+        if (node) {
+          getSelection().selectAllChildren(node);
+          allSelected = true;
+        }
+        return;
+      }
       if (e.key === "Escape") {
         e.preventDefault();
         if (!confirmEl.hidden) cancelConfirm();
@@ -328,6 +367,15 @@ function createFilePreview({ api, h, md, onStatus, onChange = () => {} }) {
     },
     true,
   );
+
+  el.addEventListener("mousedown", () => (allSelected = false));
+  // Select all on the windowed view only covers the rendered lines: copy then supplies the whole file
+  document.addEventListener("copy", (e) => {
+    const sel = getSelection();
+    if (el.hidden || !allSelected || fullText == null || sel.isCollapsed) return;
+    e.clipboardData.setData("text/plain", fullText);
+    e.preventDefault();
+  });
 
   return {
     /** Resolves false when the target is not a text file; the caller then opens it with the system. */

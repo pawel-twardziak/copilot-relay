@@ -131,7 +131,7 @@ marked.use({ renderer: { image: ({ href, text }) => `<span class="img-ref" data-
 DOMPurify.addHook("uponSanitizeAttribute", (node, data) => {
   if (node.nodeName === "A" && data.attrName === "href" && /^file:/i.test(data.attrValue)) data.forceKeepAttr = true;
 });
-const md = (text) => DOMPurify.sanitize(marked.parse(text ?? ""), { ADD_ATTR: ["target"] });
+const md = (text, options) => DOMPurify.sanitize(marked.parse(text ?? ""), { ADD_ATTR: ["target"], ...options });
 
 // The full-screen file preview; one for the whole window, it closes when the active session changes.
 const filePreview = createFilePreview({

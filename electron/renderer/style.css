@@ -314,3 +314,6 @@ span.img-chip.off { border: 1px dashed var(--border); }
 .fp-confirm-box p { margin: 0 0 10px; }
 .fp-confirm-path { display: block; margin-bottom: 14px; padding: 6px 8px; background: var(--panel-2); border-radius: 4px; overflow-wrap: anywhere; user-select: text; }
 .fp-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.fp-code code { font: inherit; }
+.fp-error { padding: 8px 12px; background: rgba(248, 81, 73, .15); color: var(--err); border-bottom: 1px solid var(--border); }
+.fp-error[hidden] { display: none; }
