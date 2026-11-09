@@ -1,5 +1,5 @@
 // Electron main process: owns the `copilot --acp` processes and bridges them to the window over IPC.
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, shell } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, shell } from "electron";
 import { isInside, lexicalPath } from "./paths.mjs";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -11,7 +11,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { AcpConnection } from "./acp.mjs";
 import { countUserMessages, deleteSession, describeCut, forkSession, isSessionId, purgeDeleted, sessionDir, truncateSession } from "./history.mjs";
 import { createUsagePusher } from "./usage.mjs";
-import { PendingRequests, childPrompt, findModelOption, limitError, resolveConfig } from "./delegation.mjs";
+import { PendingRequests, childPrompt, findModelOption, limitError, resolveConfig, unreportedChildren } from "./delegation.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 let win = null;
@@ -206,6 +206,7 @@ function attach(sessionId, conn, cwd, relay, link) {
       const opt = params.options?.find((o) => o.kind === "allow_once");
       if (opt) return conn.respond(rpcId, { outcome: { outcome: "selected", optionId: opt.optionId } });
     }
+    if (entry.parentSessionId) notifyIfUnfocused("A delegated session needs permission", "Open Copilot Sessions to answer.");
     const reqId = `p${++permSeq}`;
     entry.permissions.set(reqId, rpcId);
     send("acp:permission", { sessionId, reqId, toolCall: params.toolCall, options: params.options });
@@ -618,6 +619,7 @@ function sessionRequested(parentSessionId, { requestId, name, task, agent, model
   const over = delegationLimitError(parentSessionId);
   if (over) return tellParent(req, "limit", over);
   pendingRequests.add(req);
+  notifyIfUnfocused("A session asks to start a new session", name);
   send("delegation:request", { ...req, cwd: parent.cwd });
 }
 
@@ -1142,7 +1144,37 @@ function createWindow() {
     Menu.buildFromTemplate(items).popup({ window: win });
   });
   win.loadFile(path.join(here, "renderer", "index.html"));
+  win.on("close", (e) => {
+    if (!confirmLeavingChildren()) e.preventDefault();
+  });
   win.on("closed", () => (win = null));
+}
+
+// Quitting kills every Copilot process, so a child that has not reported would be lost. The close and before-quit
+// events come in either order (macOS: before-quit first), so the answer is remembered for the rest of the quit.
+let leavingConfirmed = false;
+function confirmLeavingChildren() {
+  if (leavingConfirmed) return true;
+  const count = unreportedChildren(open.values()).length;
+  if (count === 0) return true;
+  const options = {
+    type: "warning",
+    buttons: ["Quit", "Cancel"],
+    defaultId: 1,
+    cancelId: 1,
+    message: `${count} delegated ${count === 1 ? "session has" : "sessions have"} not reported yet.`,
+    detail: "Quitting stops their work.",
+  };
+  const parent = win && !win.isDestroyed() ? win : null;
+  const choice = parent ? dialog.showMessageBoxSync(parent, options) : dialog.showMessageBoxSync(options);
+  leavingConfirmed = choice === 0;
+  return leavingConfirmed;
+}
+
+function notifyIfUnfocused(title, body) {
+  if (win && !win.isDestroyed() && win.isFocused()) return;
+  if (!Notification.isSupported()) return;
+  new Notification({ title, body }).show();
 }
 
 function killAll() {
@@ -1183,6 +1215,10 @@ if (!app.requestSingleInstanceLock()) {
   app.on("window-all-closed", () => {
     killAll();
     if (process.platform !== "darwin") app.quit();
+    else leavingConfirmed = false; // the app keeps running and everything was stopped: the next quit asks afresh
   });
-  app.on("before-quit", killAll);
+  app.on("before-quit", (e) => {
+    if (confirmLeavingChildren()) killAll();
+    else e.preventDefault();
+  });
 }
