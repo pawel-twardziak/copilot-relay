@@ -231,8 +231,6 @@ let activeId = null;
 // ---------------------------------------------------------------------------
 // session view
 
-// how the relay broker prefixes a message from another session (src/registry.mjs): "[from <name>]" and a newline
-const RELAY_PREFIX = /^\[from [^\]\n]+\]\n/;
 
 class SessionView {
   constructor({ sessionId, cwd, title, parentSessionId, seenDeliveries, pendingNotes }) {
@@ -640,8 +638,7 @@ class SessionView {
     // a message you typed in the relay GUI is yours: live it is .msg.relay with _human, replayed a plain .msg.user
     return [...this.log.querySelectorAll(".msg.user, .msg.relay")].filter((el) => {
       const text = (el._ownText ?? el._matchText)?.() ?? "";
-      if (el.classList.contains("relay") && !el._human) return false;
-      return !el.hidden && text.trim() && !RELAY_PREFIX.test(text);
+      return EditMessage.isOwnMessage({ relay: el.classList.contains("relay"), human: !!el._human, hidden: el.hidden, text });
     });
   }
 
