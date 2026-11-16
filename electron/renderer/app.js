@@ -831,14 +831,17 @@ class SessionView {
   /** Fork a new session from, or delete the history from, a marked message (see markTurn). */
   async historyAction(el, action) {
     if (this.busy || this.dead || this.deleting || this.historyOp) return;
-    this.cancelEdit();
     const where = el._kind === "user" ? "beforeUser" : action === "fork" ? "afterReply" : "beforeReply";
     const target = { ordinal: el._turn, text: String(el._matchText?.() ?? ""), where };
     // each operation releases only its own flag: a fork releases it early, and another operation may start then
     const op = Symbol(action);
-    this.historyOp = op;
+    this.historyOp = op; // set first: the pump that cancelEdit queues must not start a held relay message now
+    this.cancelEdit();
     const release = () => {
-      if (this.historyOp === op) this.historyOp = false;
+      if (this.historyOp !== op) return;
+      this.historyOp = false;
+      // relay messages held by an edit or by this operation; a delete moved them to the rebuilt view instead
+      if (views.get(this.sessionId) === this && !this.busy) this.pump();
     };
     try {
       if (action === "fork") await this.forkFrom(target, release);
@@ -1003,7 +1006,7 @@ class SessionView {
   }
 
   pump() {
-    if (this.busy || this.dead || this.deleting || this.edit || this.holdInbox || !this.inbox.length) return;
+    if (this.busy || this.dead || this.deleting || this.historyOp || this.edit || this.holdInbox || !this.inbox.length) return;
     const m = this.inbox.shift();
     // the broker forgets it once its prompt has really started (a failed ack only means it is delivered again later)
     const delivery = m.deliveryId ? UiState.deliveryAck(m.deliveryId, this.seenDeliveries, (id) => api.relayAck(this.sessionId, id).catch(() => {})) : null;
@@ -1432,7 +1435,12 @@ class SessionView {
     }
     // Copilot usually replays the history before answering session/load, but a replayed reply was once seen arriving
     // after it: it would land below the edited prompt and count as its reply. Wait until the replay has gone quiet.
+    // locked meanwhile: a send, edit, fork or delete must not get in between the cut and the edited prompt
+    v.historyOp = Symbol("edit");
+    v.setBusy(true);
+    v.statusEl.textContent = "Replacing the message…";
     await v.updatesSettled();
+    v.historyOp = false;
     if (views.get(sessionId) !== v) return; // you closed the tab meanwhile: the history is cut, nothing is sent
     if (v.dead) {
       v.input.value = text;
