@@ -153,6 +153,11 @@ details.thought > div { white-space: pre-wrap; padding: 4px 0 0 14px; border-lef
 .composer textarea { flex: 1; resize: none; min-height: 40px; max-height: 240px; line-height: 1.4; }
 .composer .btns { display: flex; flex-direction: column; gap: 6px; }
 .status-line { padding: 0 14px 6px; background: var(--panel); color: var(--muted); font-size: 12px; min-height: 18px; }
+/* editing a message: a strip above the composer; the message and everything after it are dimmed */
+.edit-bar { display: flex; align-items: center; gap: 10px; padding: 6px 14px; border-top: 1px solid var(--border); background: var(--panel); color: var(--muted); font-size: 12px; }
+.edit-bar[hidden] { display: none; }
+.edit-bar > span { flex: 1; }
+.log > .edit-from, .log > .edit-from ~ * { opacity: .45; }
 
 /* ---------- dialog ---------- */
 dialog { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 10px; width: 520px; }

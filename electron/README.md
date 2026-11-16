@@ -58,6 +58,12 @@ It runs on Windows, macOS and Linux.
   history as `events.jsonl.bak`. Files the agent changed are not reverted, and a session that is also open in a
   terminal Copilot CLI should not be edited. A future Copilot CLI may change the file format; the app then shows an
   error instead of changing anything.
+- **Edit** one of your messages (hover it): its text goes into the message box, and the message and everything
+  after it are dimmed. Nothing changes until you send: then the history is cut before that message, in the same
+  session, and the edited text is sent in its place (the previous history is kept as `events.jsonl.bak`, files the
+  agent changed are not reverted). **Esc** or **Cancel** brings back what you were typing and changes nothing.
+  Commands (`/…`) can't replace a message, and relay messages wait until the edited prompt has started. As with
+  Delete, don't edit a session that is also open in a terminal Copilot CLI.
 - Switch mode (Agent / Plan / Autopilot), model, reasoning effort and approval settings per session.
   The choices come from the CLI.
 - The header shows the context window use (`22.9k / 200k · 11%`) and Copilot usage (AI credits) of the session; hover for requests, tokens and changes. The latest premium quota line is shown at the bottom of the sidebar.
