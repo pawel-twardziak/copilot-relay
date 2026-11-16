@@ -816,6 +816,12 @@ class SessionView {
     this.updatePopup();
   }
 
+  /** Resolves once no session update has arrived for `quiet` ms (at most `max` ms). */
+  async updatesSettled(quiet = 400, max = 3000) {
+    const start = Date.now();
+    while (Date.now() - start < max && Date.now() - (this.lastUpdate ?? 0) < quiet) await new Promise((r) => setTimeout(r, 100));
+  }
+
   /** Let relay messages that waited for an edited prompt run again. */
   releaseInbox() {
     this.holdInbox = false;
@@ -1066,6 +1072,7 @@ class SessionView {
   // --- ACP session/update
   onUpdate(u) {
     this.lastActivity = Date.now();
+    this.lastUpdate = Date.now();
     this.delivery?.update(u);
     const text = u.content?.type === "text" ? u.content.text : "";
     switch (u.sessionUpdate) {
@@ -1346,6 +1353,7 @@ class SessionView {
       if (cmd) this.statusEl.textContent = "Wait until Copilot finishes this turn.";
       return;
     }
+    if (this.edit) return this.sendEdit(text);
     // sending a recalled message as it was brings back what you were typing before recalling it
     const recalled = this.recallEl;
     const typed = this.draft;
@@ -1380,10 +1388,61 @@ class SessionView {
       this.applyRename(rename.name);
       return;
     }
+    this.runPrompt(text, this.userBubble(text), "app");
+  }
+
+  /** The bubble of a prompt typed in the app: image thumbnails for its @mentions, clickable paths. */
+  userBubble(text) {
     const el = bubble("user", text);
     this.mentionThumbs(el, text);
     this.linkPaths(el.querySelector(".body"), this.cwd);
-    this.runPrompt(text, el, "app");
+    return el;
+  }
+
+  /** Send in edit mode: cut the history before the edited message, rebuild the view from the files and send the
+   *  new text there. Relay messages wait until it has started; a failure keeps the text in the box. */
+  async sendEdit(text) {
+    const refusal = EditMessage.editRefusal(text, { agentAvailable: this.agentAvailable() });
+    if (refusal) {
+      this.statusEl.textContent = refusal;
+      return;
+    }
+    if (this.historyOp) return;
+    const { ordinal, matchText, ownText, draft } = this.edit;
+    const prefix = EditMessage.notesPrefix(matchText, ownText);
+    const { sessionId } = this;
+    this.historyOp = Symbol("edit"); // the view is replaced below, so the flag never needs releasing
+    this.setBusy(true);
+    this.statusEl.textContent = "Replacing the message…";
+    let failure = null;
+    try {
+      await api.truncateSession(sessionId, { ordinal, text: matchText, where: "beforeUser" }); // main closes it first
+    } catch (e) {
+      failure = e;
+      await api.closeSession(sessionId).catch(() => {}); // closed for sure: the reopen replays it unchanged
+    }
+    const v = await reopenView(this, failure && `Could not replace the message: ${failure.message}`, { holdInbox: true, typed: failure ? text : draft });
+    if (failure || !v || v.dead) {
+      // the edited text must survive: a failed cut leaves it as a plain draft, a failed reopen too
+      const target = v ?? this;
+      target.input.value = text;
+      target.autosize();
+      v?.releaseInbox();
+      return;
+    }
+    // Copilot usually replays the history before answering session/load, but a replayed reply was once seen arriving
+    // after it: it would land below the edited prompt and count as its reply. Wait until the replay has gone quiet.
+    await v.updatesSettled();
+    if (views.get(sessionId) !== v) return; // you closed the tab meanwhile: the history is cut, nothing is sent
+    if (v.dead) {
+      v.input.value = text;
+      v.autosize();
+      return;
+    }
+    if (prefix) v.pendingNotes.unshift(prefix); // the replaced message's notes come first, as they did then
+    const run = v.runPrompt(text, v.userBubble(text), "app");
+    v.releaseInbox(); // runPrompt is busy already: queued relay messages follow its turn
+    await run;
   }
 
   /** @param {"app"|"human"|"relay"} source who wrote the prompt (decides the relay budget and image attachments) */
@@ -1557,13 +1616,13 @@ function dropView(id) {
 
 /** Rebuild a closed session's view from its files (after its history changed or a delete failed); relay messages
  *  that were waiting in the old view move to the new one. */
-async function reopenView(old, error) {
+async function reopenView(old, error, { holdInbox = false, typed } = {}) {
   const { sessionId, cwd, title, inbox, parentSessionId, seenDeliveries, pendingNotes } = old;
-  const typed = old.recallEl ? old.draft : old.input.value; // what you typed (not a recalled earlier message)
+  typed ??= old.recallEl ? old.draft : old.input.value; // what you typed (not a recalled earlier message)
   if (views.get(sessionId) === old) views.delete(sessionId);
   old.el.remove();
   // handed over before the replay: a report redelivered while the session reopens must already count as seen
-  await openSession({ sessionId, cwd, title, parentSessionId, seenDeliveries, pendingNotes });
+  await openSession({ sessionId, cwd, title, parentSessionId, seenDeliveries, pendingNotes, holdInbox });
   const v = views.get(sessionId);
   if (!v) return;
   if (error) v.error(error);
@@ -1576,6 +1635,7 @@ async function reopenView(old, error) {
     v.inbox.push(...inbox);
     v.pump();
   }
+  return v;
 }
 
 async function closeView(id) {
