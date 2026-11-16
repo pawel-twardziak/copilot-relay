@@ -232,8 +232,14 @@ let activeId = null;
 // session view
 
 
+/** A user/relay bubble of yours, with a turn ordinal: Edit is offered on it. */
+function isEditableBubble(el) {
+  const text = (el._ownText ?? el._matchText)?.() ?? "";
+  return el._kind === "user" && EditMessage.isOwnMessage({ relay: el.classList.contains("relay"), human: !!el._human, hidden: el.hidden, text });
+}
+
 class SessionView {
-  constructor({ sessionId, cwd, title, parentSessionId, seenDeliveries, pendingNotes }) {
+  constructor({ sessionId, cwd, title, parentSessionId, seenDeliveries, pendingNotes, holdInbox }) {
     Object.assign(this, { sessionId, cwd, title: title ?? "" });
     this.parentSessionId = parentSessionId ?? null; // set for a session created by another one (delegated child)
     this.seenDeliveries = seenDeliveries ?? new Set(); // report ids already taken (the broker redelivers until acked)
@@ -254,6 +260,8 @@ class SessionView {
     this.historyOp = false; // a fork/delete is running
     this.recallEl = null; // the user bubble whose text is in the message box (Left Shift+Up/Down), null = the draft
     this.draft = ""; // what was typed before recalling
+    this.edit = null; // the message being edited: { el, ordinal, matchText, ownText, draft } (nothing on disk yet)
+    this.holdInbox = Boolean(holdInbox); // relay messages wait (an edited prompt is about to be sent)
 
     this.titleEl = h("b", { class: "renamable", onclick: () => this.renameSession() });
     this.selects = h("span", { class: "selects" });
@@ -280,6 +288,8 @@ class SessionView {
     this.cmdToken = null;
     this.filesBtn = h("button", { title: "Files opened from this conversation", hidden: true, onclick: () => filePreview.show(this) });
     this.cmdPopup = h("div", { class: "cmd-popup", role: "listbox", hidden: true, onmousedown: (e) => e.preventDefault() });
+    this.editText = h("span");
+    this.editBar = h("div", { class: "edit-bar", hidden: true }, this.editText, h("button", { onclick: () => this.cancelEdit() }, "Cancel"));
 
     this.el = h(
       "section",
@@ -298,6 +308,7 @@ class SessionView {
         h("button", { class: "danger", title: "Delete this whole session from disk", onclick: () => deleteSessionFlow({ sessionId: this.sessionId, cwd: this.cwd, title: this.title }) }, "Delete"),
       ),
       this.log,
+      this.editBar,
       h("div", { class: "composer" }, this.cmdPopup, this.input, this.agentPicker, h("div", { class: "btns" }, this.sendBtn, this.stopBtn)),
       this.statusEl,
     );
@@ -305,6 +316,7 @@ class SessionView {
     // so it also works while the command popup is open. Right Shift+arrows still extend the text selection.
     this.input.addEventListener("keydown", (e) => {
       if (!["ArrowUp", "ArrowDown"].includes(e.key) || !e.shiftKey || !leftShift.down || e.ctrlKey || e.altKey || e.metaKey || e.isComposing) return;
+      if (this.edit) return; // a recall would replace the text being edited
       e.preventDefault();
       e.stopImmediatePropagation();
       this.recall(e.key === "ArrowUp" ? -1 : 1);
@@ -332,6 +344,7 @@ class SessionView {
         e.preventDefault();
         this.send();
       } else if (e.key === "Escape" && this.busy) this.cancel();
+      else if (e.key === "Escape" && this.edit) this.cancelEdit();
     });
     this.input.addEventListener("input", () => {
       if (this.recallEl) this.setRecalled(null); // an edited earlier message is the new draft
@@ -722,6 +735,15 @@ class SessionView {
       });
       return b;
     };
+    const edit = user ? h("button", { class: "act", title: "Edit this message: sending replaces it and everything after it" }, "Edit") : null;
+    if (edit) {
+      edit.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.startEdit(el);
+      });
+      edit.hidden = !this.isEditable(el);
+      el._editAct = edit;
+    }
     const fork = act("Fork", user ? "Start a new session from before this message" : "Start a new session that ends with this reply", "fork");
     const del = act("Delete", user ? "Delete this message and everything after it" : "Delete this reply and everything after it", "delete");
     if (el.tagName === "DETAILS") {
@@ -729,16 +751,81 @@ class SessionView {
       return;
     }
     const copy = [...el.children].find((c) => c.classList.contains("copy"));
-    const bar = h("div", { class: "acts" }, fork, del);
+    const bar = h("div", { class: "acts" }, edit, fork, del);
     if (copy) {
       copy.replaceWith(bar);
       bar.append(copy);
     } else el.append(bar);
   }
 
+  /** Edit is offered on your own messages only (the same ones Left Shift+Up/Down recalls). */
+  isEditable(el) {
+    return isEditableBubble(el);
+  }
+
+  /** Put a message of yours in the box to be replaced on Send; nothing on disk changes until then. */
+  async startEdit(el) {
+    const blocked = () => this.busy || this.dead || this.deleting || this.historyOp;
+    if (blocked() || !this.isEditable(el)) return;
+    const matchText = String(el._matchText?.() ?? "");
+    let count;
+    try {
+      count = await api.countFrom(this.sessionId, { ordinal: el._turn, text: matchText, where: "beforeUser" });
+    } catch (e) {
+      this.error(`Could not edit: ${e.message}`);
+      return;
+    }
+    if (blocked() || views.get(this.sessionId) !== this) return; // a turn started or the view went meanwhile
+    let draft;
+    if (this.edit) {
+      draft = this.edit.draft; // switching to another message keeps what was typed before the first one
+      this.clearEdit();
+    } else {
+      draft = this.recallEl ? this.draft : this.input.value;
+      this.setRecalled(null);
+      this.draft = "";
+    }
+    const ownText = String((el._ownText ?? el._matchText)());
+    this.edit = { el, ordinal: el._turn, matchText, ownText, draft };
+    el.classList.add("edit-from");
+    this.editText.textContent = EditMessage.editBanner(count.removedUserMessages);
+    this.editBar.hidden = false;
+    this.input.value = ownText;
+    this.input.setSelectionRange(ownText.length, ownText.length);
+    this.hidePopup();
+    this.autosize();
+    this.input.focus();
+  }
+
+  /** Leave edit mode without restoring anything (the box keeps its text). */
+  clearEdit() {
+    if (!this.edit) return;
+    this.edit.el.classList.remove("edit-from");
+    this.edit = null;
+    this.editBar.hidden = true;
+    if (!this.busy) queueMicrotask(() => this.pump());
+  }
+
+  /** Leave edit mode and bring back what was typed before it. */
+  cancelEdit() {
+    if (!this.edit) return;
+    const { draft } = this.edit;
+    this.clearEdit();
+    this.input.value = draft;
+    this.autosize();
+    this.updatePopup();
+  }
+
+  /** Let relay messages that waited for an edited prompt run again. */
+  releaseInbox() {
+    this.holdInbox = false;
+    if (!this.busy) this.pump();
+  }
+
   /** Fork a new session from, or delete the history from, a marked message (see markTurn). */
   async historyAction(el, action) {
     if (this.busy || this.dead || this.deleting || this.historyOp) return;
+    this.cancelEdit();
     const where = el._kind === "user" ? "beforeUser" : action === "fork" ? "afterReply" : "beforeReply";
     const target = { ordinal: el._turn, text: String(el._matchText?.() ?? ""), where };
     // each operation releases only its own flag: a fork releases it early, and another operation may start then
@@ -910,7 +997,7 @@ class SessionView {
   }
 
   pump() {
-    if (this.busy || this.dead || this.deleting || !this.inbox.length) return;
+    if (this.busy || this.dead || this.deleting || this.edit || this.holdInbox || !this.inbox.length) return;
     const m = this.inbox.shift();
     // the broker forgets it once its prompt has really started (a failed ack only means it is delivered again later)
     const delivery = m.deliveryId ? UiState.deliveryAck(m.deliveryId, this.seenDeliveries, (id) => api.relayAck(this.sessionId, id).catch(() => {})) : null;
@@ -1354,6 +1441,7 @@ class SessionView {
   markDead({ code, signal, stderr }) {
     this.flush();
     this.dead = true;
+    this.clearEdit(); // the text stays in the box
     this.dismissPermissions();
     this.error(`Copilot process exited (${code ?? signal}).${stderr ? "\n" + stderr : ""}\nClick the session in the list to resume it again.`);
     this.setBusy(false);
@@ -1388,7 +1476,10 @@ function renderRun(r, final = false) {
     r.body.textContent = r.type === "user" ? FileLinks.parseRelayHeader(r.text).display : r.text;
     if (final && r.type === "user") linkify(r.body); // a prompt replayed from the history (live ones are bubbles)
   }
-  if (r.type === "user") r.el.hidden = !r.text.trim(); // replayed prompts can be empty (e.g. attachments only)
+  if (r.type === "user") {
+    r.el.hidden = !r.text.trim(); // replayed prompts can be empty (e.g. attachments only)
+    if (r.el._editAct) r.el._editAct.hidden = !isEditableBubble(r.el); // the replayed text is complete only now
+  }
 }
 
 // ---------------------------------------------------------------------------
