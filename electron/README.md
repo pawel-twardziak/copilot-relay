@@ -149,6 +149,99 @@ an ordinary session: it appears in the list, you can open it, read what it did, 
 - `create_session` and `report_result` exist only for sessions opened in this app, not for terminal sessions or
   sessions started from the broker's web GUI.
 
+## Schedules
+
+**⏰ Schedules** in the sidebar opens a page where you define jobs: a command line that runs on a schedule. Sessions
+keep running while the page is open. Jobs run **only while the app is open**: there is no background service, and
+runs that fall in a time the app was closed are skipped, not caught up later.
+
+- **A job** is a name, a schedule, a command line, a folder, environment variables, a timeout and a notify mode.
+  The schedule is a preset (every N minutes, every N hours, every day at a time, some weekdays at a time) or a
+  custom 5-field cron expression, in your local time zone; the form shows the next three run times. The command is
+  one line run by the system shell (`/bin/sh -c` on Linux and macOS, `cmd.exe` on Windows) in the job's folder, so
+  `python3 report.py --project X` or `./run.sh a b` both work. The timeout is 10 minutes unless you set it (1 to
+  1440); after it the whole process tree is killed and the run is marked `⏱ timeout`. On Linux and macOS, when the
+  script exits, anything it left running in the background (e.g. `./server &`) is stopped after 1 second, so a job
+  can't start a long-lived process. On Windows the tree is only stopped while the script itself is still running
+  (timeout, quit, delete): once it has exited, its process ID could already belong to another program.
+- **One run per job at a time.** A due time while the previous run is still going is recorded as `⏭ skipped`.
+  **▶ Run now** starts a run at once. Different jobs run in parallel. Quitting the app kills running jobs and
+  records them as `aborted`; deleting a job kills its run and removes its history and secrets.
+- **The run page** shows the status, trigger, start, duration and exit code, the script's summary and details
+  (Markdown), and stdout and stderr (the last 64 KB of each, with **Copy**). Below it is the job's history, the last
+  20 runs. Click a job's last run in the list, or a notification, to open it.
+
+### How a script reports its result
+
+A script that knows nothing about the app works unchanged: exit code 0 is a success, anything else a failure, and
+the summary is the last line of stdout. To give a run its own summary, write to the file the app passes in. Every
+run gets these variables, on top of the app's own environment and the job's variables:
+
+- `JOB_RESULT`: the path of an empty file the script may write its result to;
+- `JOB_NAME`: the job's name;
+- `JOB_RUN_ID`: this run's id.
+
+The result file can hold:
+
+- **plain text**: the first non-empty line is the summary, the whole text the details;
+- **a JSON object** with `summary` (string, shown in the notification), optional `details` (string, Markdown) and
+  optional `notify` (`true` or `false`: notify about this run or not). Other keys are ignored.
+
+The exit code still decides success; the result file only provides the text. If the file starts with `{` but isn't
+valid JSON, it is used as plain text and the run page shows the parse error. Examples:
+
+```bash
+echo "3 new PRs" > "$JOB_RESULT"
+```
+
+```powershell
+'{"summary":"3 new PRs","notify":true}' | Set-Content $env:JOB_RESULT
+```
+
+```python
+json.dump({"summary": "3 new PRs", "details": "- #12 …"}, open(os.environ["JOB_RESULT"], "w"))
+```
+
+The same help, with copy buttons, is in the job form under **How a script reports its result**.
+
+### Notifications
+
+A finished run shows a desktop notification: `✓ <name>`, `✗ <name>` or `⏱ <name>` with the run's summary.
+Skipped runs never notify. Each job picks when:
+
+| Notify | success, no result | success with a result | failed or timeout |
+|---|---|---|---|
+| **Always** (default) | yes | yes | yes |
+| **When there is a result or an error** | no | yes | yes |
+| **Failure only** | no | no | yes |
+| **Never** | no | no | no |
+
+"With a result" means the script wrote something to `$JOB_RESULT`. On success, a JSON result's `notify` overrides
+the table for that run: `true` notifies, `false` stays silent. On failure the job's setting applies. Runs stopped by
+quitting the app (`aborted`) never notify, since the app is closing. Every run is in the history either way.
+
+### Files and secrets
+
+Jobs, secrets and history are stored in the `userData` folder (see [Finding the Copilot CLI](#finding-the-copilot-cli)):
+`jobs.json`, `job-secrets.json` and `job-runs.json`. The app creates and changes jobs only through this page: there is
+no relay, MCP or session path to them. Like any app setting, the files can still be edited by a program running as
+your user; a saved job that doesn't have the expected shape is skipped and reported at the top of the page.
+
+Mark a variable **secret** to keep its value out of `jobs.json`. It is encrypted with the system keychain (Electron
+`safeStorage`) and stored in `job-secrets.json`. The form never shows it again, only `•••• (set)` and **Replace**.
+Secret values must be at least 4 characters, and they are replaced with `••••` in stdout, stderr, the summary, the
+details and the notification. Without a keychain (e.g. Linux with no keyring) secrets can't be saved, and the form
+says so. Put secrets in variables, never in the command line.
+
+Each run gets a private temp folder (`copilot-sessions-job-<random>`, mode 0700) holding the result file. It is
+removed when the run ends.
+
+### Azure DevOps
+
+A script reaches Azure DevOps the way it would from a terminal. The app passes its own environment on, so after
+`az login` in a terminal the `az` CLI works from a job too. Or put a personal access token in a secret variable such
+as `AZURE_DEVOPS_EXT_PAT`, which `az devops` reads by itself.
+
 ## Run
 
 Requires Node.js 18+ and an installed, signed-in Copilot CLI (`copilot --version`, `copilot login`).

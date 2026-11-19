@@ -1,5 +1,5 @@
 // Electron main process: owns the `copilot --acp` processes and bridges them to the window over IPC.
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, shell } from "electron";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, safeStorage, shell } from "electron";
 import { allowsAutomaticCheck, checkCandidates, createFileWatcher, createLocationTable, expandHome, isNetworkLocation, isRemote, localRealpath, resolvePreview, resolveTarget } from "./file-access.mjs";
 import { isInside, lexicalPath } from "./paths.mjs";
 import { execFile, execFileSync } from "node:child_process";
@@ -12,10 +12,13 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { AcpConnection } from "./acp.mjs";
 import { countUserMessages, deleteSession, describeCut, forkSession, isSessionId, purgeDeleted, sessionDir, truncateSession } from "./history.mjs";
 import { createUsagePusher } from "./usage.mjs";
+import { JobScheduler } from "./scheduler.mjs";
+import { scheduleInfo } from "./jobs.mjs";
 import { PendingRequests, childPrompt, findModelOption, limitError, reloadWarning, resolveConfig, unreportedChildren, withDeadline } from "./delegation.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 let win = null;
+let scheduler = null;
 let lister = null; // one long-lived connection used for session/list
 const open = new Map(); // sessionId -> { conn, cwd, permissions: Map<reqId, rpcId>, relay, configOptions, parentSessionId?, reported? }
 let permSeq = 0;
@@ -1099,6 +1102,63 @@ handle("shell:openPath", async (p) => {
   return shell.openPath(p);
 });
 
+// ---------- scheduled scripts ----------
+
+const jobNotifications = new Set(); // referenced until closed or clicked, or GC can drop the click handler
+const JOB_ICONS = { success: "✓", timeout: "⏱" };
+
+function sendToWindow(channel, payload) {
+  if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) win.webContents.send(channel, payload);
+}
+
+function openJobRun(payload) {
+  if (win && !win.isDestroyed()) {
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+    sendToWindow("jobs:openRun", payload);
+  } else {
+    createWindow(); // macOS: the app keeps running with no window
+    win.webContents.once("did-finish-load", () => sendToWindow("jobs:openRun", payload));
+  }
+}
+
+function startScheduler() {
+  scheduler = new JobScheduler({
+    dir: app.getPath("userData"),
+    secrets: {
+      available: () => safeStorage.isEncryptionAvailable(),
+      encrypt: (s) => safeStorage.encryptString(s).toString("base64"),
+      decrypt: (b) => safeStorage.decryptString(Buffer.from(b, "base64")),
+    },
+    onChanged: () => sendToWindow("jobs:changed"),
+    onRunFinished: (run, job, notify) => {
+      const payload = { jobId: job.id, runId: run.id, status: run.status };
+      sendToWindow("jobs:runFinished", payload);
+      if (!notify || !Notification.isSupported()) return;
+      const icon = JOB_ICONS[run.status] ?? "✗";
+      const n = new Notification({ title: `${icon} ${job.name}`, body: run.summary });
+      jobNotifications.add(n);
+      n.on("click", () => {
+        jobNotifications.delete(n);
+        openJobRun({ jobId: job.id, runId: run.id });
+      });
+      n.on("close", () => jobNotifications.delete(n));
+      n.show();
+    },
+  });
+  scheduler.start();
+}
+
+handle("jobs:list", () => scheduler.list());
+handle("jobs:save", (input) => scheduler.save(input));
+handle("jobs:delete", (id) => scheduler.remove(id));
+handle("jobs:setEnabled", (id, on) => scheduler.setEnabled(id, on));
+handle("jobs:runNow", (id) => scheduler.runNow(id));
+handle("jobs:runs", (jobId) => scheduler.runs(jobId));
+handle("jobs:run", (jobId, runId) => scheduler.run(jobId, runId));
+handle("jobs:previewSchedule", (expr) => scheduleInfo(expr, new Date(), 3));
+
 // ---------- window ----------
 
 function createWindow() {
@@ -1235,15 +1295,25 @@ if (!app.requestSingleInstanceLock()) {
     );
     purging = purgeDeleted().catch(() => {}); // what an earlier delete could not remove
     createWindow();
+    try {
+      startScheduler();
+    } catch (e) {
+      console.error("Scheduled jobs could not start:", e); // the Schedules page shows the error via jobs:list
+    }
     app.on("activate", () => BrowserWindow.getAllWindows().length === 0 && createWindow());
   });
   app.on("window-all-closed", () => {
     killAll();
-    if (process.platform !== "darwin") app.quit();
+    if (process.platform !== "darwin") {
+      scheduler?.abortAllSync();
+      app.quit();
+    }
     else leavingConfirmed = false; // the app keeps running and everything was stopped: the next quit asks afresh
   });
   app.on("before-quit", (e) => {
-    if (confirmLeavingChildren()) killAll();
-    else e.preventDefault();
+    if (confirmLeavingChildren()) {
+      killAll();
+      scheduler?.abortAllSync();
+    } else e.preventDefault();
   });
 }

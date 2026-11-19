@@ -322,3 +322,70 @@ span.img-chip.off { border: 1px dashed var(--border); }
 .fp-code code { font: inherit; }
 .fp-error { padding: 8px 12px; background: rgba(248, 81, 73, .15); color: var(--err); border-bottom: 1px solid var(--border); }
 .fp-error[hidden] { display: none; }
+
+/* ---------- schedules ---------- */
+/* the page replaces the chat area: every other child of #main is hidden, the sidebar keeps working */
+body.schedules-open #main > :not(#schedules) { display: none !important; }
+body.schedules-open #session-list .item.active { background: none; border-color: transparent; }
+#btn-schedules.active { background: #1f6feb33; border-color: #1f6feb66; }
+#schedules { flex: 1; overflow-y: auto; min-height: 0; }
+.sch-page { max-width: 920px; padding: 14px 18px; }
+.sch-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.sch-head h2 { margin: 0; font-size: 16px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sch-page h3 { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.sch-banner { border: 1px solid var(--err); background: #f8514914; color: var(--err); border-radius: 6px; padding: 8px 12px; margin-bottom: 10px; }
+.sch-error { color: var(--err); white-space: pre-wrap; font-size: 12.5px; }
+.sch-preview { margin: 0; }
+.sch-list { display: flex; flex-direction: column; gap: 6px; }
+.sch-row {
+  display: grid; grid-template-columns: auto minmax(140px, 1fr) 160px 110px auto; align-items: center; gap: 10px;
+  padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel);
+}
+.sch-row .m, .sch-page .m { color: var(--muted); font-size: 11.5px; }
+.sch-main { min-width: 0; }
+.sch-main b { display: block; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sch-col { font-size: 12.5px; white-space: nowrap; }
+.sch-actions { display: flex; align-items: center; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
+.dot.off { background: var(--muted); }
+.sch-link { color: var(--accent); cursor: pointer; text-decoration: none; }
+.sch-link:hover { text-decoration: underline; }
+.sch-run { display: flex; gap: 10px; align-items: baseline; }
+.sch-run .sch-date { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.sch-run .sch-sum { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* the form: the settings dialog's look */
+.sch-form { display: flex; flex-direction: column; gap: 12px; padding: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }
+.sch-form label, .sch-field { display: flex; flex-direction: column; gap: 6px; }
+.sch-form label.sch-check, .sch-form label.sch-day { flex-direction: row; align-items: center; gap: 4px; }
+.sch-inline { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.sch-inline > input:not([type]), .sch-inline > input[type="text"] { flex: 1; min-width: 200px; }
+.sch-sched-fields { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.sch-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 12.5px; }
+.sch-sched-fields .sch-mono { min-width: 220px; }
+.sch-form textarea { resize: vertical; }
+.sch-env { display: flex; flex-direction: column; gap: 6px; }
+.sch-env-row { display: grid; grid-template-columns: 180px 1fr auto auto; gap: 8px; align-items: center; }
+.sch-set { display: flex; align-items: center; gap: 8px; color: var(--muted); }
+.sch-help { border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; background: var(--bg); }
+.sch-help summary { cursor: pointer; color: var(--accent); }
+.sch-help p, .sch-help ul { margin: 8px 0; }
+.sch-help pre { background: var(--panel); border: 1px solid var(--border); padding: 8px 10px; border-radius: 6px; overflow-x: auto; margin: 4px 0 8px; }
+/* the run summary */
+.sch-notice { color: var(--muted); border: 1px solid var(--border); background: var(--panel); border-radius: 6px; padding: 8px 12px; }
+.sch-run-head { padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); margin-bottom: 10px; }
+.sch-meta { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--muted); font-size: 12.5px; }
+.sch-meta > :first-child { font-weight: 500; color: var(--text); }
+.sch-success > :first-child { color: var(--ok); }
+.sch-failed > :first-child, .sch-aborted > :first-child, .sch-timeout > :first-child { color: var(--err); }
+.sch-summary { margin: 8px 0 0; font-size: 14px; overflow-wrap: anywhere; user-select: text; }
+.sch-details { line-height: 1.5; overflow-wrap: anywhere; user-select: text; margin-bottom: 10px; }
+.sch-details > :first-child { margin-top: 0; }
+.sch-details pre { background: var(--panel); border: 1px solid var(--border); padding: 10px; border-radius: 6px; overflow-x: auto; }
+.sch-details code { background: var(--panel-2); padding: 1px 4px; border-radius: 4px; }
+.sch-details pre code { background: none; padding: 0; }
+.sch-details a { color: var(--accent); cursor: pointer; }
+.sch-details table { border-collapse: collapse; }
+.sch-details th, .sch-details td { border: 1px solid var(--border); padding: 4px 8px; }
+.sch-out { margin: 0 0 8px; }
+.sch-out summary { cursor: pointer; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+.sch-out .hint { margin: 6px 0; }
+.sch-out pre { background: var(--panel); border: 1px solid var(--border); padding: 8px 10px; border-radius: 6px; overflow: auto; max-height: 420px; margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
