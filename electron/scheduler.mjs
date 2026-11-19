@@ -64,7 +64,7 @@ export class JobScheduler {
             id: randomUUID(), jobId: job.id, trigger: "schedule", startedAt: new Date(t).toISOString(),
             durationMs: 0, status: "skipped", summary: "Skipped: the previous run is still going",
           }));
-          this.#onChanged();
+          this.#changed();
         } else {
           this.#launch(job, "schedule");
         }
@@ -113,7 +113,7 @@ export class JobScheduler {
     this.#write("job-secrets.json", this.#secretStore);
     this.#writeJobs();
     this.#lastChecked.set(job.id, this.#now());
-    this.#onChanged();
+    this.#changed();
     return this.#view(stored);
   }
 
@@ -121,7 +121,7 @@ export class JobScheduler {
     this.#find(id);
     const entry = this.#active.get(id);
     this.#active.delete(id); // before abort, so the run's `done` is ignored
-    entry?.handle.abort();
+    try { entry?.handle.abort(); } catch (e) { console.error("Aborting a scheduled job:", message(e)); }
     this.#jobs = this.#jobs.filter((j) => j.id !== id);
     delete this.#secretStore[id];
     delete this.#history[id];
@@ -129,7 +129,7 @@ export class JobScheduler {
     this.#write("job-secrets.json", this.#secretStore);
     this.#write("job-runs.json", this.#history);
     this.#writeJobs();
-    this.#onChanged();
+    this.#changed();
   }
 
   setEnabled(id, enabled) {
@@ -137,7 +137,7 @@ export class JobScheduler {
     job.enabled = Boolean(enabled);
     this.#lastChecked.set(id, this.#now());
     this.#writeJobs();
-    this.#onChanged();
+    this.#changed();
   }
 
   runNow(id) {
@@ -194,12 +194,12 @@ export class JobScheduler {
     }
     const entry = { runId, trigger, startedAt, handle };
     this.#active.set(job.id, entry);
-    this.#onChanged();
     handle.done.then((raw) => {
       if (this.#active.get(job.id) !== entry) return; // removed or aborted on quit
       this.#active.delete(job.id);
       this.#finish(finishRun(raw, ctx), this.#jobs.find((j) => j.id === job.id) ?? job);
     }).catch((e) => console.error(`Scheduled job "${job.name}" (${job.id}):`, message(e)));
+    this.#changed();
     return runId;
   }
 
@@ -210,7 +210,11 @@ export class JobScheduler {
     } catch (e) {
       console.error("onRunFinished:", message(e));
     }
-    this.#onChanged();
+    this.#changed();
+  }
+
+  #changed() {
+    try { this.#onChanged(); } catch (e) { console.error("onChanged:", message(e)); }
   }
 
   #push(run) {
@@ -244,14 +248,18 @@ export class JobScheduler {
 
   #ensure() {
     if (this.#loaded) return;
-    this.#loaded = true;
+    // All three reads must succeed before any state is set, so a failed read (EACCES, EISDIR, ...) throws again
+    // on the next call instead of letting a write replace the stores with empty data.
     fs.mkdirSync(this.#dir, { recursive: true });
     const jobs = this.#read("jobs.json", (d) => Array.isArray(d?.jobs));
     if (jobs.error) this.#loadError = `jobs.json could not be read (${jobs.error}). It was kept as ${jobs.keptAs}.`;
-    this.#jobs = jobs.data?.jobs ?? [];
     const isMap = (d) => d != null && typeof d === "object" && !Array.isArray(d);
-    this.#secretStore = this.#read("job-secrets.json", isMap).data ?? {};
-    this.#history = this.#read("job-runs.json", isMap).data ?? {};
+    const secrets = this.#read("job-secrets.json", isMap);
+    const history = this.#read("job-runs.json", isMap);
+    this.#jobs = jobs.data?.jobs ?? [];
+    this.#secretStore = secrets.data ?? {};
+    this.#history = history.data ?? {};
+    this.#loaded = true;
   }
 
   // Reads a store. A missing file is empty; an unreadable one is renamed aside.

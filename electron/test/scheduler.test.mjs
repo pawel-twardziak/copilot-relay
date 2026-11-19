@@ -25,7 +25,7 @@ function fakeRunner() {
   return { calls, startRun };
 }
 
-function setup(t, { available = true, decrypt, startRun } = {}) {
+function setup(t, { available = true, decrypt, startRun, onChanged } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scheduler-test-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const clock = { t: new Date(2026, 10, 19, 10, 5, 0).getTime() };
@@ -36,7 +36,7 @@ function setup(t, { available = true, decrypt, startRun } = {}) {
     dir,
     secrets: { available: () => available, encrypt: (s) => "enc:" + s, decrypt: decrypt ?? ((s) => s.slice(4)) },
     onRunFinished: (run, job, notify) => finished.push({ run, job, notify }),
-    onChanged: () => { changed++; },
+    onChanged: () => { changed++; onChanged?.(); },
     now: () => clock.t,
     startRun: startRun ?? runner.startRun,
   });
@@ -276,4 +276,43 @@ test("a decrypt failure records a failed run", async (t) => {
   assert.equal(run.status, "failed");
   assert.equal(run.summary, "cannot decrypt");
   assert.equal(finished.length, 1);
+});
+
+test("an unreadable store doesn't let a save overwrite the others", (t) => {
+  const { s, dir, make } = setup(t);
+  const job = s.save(jobInput(dir, { env: [{ name: "TOKEN", secret: true, value: "abcd1234" }] }));
+  const jobsText = fs.readFileSync(path.join(dir, "jobs.json"), "utf8");
+  const secretsText = fs.readFileSync(path.join(dir, "job-secrets.json"), "utf8");
+  fs.mkdirSync(path.join(dir, "job-runs.json")); // reading it fails with EISDIR
+  const fresh = make();
+  assert.throws(() => fresh.list(), { code: "EISDIR" });
+  assert.throws(() => fresh.save(jobInput(dir, { name: "Other" })), { code: "EISDIR" });
+  assert.equal(fs.readFileSync(path.join(dir, "jobs.json"), "utf8"), jobsText);
+  assert.equal(fs.readFileSync(path.join(dir, "job-secrets.json"), "utf8"), secretsText);
+  fs.rmdirSync(path.join(dir, "job-runs.json"));
+  assert.deepEqual(fresh.list().jobs.map((j) => j.id), [job.id]);
+  assert.equal(fresh.list().jobs[0].env[0].set, true);
+});
+
+test("a throwing onChanged doesn't leave a run stuck", async (t) => {
+  const { s, dir, runner } = setup(t, { onChanged: () => { throw new Error("renderer gone"); } });
+  const errors = t.mock.method(console, "error", () => {});
+  const job = s.save(jobInput(dir));
+  s.runNow(job.id);
+  runner.calls[0].finish();
+  await flush();
+  assert.equal(s.runs(job.id)[0].status, "success");
+  assert.equal(s.list().jobs[0].running, false);
+  assert.doesNotThrow(() => s.runNow(job.id));
+  assert.ok(errors.mock.callCount() >= 1);
+});
+
+test("remove survives a throwing abort", (t) => {
+  const { s, dir } = setup(t, { startRun: () => ({ abort() { throw new Error("kill failed"); }, done: new Promise(() => {}) }) });
+  const errors = t.mock.method(console, "error", () => {});
+  const job = s.save(jobInput(dir));
+  s.runNow(job.id);
+  s.remove(job.id);
+  assert.deepEqual(s.list().jobs, []);
+  assert.equal(errors.mock.callCount(), 1);
 });
