@@ -51,3 +51,24 @@ test("caps a flood of output to the tail", async () => {
   assert.ok(r.stdout.endsWith("END"));
   assert.ok(Buffer.byteLength(r.stdout) <= 65536 + 4096);
 });
+test("resolves even when the result folder cannot be fully removed", async () => {
+  const r = await startRun({ ...base, command: node(
+    "const fs=require('fs'),p=require('path');const d=p.join(p.dirname(process.env.JOB_RESULT),'ro');" +
+    "fs.mkdirSync(d);fs.writeFileSync(p.join(d,'f'),'x');fs.chmodSync(d,0o500);console.log(p.dirname(process.env.JOB_RESULT))") }).done;
+  assert.equal(r.reason, "exit");
+  const dir = r.stdout.trim();
+  try { fs.chmodSync(path.join(dir, "ro"), 0o700); } catch { /* ignore */ }
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+test("a background grandchild holding the pipes does not delay or change the result", async () => {
+  const t0 = Date.now();
+  const r = await startRun({ ...base, command: node(
+    `const c=require('child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'inherit'});` +
+    `c.unref();console.log('started '+c.pid)`) }).done;
+  assert.ok(Date.now() - t0 < 4000);
+  assert.equal(r.reason, "exit"); assert.equal(r.exitCode, 0);
+  assert.match(r.stdout, /started \d+/);
+  const grandchild = Number(r.stdout.match(/started (\d+)/)[1]);
+  await new Promise((res) => setTimeout(res, 300));
+  assert.throws(() => process.kill(grandchild, 0));
+});

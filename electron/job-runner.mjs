@@ -7,6 +7,7 @@ import { RESULT_CAP } from "./jobs.mjs";
 
 const KEEP = RESULT_CAP + 4096;
 const KILL_GRACE_MS = 3000;
+const EXIT_GRACE_MS = 1000;
 
 // Keeps the last KEEP bytes of a stream, dropping whole chunks from the front.
 function tailCollector() {
@@ -67,11 +68,20 @@ export function startRun({ command, cwd, env, timeoutMs, jobName, runId }) {
   try { isDir = fs.statSync(cwd).isDirectory(); } catch { /* missing */ }
   if (!isDir) return failed(`Folder does not exist: ${cwd}`);
 
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "copilot-sessions-job-"));
-  fs.chmodSync(dir, 0o700);
-  const resultFile = path.join(dir, "result");
-  fs.writeFileSync(resultFile, "", { mode: 0o600 });
-  const cleanup = () => fs.rmSync(dir, { recursive: true, force: true });
+  let dir = null;
+  let resultFile;
+  const cleanup = () => {
+    if (dir) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } }
+  };
+  try {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "copilot-sessions-job-"));
+    fs.chmodSync(dir, 0o700);
+    resultFile = path.join(dir, "result");
+    fs.writeFileSync(resultFile, "", { mode: 0o600 });
+  } catch (e) {
+    cleanup();
+    return failed(e.message);
+  }
 
   const out = tailCollector();
   const err = tailCollector();
@@ -80,6 +90,8 @@ export function startRun({ command, cwd, env, timeoutMs, jobName, runId }) {
   let killTimer = null;
   let timeoutTimer = null;
   let closed = false;
+  let graceTimer = null;
+  let swept = false;
 
   const started = Date.now();
   let child;
@@ -101,24 +113,44 @@ export function startRun({ command, cwd, env, timeoutMs, jobName, runId }) {
       settled = true;
       closed = true;
       clearTimeout(timeoutTimer);
-      clearTimeout(killTimer);
-      if (reason !== "exit") killTree(child, "SIGKILL"); // sweep stragglers in the group
-      const durationMs = Date.now() - started;
-      const o = out.result();
-      const e = err.result();
-      const r = readResult(resultFile);
+      clearTimeout(graceTimer);
+      if (!swept) clearTimeout(killTimer); // a sweep's SIGKILL timer stays armed (unref'd)
+      let result;
+      try {
+        if (reason !== "exit") killTree(child, "SIGKILL"); // sweep stragglers in the group
+        const o = out.result();
+        const e = err.result();
+        const r = readResult(resultFile);
+        result = {
+          reason, exitCode: spawnError ? null : exitCode, error: spawnError,
+          stdout: o.text, stderr: e.text, stdoutTruncated: o.truncated, stderrTruncated: e.truncated,
+          resultText: r.text, resultTruncated: r.truncated, durationMs: Date.now() - started,
+        };
+      } catch (e) {
+        result = { reason, exitCode: null, error: e.message, ...empty, durationMs: Date.now() - started };
+      }
       cleanup();
-      resolve({
-        reason, exitCode: spawnError ? null : exitCode, error: spawnError,
-        stdout: o.text, stderr: e.text, stdoutTruncated: o.truncated, stderrTruncated: e.truncated,
-        resultText: r.text, resultTruncated: r.truncated, durationMs,
-      });
+      resolve(result);
     };
     child.stdout.on("data", (b) => out.push(b));
     child.stderr.on("data", (b) => err.push(b));
     child.on("error", (e) => {
       spawnError = e.message;
       if (child.pid == null) finish(null); // never started: no close event follows
+    });
+    child.on("exit", () => {
+      if (reason !== "exit" || settled) return;
+      clearTimeout(timeoutTimer);
+      // A background process may keep the pipes open; give it a moment, then end everything it started.
+      graceTimer = setTimeout(() => {
+        swept = true;
+        killTree(child, "SIGTERM");
+        killTimer = setTimeout(() => killTree(child, "SIGKILL"), KILL_GRACE_MS);
+        killTimer.unref();
+        child.stdout.destroy();
+        child.stderr.destroy();
+      }, EXIT_GRACE_MS);
+      graceTimer.unref();
     });
     child.on("close", (code) => finish(code));
   });
