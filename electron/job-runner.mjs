@@ -3,13 +3,13 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { RESULT_CAP } from "./jobs.mjs";
+import { RESULT_CAP, TAIL_SLACK } from "./jobs.mjs";
 
-const KEEP = RESULT_CAP + 4096;
+const KEEP = RESULT_CAP + TAIL_SLACK;
 const KILL_GRACE_MS = 3000;
 const EXIT_GRACE_MS = 1000;
 
-// Keeps the last KEEP bytes of a stream, dropping whole chunks from the front.
+// Keeps the last KEEP bytes of a stream: drops whole chunks from the front while the rest still holds KEEP bytes.
 function tailCollector() {
   let chunks = [];
   let total = 0;
@@ -18,7 +18,7 @@ function tailCollector() {
     push(buf) {
       chunks.push(buf);
       total += buf.length;
-      while (total > KEEP && chunks.length > 1) {
+      while (chunks.length > 1 && total - chunks[0].length >= KEEP) {
         total -= chunks.shift().length;
         truncated = true;
       }

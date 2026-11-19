@@ -45,11 +45,13 @@ test("missing folder", async () => {
   assert.equal(r.exitCode, null); assert.match(r.error, /^Folder does not exist: /);
 });
 test("caps a flood of output to the tail", async () => {
+  // the last write arrives alone, as a chunk smaller than the kept tail
   const r = await startRun({ ...base, command: node(
-    "const b='x'.repeat(1<<20);for(let i=0;i<30;i++)process.stdout.write(b);process.stdout.write('END')") }).done;
+    "const b='x'.repeat(1<<20);for(let i=0;i<30;i++)process.stdout.write(b);" +
+    "setTimeout(()=>process.stdout.write('y'.repeat(8192)+'END'),300)") }).done;
   assert.equal(r.stdoutTruncated, true);
-  assert.ok(r.stdout.endsWith("END"));
-  assert.ok(Buffer.byteLength(r.stdout) <= 65536 + 4096);
+  assert.ok(r.stdout.endsWith("y".repeat(8192) + "END"));
+  assert.equal(Buffer.byteLength(r.stdout), 65536 + 4096);
 });
 test("resolves even when the result folder cannot be fully removed", async () => {
   const r = await startRun({ ...base, command: node(

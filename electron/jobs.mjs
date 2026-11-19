@@ -4,6 +4,8 @@ import { randomUUID } from "node:crypto";
 import { Cron } from "croner";
 
 export const RESULT_CAP = 65536;
+// The runner keeps this much more than RESULT_CAP, so masking and the cut below still leave a full RESULT_CAP.
+export const TAIL_SLACK = 4096;
 export const MASK = "••••";
 export const NOTIFY_MODES = ["always", "result", "failure", "never"];
 
@@ -61,9 +63,23 @@ export function shouldNotify(mode, status, hasResult, override) {
   return mode !== "never";
 }
 
+// A tail that starts at an arbitrary cut can begin with the end of a secret, which no longer matches when masking.
+// Drops the first `maxLen - 1` bytes (and up to the next newline when it is near), never splitting a character.
+function dropCutSecret(text, maxLen) {
+  if (maxLen < 2) return text;
+  const buf = Buffer.from(text, "utf8");
+  let start = Math.min(buf.length, maxLen - 1);
+  const nl = buf.indexOf(0x0a, start);
+  if (nl >= 0 && nl - start < TAIL_SLACK) start = nl + 1;
+  while (start < buf.length && (buf[start] & 0xc0) === 0x80) start++;
+  return buf.subarray(start).toString("utf8");
+}
+
 export function finishRun(raw, ctx) {
+  const maxLen = Math.max(0, ...(ctx.secrets ?? []).filter((x) => typeof x === "string").map((x) => Buffer.byteLength(x)));
   const prep = (text, truncated) => {
-    const capped = capTail(maskSecrets(text ?? "", ctx.secrets), RESULT_CAP);
+    const whole = truncated ? dropCutSecret(text ?? "", maxLen) : text ?? "";
+    const capped = capTail(maskSecrets(whole, ctx.secrets), RESULT_CAP);
     return { text: capped.text, truncated: capped.truncated || Boolean(truncated) };
   };
   const out = prep(raw.stdout, raw.stdoutTruncated);

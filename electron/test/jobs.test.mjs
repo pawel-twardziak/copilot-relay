@@ -80,6 +80,20 @@ test("masks before capping", () => {
   assert.ok(!run.stdout.includes("S3C"));
   assert.ok(Buffer.byteLength(run.stdout) <= RESULT_CAP);
 });
+test("finishRun: a secret cut by truncation leaves no fragment", () => {
+  const secret = "Zq7#Kp2!Wm9$Xr4@Lv6%";
+  const frag = secret.slice(7) + "\nline two\n" + "y".repeat(100) + secret + "\nend\n";
+  const run = finishRun(rawRun({
+    stdout: frag, stdoutTruncated: true, stderr: frag, stderrTruncated: true, resultText: frag, resultTruncated: true,
+  }), ctx({ secrets: [secret] }));
+  for (const text of [run.stdout, run.stderr, run.details]) {
+    for (let i = 0; i + 4 <= secret.length; i++) assert.ok(!text.includes(secret.slice(i, i + 4)), text);
+    assert.ok(text.endsWith("••••\nend\n"));
+  }
+  assert.equal(run.stdoutTruncated, true);
+  // not truncated: nothing is dropped
+  assert.equal(finishRun(rawRun({ stdout: frag }), ctx({ secrets: [secret] })).stdout.startsWith(secret.slice(7)), true);
+});
 test("finishRun: status and fallback summary", () => {
   assert.equal(finishRun(rawRun({ exitCode: 0 }), ctx()).status, "success");
   assert.equal(finishRun(rawRun({ exitCode: 2 }), ctx()).status, "failed");
