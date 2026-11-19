@@ -160,9 +160,10 @@ runs that fall in a time the app was closed are skipped, not caught up later.
   custom 5-field cron expression, in your local time zone; the form shows the next three run times. The command is
   one line run by the system shell (`/bin/sh -c` on Linux and macOS, `cmd.exe` on Windows) in the job's folder, so
   `python3 report.py --project X` or `./run.sh a b` both work. The timeout is 10 minutes unless you set it (1 to
-  1440); after it the whole process tree is killed and the run is marked `⏱ timeout`. When the script exits,
-  anything it left running in the background (e.g. `./server &`) is stopped after 1 second, so a job can't start
-  a long-lived process.
+  1440); after it the whole process tree is killed and the run is marked `⏱ timeout`. On Linux and macOS, when the
+  script exits, anything it left running in the background (e.g. `./server &`) is stopped after 1 second, so a job
+  can't start a long-lived process. On Windows the tree is only stopped while the script itself is still running
+  (timeout, quit, delete): once it has exited, its process ID could already belong to another program.
 - **One run per job at a time.** A due time while the previous run is still going is recorded as `⏭ skipped`.
   **▶ Run now** starts a run at once. Different jobs run in parallel. Quitting the app kills running jobs and
   records them as `aborted`; deleting a job kills its run and removes its history and secrets.

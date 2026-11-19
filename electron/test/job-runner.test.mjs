@@ -74,3 +74,18 @@ test("a background grandchild holding the pipes does not delay or change the res
   await new Promise((res) => setTimeout(res, 300));
   assert.throws(() => process.kill(grandchild, 0));
 });
+test("abort({ force: true }) kills a job that ignores SIGTERM at once and removes its folder", async (t) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "job-runner-test-"));
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const info = path.join(tmp, "info");
+  const h = startRun({ ...base, env: { INFO: info }, command: node(
+    "process.on('SIGTERM',()=>{});require('fs').writeFileSync(process.env.INFO,process.env.JOB_RESULT);setInterval(()=>{},1000)") });
+  while (!fs.existsSync(info) || fs.readFileSync(info, "utf8") === "") await new Promise((r) => setTimeout(r, 20));
+  const resultDir = path.dirname(fs.readFileSync(info, "utf8"));
+  const t0 = Date.now();
+  h.abort({ force: true });
+  assert.equal(fs.existsSync(resultDir), false); // removed synchronously
+  const r = await h.done;
+  assert.equal(r.reason, "aborted");
+  assert.ok(Date.now() - t0 < 1500, `took ${Date.now() - t0} ms`);
+});

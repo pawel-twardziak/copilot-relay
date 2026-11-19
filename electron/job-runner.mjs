@@ -1,5 +1,5 @@
 // Runs one scheduled script: spawn, capped output, timeout/abort with tree kill, result file.
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -48,11 +48,18 @@ function readResult(file) {
   }
 }
 
-function killTree(child, signal) {
+const isWin = process.platform === "win32";
+
+// POSIX signals the process group. Windows has no groups: taskkill walks the tree from the leader, and only while the
+// leader is alive (its PID could be reused afterwards). `sync` waits for taskkill, for when the app is quitting.
+function killTree(child, signal, sync = false) {
   if (child.pid == null) return;
   try {
-    if (process.platform === "win32") {
-      spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true }).on("error", () => {});
+    if (isWin) {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      const args = ["/pid", String(child.pid), "/T", "/F"];
+      if (sync) spawnSync("taskkill", args, { stdio: "ignore", windowsHide: true, timeout: 5000 });
+      else spawn("taskkill", args, { stdio: "ignore", windowsHide: true }).on("error", () => {});
     } else {
       process.kill(-child.pid, signal);
     }
@@ -117,7 +124,7 @@ export function startRun({ command, cwd, env, timeoutMs, jobName, runId }) {
       if (!swept) clearTimeout(killTimer); // a sweep's SIGKILL timer stays armed (unref'd)
       let result;
       try {
-        if (reason !== "exit") killTree(child, "SIGKILL"); // sweep stragglers in the group
+        if (reason !== "exit" && !isWin) killTree(child, "SIGKILL"); // sweep stragglers in the group
         const o = out.result();
         const e = err.result();
         const r = readResult(resultFile);
@@ -143,10 +150,12 @@ export function startRun({ command, cwd, env, timeoutMs, jobName, runId }) {
       clearTimeout(timeoutTimer);
       // A background process may keep the pipes open; give it a moment, then end everything it started.
       graceTimer = setTimeout(() => {
-        swept = true;
-        killTree(child, "SIGTERM");
-        killTimer = setTimeout(() => killTree(child, "SIGKILL"), KILL_GRACE_MS);
-        killTimer.unref();
+        if (!isWin) {
+          swept = true;
+          killTree(child, "SIGTERM");
+          killTimer = setTimeout(() => killTree(child, "SIGKILL"), KILL_GRACE_MS);
+          killTimer.unref();
+        }
         child.stdout.destroy();
         child.stderr.destroy();
       }, EXIT_GRACE_MS);
@@ -158,12 +167,21 @@ export function startRun({ command, cwd, env, timeoutMs, jobName, runId }) {
   const kill = (why) => {
     if (closed || reason !== "exit") return; // first of abort/timeout wins
     reason = why;
-    killTree(child, "SIGTERM");
+    killTree(child, "SIGTERM"); // on Windows this is already taskkill /F
+    if (isWin) return;
     killTimer = setTimeout(() => killTree(child, "SIGKILL"), KILL_GRACE_MS);
     killTimer.unref();
+  };
+  // The app is quitting: no timer would outlive it, so kill everything now and remove the run's folder.
+  const forceKill = () => {
+    if (closed) return;
+    if (reason === "exit") reason = "aborted";
+    clearTimeout(timeoutTimer);
+    killTree(child, "SIGKILL", true);
+    cleanup();
   };
   timeoutTimer = setTimeout(() => kill("timeout"), timeoutMs);
   timeoutTimer.unref();
 
-  return { abort: () => kill("aborted"), done };
+  return { abort: (opts) => (opts?.force ? forceKill() : kill("aborted")), done };
 }

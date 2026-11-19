@@ -161,7 +161,7 @@ export class JobScheduler {
     const entries = [...this.#active];
     this.#active.clear();
     for (const [jobId, e] of entries) {
-      try { e.handle.abort(); } catch (err) { console.error("Aborting a scheduled job:", message(err)); }
+      try { e.handle.abort({ force: true }); } catch (err) { console.error("Aborting a scheduled job:", message(err)); }
       this.#push(blankRun({
         id: e.runId, jobId, trigger: e.trigger, startedAt: e.startedAt,
         durationMs: Math.max(0, t - Date.parse(e.startedAt)), status: "aborted", summary: "Stopped because the app quit",

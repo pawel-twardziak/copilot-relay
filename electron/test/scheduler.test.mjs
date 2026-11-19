@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { startRun as realStartRun } from "../job-runner.mjs";
 import { JobScheduler } from "../scheduler.mjs";
 
 const flush = () => new Promise((r) => setImmediate(r));
@@ -20,7 +21,7 @@ function fakeRunner() {
         stdoutTruncated: false, stderrTruncated: false, resultText: null, resultTruncated: false, durationMs: 5, ...raw }),
     };
     calls.push(call);
-    return { abort() { call.aborted = true; call.finish({ reason: "aborted", exitCode: null }); }, done };
+    return { abort(opts) { call.aborted = true; call.abortOpts = opts; call.finish({ reason: "aborted", exitCode: null }); }, done };
   };
   return { calls, startRun };
 }
@@ -215,6 +216,7 @@ test("abortAllSync records aborted runs", async (t) => {
   clock.t += 2_000;
   s.abortAllSync();
   assert.equal(runner.calls[0].aborted, true);
+  assert.deepEqual(runner.calls[0].abortOpts, { force: true });
   const [run] = make().runs(job.id);
   assert.equal(run.status, "aborted");
   assert.equal(run.summary, "Stopped because the app quit");
@@ -222,6 +224,19 @@ test("abortAllSync records aborted runs", async (t) => {
   await flush();
   assert.equal(finished.length, 0);
   assert.equal(s.runs(job.id).length, 1);
+});
+
+test("abortAllSync kills a job that ignores SIGTERM right away", async (t) => {
+  const { s, dir } = setup(t, { startRun: realStartRun });
+  const pidFile = path.join(dir, "pid");
+  const code = "process.on('SIGTERM',()=>{});require('fs').writeFileSync(process.env.PID_FILE,String(process.pid));setInterval(()=>{},1000)";
+  const job = s.save(jobInput(dir, { command: `"${process.execPath}" -e ${JSON.stringify(code)}`, env: [{ name: "PID_FILE", value: pidFile }] }));
+  s.runNow(job.id);
+  while (!fs.existsSync(pidFile) || fs.readFileSync(pidFile, "utf8") === "") await new Promise((r) => setTimeout(r, 20));
+  const pid = Number(fs.readFileSync(pidFile, "utf8"));
+  s.abortAllSync();
+  await new Promise((r) => setTimeout(r, 300));
+  assert.throws(() => process.kill(pid, 0)); // gone, not waiting for a SIGKILL timer
 });
 
 test("corrupt jobs.json is kept aside", (t) => {
