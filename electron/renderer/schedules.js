@@ -56,6 +56,9 @@
   const envRowsFromJob = (env = []) =>
     env.map((e) => ({ name: e.name, value: e.secret ? "" : e.value, secret: e.secret, set: e.secret && e.set, origName: e.name, replace: false }));
 
+  /** True while a row stands for its stored secret (`•••• (set)`); a replaced or renamed one needs a new value. */
+  const showsStoredSecret = (r) => Boolean(r.secret && r.set && !r.replace && r.name.trim() === r.origName);
+
   /** A stored secret is kept (value omitted) unless it was replaced or renamed; otherwise the typed value is sent. */
   function envToInput(rows) {
     return rows
@@ -63,7 +66,7 @@
       .map((r) => {
         const name = r.name.trim();
         if (!r.secret) return { name, secret: false, value: r.value };
-        const keep = r.set && !r.replace && name === r.origName;
+        const keep = showsStoredSecret(r);
         return keep ? { name, secret: true } : { name, secret: true, value: r.value };
       });
   }
@@ -331,12 +334,21 @@
     const envList = h("div", { class: "sch-env" });
     function drawEnv() {
       envList.replaceChildren(...f.env.map((r, i) => {
-        const value = r.secret && r.set && !r.replace
+        const value = showsStoredSecret(r)
           ? h("span", { class: "sch-set" }, "•••• (set)", h("button", { type: "button", onclick: () => ((r.replace = true), drawEnv(), envList.children[i]?.querySelector(".sch-val")?.focus()) }, "Replace"))
           : h("input", { class: "sch-val", type: r.secret ? "password" : "text", value: r.value, placeholder: r.set ? "new value" : "value", spellcheck: "false", oninput: (e) => (r.value = e.target.value) });
         const lock = !st.secretsAvailable && !r.secret;
         return h("div", { class: "sch-env-row" },
-          h("input", { class: "sch-mono", value: r.name, placeholder: "NAME", spellcheck: "false", oninput: (e) => (r.name = e.target.value) }),
+          h("input", { class: "sch-mono", value: r.name, placeholder: "NAME", spellcheck: "false", oninput: (e) => {
+            const before = showsStoredSecret(r);
+            r.name = e.target.value;
+            if (showsStoredSecret(r) === before) return;
+            const caret = e.target.selectionStart;
+            drawEnv(); // a renamed secret needs a new value: show its input (or the stored one again)
+            const name = envList.children[i]?.querySelector(".sch-mono");
+            name?.focus();
+            name?.setSelectionRange(caret, caret);
+          } }),
           value,
           h("label", { class: "sch-day", title: lock ? NO_KEYCHAIN : "Store the value encrypted and never show it again" },
             h("input", { type: "checkbox", checked: r.secret, disabled: lock, onchange: (e) => ((r.secret = e.target.checked), drawEnv()) }), "secret"),
@@ -410,7 +422,7 @@
     api().onJobRunFinished(onChanged);
   }
 
-  const Schedules = { show, hide, openRun, init, isOpen: () => st.visible, schedFromExpr, schedToCron, envRowsFromJob, envToInput, formFromJob, buildPayload, lastRunText };
+  const Schedules = { show, hide, openRun, init, isOpen: () => st.visible, schedFromExpr, schedToCron, envRowsFromJob, envToInput, showsStoredSecret, formFromJob, buildPayload, lastRunText };
   globalThis.Schedules = Schedules;
   if (typeof module !== "undefined") module.exports = Schedules;
 })();

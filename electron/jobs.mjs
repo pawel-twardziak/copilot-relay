@@ -89,7 +89,10 @@ export function finishRun(raw, ctx) {
 
   let summary = parsed.hasResult ? parsed.summary : null;
   if (summary == null) {
-    summary = raw.error ?? lastLine(out.text) ?? `exit code ${raw.exitCode ?? "?"}`;
+    summary = raw.error ?? lastLine(out.text) ?? (
+      raw.reason === "timeout" ? (ctx.timeoutMinutes ? `Timed out after ${ctx.timeoutMinutes} min` : "Timed out")
+      : raw.signal ? `Killed by ${raw.signal}`
+      : `exit code ${raw.exitCode ?? "?"}`);
   }
   const status =
     raw.reason === "timeout" ? "timeout"

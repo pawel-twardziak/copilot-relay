@@ -115,7 +115,7 @@ export function startRun({ command, cwd, env, timeoutMs, jobName, runId }) {
 
   const done = new Promise((resolve) => {
     let settled = false;
-    const finish = (exitCode) => {
+    const finish = (exitCode, signal = null) => {
       if (settled) return;
       settled = true;
       closed = true;
@@ -129,7 +129,7 @@ export function startRun({ command, cwd, env, timeoutMs, jobName, runId }) {
         const e = err.result();
         const r = readResult(resultFile);
         result = {
-          reason, exitCode: spawnError ? null : exitCode, error: spawnError,
+          reason, exitCode: spawnError ? null : exitCode, signal: spawnError ? null : signal, error: spawnError,
           stdout: o.text, stderr: e.text, stdoutTruncated: o.truncated, stderrTruncated: e.truncated,
           resultText: r.text, resultTruncated: r.truncated, durationMs: Date.now() - started,
         };
@@ -161,7 +161,7 @@ export function startRun({ command, cwd, env, timeoutMs, jobName, runId }) {
       }, EXIT_GRACE_MS);
       graceTimer.unref();
     });
-    child.on("close", (code) => finish(code));
+    child.on("close", (code, signal) => finish(code, signal));
   });
 
   const kill = (why) => {

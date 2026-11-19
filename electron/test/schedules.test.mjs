@@ -46,6 +46,18 @@ test("a replaced or renamed stored secret sends the typed value", () => {
   assert.deepEqual(S.envToInput(renamed)[1], { name: "TOKEN2", secret: true, value: "" });
 });
 
+test("a stored secret shows as set only until it is replaced or renamed", () => {
+  const [, row] = S.envRowsFromJob(job().env);
+  assert.equal(S.showsStoredSecret(row), true);
+  row.name = "TOKEN2";
+  assert.equal(S.showsStoredSecret(row), false); // the form draws a value input instead
+  row.name = " TOKEN ";
+  assert.equal(S.showsStoredSecret(row), true);
+  row.replace = true;
+  assert.equal(S.showsStoredSecret(row), false);
+  assert.equal(S.showsStoredSecret(S.envRowsFromJob(job().env)[0]), false);
+});
+
 test("a new secret row always sends its value; blank rows are dropped; names are trimmed", () => {
   const rows = [
     { name: " K ", value: "", secret: true, set: false, origName: "", replace: false },

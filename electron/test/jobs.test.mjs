@@ -102,6 +102,10 @@ test("finishRun: status and fallback summary", () => {
   assert.equal(finishRun(rawRun({ exitCode: null, error: "Folder does not exist: /x" }), ctx()).summary, "Folder does not exist: /x");
   assert.equal(finishRun(rawRun({ stdout: "a\nlast line\n\n" }), ctx()).summary, "last line");
   assert.equal(finishRun(rawRun({ exitCode: 3 }), ctx()).summary, "exit code 3");
+  assert.equal(finishRun(rawRun({ reason: "timeout", exitCode: null }), ctx({ timeoutMinutes: 15 })).summary, "Timed out after 15 min");
+  assert.equal(finishRun(rawRun({ reason: "timeout", exitCode: null }), ctx()).summary, "Timed out");
+  assert.equal(finishRun(rawRun({ exitCode: null, signal: "SIGKILL" }), ctx()).summary, "Killed by SIGKILL");
+  assert.equal(finishRun(rawRun({ reason: "timeout", exitCode: null, stdout: "step 3\n" }), ctx()).summary, "step 3");
   const r = finishRun(rawRun({ resultText: '{"summary":"tok abcdefg","details":"abcdefg"}' }), ctx({ secrets: ["abcdefg"] }));
   assert.equal(r.summary, "tok ••••");
   assert.equal(r.details, "••••");

@@ -1295,7 +1295,11 @@ if (!app.requestSingleInstanceLock()) {
     );
     purging = purgeDeleted().catch(() => {}); // what an earlier delete could not remove
     createWindow();
-    startScheduler();
+    try {
+      startScheduler();
+    } catch (e) {
+      console.error("Scheduled jobs could not start:", e); // the Schedules page shows the error via jobs:list
+    }
     app.on("activate", () => BrowserWindow.getAllWindows().length === 0 && createWindow());
   });
   app.on("window-all-closed", () => {

@@ -121,6 +121,29 @@ test("missing folder fails the run", async (t) => {
   assert.equal(finished[0].notify, true);
 });
 
+test("a timeout with no output says how long it ran", async (t) => {
+  const { s, dir, runner } = setup(t);
+  const job = s.save(jobInput(dir, { timeoutMinutes: 7 }));
+  s.runNow(job.id);
+  runner.calls[0].finish({ reason: "timeout", exitCode: null, stdout: "" });
+  await flush();
+  assert.equal(s.runs(job.id)[0].summary, "Timed out after 7 min");
+});
+
+test("a failed history write still reports the run", async (t) => {
+  const { s, dir, runner, finished } = setup(t);
+  const errors = t.mock.method(console, "error", () => {});
+  const job = s.save(jobInput(dir));
+  s.runNow(job.id);
+  fs.mkdirSync(path.join(dir, "job-runs.json.tmp")); // the write fails with EISDIR
+  runner.calls[0].finish();
+  await flush();
+  assert.equal(finished.length, 1);
+  assert.equal(finished[0].run.status, "success");
+  assert.equal(s.list().jobs[0].running, false);
+  assert.ok(errors.mock.callCount() >= 1);
+});
+
 test("history keeps 20", async (t) => {
   const { s, dir, runner } = setup(t);
   const job = s.save(jobInput(dir));

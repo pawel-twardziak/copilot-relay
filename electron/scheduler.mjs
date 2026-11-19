@@ -175,7 +175,7 @@ export class JobScheduler {
   #launch(job, trigger) {
     const runId = randomUUID();
     const startedAt = new Date(this.#now()).toISOString();
-    const ctx = { jobId: job.id, runId, trigger, startedAt, secrets: [] };
+    const ctx = { jobId: job.id, runId, trigger, startedAt, timeoutMinutes: job.timeoutMinutes, secrets: [] };
     let handle;
     try {
       const env = {};
@@ -204,7 +204,7 @@ export class JobScheduler {
   }
 
   #finish(run, job) {
-    this.#record(run);
+    try { this.#record(run); } catch (e) { console.error("Saving the run history:", message(e)); }
     try {
       this.#onRunFinished(run, job, shouldNotify(job.notify, run.status, run.hasResult, run.notifyOverride));
     } catch (e) {

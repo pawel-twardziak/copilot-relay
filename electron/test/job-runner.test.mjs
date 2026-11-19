@@ -53,14 +53,22 @@ test("caps a flood of output to the tail", async () => {
   assert.ok(r.stdout.endsWith("y".repeat(8192) + "END"));
   assert.equal(Buffer.byteLength(r.stdout), 65536 + 4096);
 });
-test("resolves even when the result folder cannot be fully removed", async () => {
-  const r = await startRun({ ...base, command: node(
-    "const fs=require('fs'),p=require('path');const d=p.join(p.dirname(process.env.JOB_RESULT),'ro');" +
-    "fs.mkdirSync(d);fs.writeFileSync(p.join(d,'f'),'x');fs.chmodSync(d,0o500);console.log(p.dirname(process.env.JOB_RESULT))") }).done;
+test("resolves even when the result folder cannot be fully removed", async (t) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "job-runner-test-"));
+  const info = path.join(tmp, "dir");
+  t.after(() => {
+    const dir = fs.existsSync(info) ? fs.readFileSync(info, "utf8") : "";
+    if (dir) {
+      try { fs.chmodSync(path.join(dir, "ro"), 0o700); } catch { /* ignore */ }
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+  const r = await startRun({ ...base, env: { INFO: info }, command: node(
+    "const fs=require('fs'),p=require('path');const dir=p.dirname(process.env.JOB_RESULT);fs.writeFileSync(process.env.INFO,dir);" +
+    "const d=p.join(dir,'ro');fs.mkdirSync(d);fs.writeFileSync(p.join(d,'f'),'x');fs.chmodSync(d,0o500)") }).done;
   assert.equal(r.reason, "exit");
-  const dir = r.stdout.trim();
-  try { fs.chmodSync(path.join(dir, "ro"), 0o700); } catch { /* ignore */ }
-  fs.rmSync(dir, { recursive: true, force: true });
+  assert.equal(r.exitCode, 0);
 });
 test("a background grandchild holding the pipes does not delay or change the result", async () => {
   const t0 = Date.now();
@@ -88,4 +96,9 @@ test("abort({ force: true }) kills a job that ignores SIGTERM at once and remove
   const r = await h.done;
   assert.equal(r.reason, "aborted");
   assert.ok(Date.now() - t0 < 1500, `took ${Date.now() - t0} ms`);
+});
+test("reports the signal that killed the script", { skip: process.platform === "win32" }, async () => {
+  const r = await startRun({ ...base, command: "kill -9 $$" }).done;
+  assert.equal(r.exitCode, null);
+  assert.equal(r.signal, "SIGKILL");
 });
