@@ -94,6 +94,44 @@ test("finishRun: a secret cut by truncation leaves no fragment", () => {
   // not truncated: nothing is dropped
   assert.equal(finishRun(rawRun({ stdout: frag }), ctx({ secrets: [secret] })).stdout.startsWith(secret.slice(7)), true);
 });
+const leaks = (secret, text) => {
+  const b = Buffer.from(secret);
+  const out = Buffer.from(text);
+  for (let i = 0; i + 4 <= b.length; i++) if (out.includes(b.subarray(i, i + 4))) return true;
+  for (let i = 0; i + 4 <= secret.length; i++) if (text.includes(secret.slice(i, i + 4))) return true;
+  return false;
+};
+test("finishRun: a whole secret just after the cut leaves no fragment without a nearby newline", () => {
+  const secret = "tok_test_0123456789abcdefghijklmnopqrstuvwxyzABCD";
+  const raw = Buffer.from("xxxxx" + secret + "y".repeat(5000));
+  const run = finishRun(rawRun({
+    stdout: raw, stdoutTruncated: true, stderr: raw, stderrTruncated: true, resultText: raw, resultTruncated: true,
+  }), ctx({ secrets: [secret] }));
+  for (const text of [run.stdout, run.stderr, run.details]) {
+    assert.equal(leaks(secret, text), false, text.slice(0, 20));
+    assert.ok(text.endsWith("y".repeat(4000)));
+  }
+});
+test("finishRun: a multi-byte secret cut inside its first character leaves no fragment", () => {
+  const secret = "\u{1F511}abcdefghijklmnopqrstuvwxyz0123";
+  const raw = Buffer.concat([Buffer.from(secret).subarray(1), Buffer.from("z".repeat(5000))]);
+  const run = finishRun(rawRun({ stdout: raw, stdoutTruncated: true }), ctx({ secrets: [secret] }));
+  assert.equal(leaks(secret, run.stdout), false, run.stdout.slice(0, 20));
+  assert.ok(run.stdout.endsWith("z".repeat(4000)));
+});
+test("finishRun: a chain of secrets across the cut leaves no fragment", () => {
+  const s = "tok_test_0123456789abcdefghijklmnopqrstuvwxyzABCD";
+  const t = "ABCD0123456789zyxwvu"; // overlaps the end of s
+  const raw = Buffer.from("xxxxx" + s + "0123456789zyxwvu" + "y".repeat(5000)); // t starts after the first cut
+  const run = finishRun(rawRun({ stdout: raw, stdoutTruncated: true }), ctx({ secrets: [t, s] }));
+  assert.equal(leaks(s, run.stdout), false, run.stdout.slice(0, 20));
+  assert.equal(leaks(t, run.stdout), false, run.stdout.slice(0, 20));
+  // back to back: the second copy starts at the moved cut and is masked whole
+  const two = finishRun(rawRun({ stdout: Buffer.from("x" + s + s + "y".repeat(5000)), stdoutTruncated: true }),
+    ctx({ secrets: [s] }));
+  assert.equal(leaks(s, two.stdout), false, two.stdout.slice(0, 20));
+  assert.ok(two.stdout.startsWith("••••y"));
+});
 test("finishRun: status and fallback summary", () => {
   assert.equal(finishRun(rawRun({ exitCode: 0 }), ctx()).status, "success");
   assert.equal(finishRun(rawRun({ exitCode: 2 }), ctx()).status, "failed");

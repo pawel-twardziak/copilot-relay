@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { startRun } from "../job-runner.mjs";
+import { RESULT_CAP, TAIL_SLACK, finishRun } from "../jobs.mjs";
 
 const node = (code) => `"${process.execPath}" -e ${JSON.stringify(code)}`;
 const base = { cwd: os.tmpdir(), env: {}, timeoutMs: 10_000, jobName: "t", runId: "r1" };
@@ -12,25 +13,25 @@ const base = { cwd: os.tmpdir(), env: {}, timeoutMs: 10_000, jobName: "t", runId
 test("exit code, stdout and stderr", async () => {
   const r = await startRun({ ...base, command: node("console.log('hi');console.error('oops');process.exit(3)") }).done;
   assert.equal(r.reason, "exit"); assert.equal(r.exitCode, 3);
-  assert.equal(r.stdout.trim(), "hi"); assert.equal(r.stderr.trim(), "oops");
+  assert.equal(String(r.stdout).trim(), "hi"); assert.equal(String(r.stderr).trim(), "oops");
   assert.equal(r.error, null); assert.ok(r.durationMs >= 0);
 });
 test("env and $JOB_RESULT", async () => {
   const r = await startRun({ ...base, env: { FOO: "bar" }, command: node(
     "require('fs').writeFileSync(process.env.JOB_RESULT, process.env.FOO + ' ' + process.env.JOB_NAME + ' ' + process.env.JOB_RUN_ID)") }).done;
-  assert.equal(r.resultText, "bar t r1");
+  assert.equal(String(r.resultText), "bar t r1");
   assert.equal(r.resultTruncated, false);
 });
 test("result folder is removed after the run", async () => {
   const r = await startRun({ ...base, command: node("console.log(process.env.JOB_RESULT)") }).done;
-  assert.equal(fs.existsSync(path.dirname(r.stdout.trim())), false);
+  assert.equal(fs.existsSync(path.dirname(String(r.stdout).trim())), false);
 });
 test("timeout kills the whole tree", async () => {
   const r = await startRun({ ...base, timeoutMs: 500, command: node(
     `const c=require('child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});` +
     `console.log(c.pid);setInterval(()=>{},1000)`) }).done;
   assert.equal(r.reason, "timeout");
-  const grandchild = Number(r.stdout.trim());
+  const grandchild = Number(String(r.stdout).trim());
   await new Promise((res) => setTimeout(res, 300));
   assert.throws(() => process.kill(grandchild, 0)); // gone
 });
@@ -50,8 +51,21 @@ test("caps a flood of output to the tail", async () => {
     "const b='x'.repeat(1<<20);for(let i=0;i<30;i++)process.stdout.write(b);" +
     "setTimeout(()=>process.stdout.write('y'.repeat(8192)+'END'),300)") }).done;
   assert.equal(r.stdoutTruncated, true);
-  assert.ok(r.stdout.endsWith("y".repeat(8192) + "END"));
-  assert.equal(Buffer.byteLength(r.stdout), 65536 + 4096);
+  assert.ok(String(r.stdout).endsWith("y".repeat(8192) + "END"));
+  assert.equal(r.stdout.length, 65536 + 4096);
+});
+test("a multi-byte secret cut by the output cap leaves no fragment", async () => {
+  const secret = "\u{1F511}abcdefghijklmnopqrstuvwxyz0123";
+  // the kept tail starts one byte into the secret, with no newline anywhere; masking the later copies shrinks the
+  // text below RESULT_CAP, so the final cap does not hide the start
+  const after = RESULT_CAP + TAIL_SLACK - (Buffer.byteLength(secret) - 1);
+  const s = JSON.stringify(secret);
+  const r = await startRun({ ...base, command: node(
+    `const m=(${s}+'z').repeat(300);process.stdout.write('x'.repeat(1000)+${s}+'z'.repeat(${after}-Buffer.byteLength(m))+m)`) }).done;
+  assert.equal(r.stdoutTruncated, true);
+  const run = finishRun(r, { jobId: "j", runId: "r1", trigger: "manual", startedAt: "", secrets: [secret] });
+  for (let i = 0; i + 4 <= secret.length; i++) assert.ok(!run.stdout.includes(secret.slice(i, i + 4)), run.stdout.slice(0, 20));
+  assert.ok(run.stdout.startsWith("z"));
 });
 test("resolves even when the result folder cannot be fully removed", async (t) => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "job-runner-test-"));
@@ -77,8 +91,8 @@ test("a background grandchild holding the pipes does not delay or change the res
     `c.unref();console.log('started '+c.pid)`) }).done;
   assert.ok(Date.now() - t0 < 4000);
   assert.equal(r.reason, "exit"); assert.equal(r.exitCode, 0);
-  assert.match(r.stdout, /started \d+/);
-  const grandchild = Number(r.stdout.match(/started (\d+)/)[1]);
+  assert.match(String(r.stdout), /started \d+/);
+  const grandchild = Number(String(r.stdout).match(/started (\d+)/)[1]);
   await new Promise((res) => setTimeout(res, 300));
   assert.throws(() => process.kill(grandchild, 0));
 });
