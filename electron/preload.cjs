@@ -65,6 +65,17 @@ contextBridge.exposeInMainWorld("api", {
       return "";
     }
   },
+  jobsList: () => call("jobs:list"),
+  jobsSave: (input) => call("jobs:save", input),
+  jobsDelete: (id) => call("jobs:delete", id),
+  jobsSetEnabled: (id, on) => call("jobs:setEnabled", id, on),
+  jobsRunNow: (id) => call("jobs:runNow", id),
+  jobsRuns: (jobId) => call("jobs:runs", jobId),
+  jobsRun: (jobId, runId) => call("jobs:run", jobId, runId),
+  jobsPreview: (expr) => call("jobs:previewSchedule", expr),
+  onJobsChanged: on("jobs:changed"),
+  onJobRunFinished: on("jobs:runFinished"),
+  onJobOpenRun: on("jobs:openRun"),
   onUpdate: on("acp:update"),
   onPermission: on("acp:permission"),
   onExit: on("acp:exit"),
