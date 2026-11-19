@@ -67,3 +67,16 @@ test("ago boundaries", () => {
   assert.equal(ago(at(3 * 86400_000 + 5000), now), "3 d ago");
   assert.equal(ago(at(-5000), now), "just now");
 });
+
+test("weekdays: empty days throws, duplicates collapse, full week round-trips", () => {
+  assert.throws(() => presetToCron({ kind: "weekdays", days: [], hh: 8, mm: 0 }), /Pick at least one day\./);
+  assert.equal(presetToCron({ kind: "weekdays", days: [1, 1, 3], hh: 8, mm: 5 }), "5 8 * * 1,3");
+  assert.equal(describeSchedule("0 8 * * 1,2,3,4,5"), "weekdays at 08:00");
+  const all = { kind: "weekdays", days: [0, 1, 2, 3, 4, 5, 6], hh: 8, mm: 0 };
+  assert.deepEqual(cronToPreset(presetToCron(all)), all);
+});
+
+test("does not leak helper names as globals", () => {
+  assert.equal(typeof globalThis.ago, "undefined");
+  assert.equal(typeof globalThis.ScheduleForm, "object");
+});
