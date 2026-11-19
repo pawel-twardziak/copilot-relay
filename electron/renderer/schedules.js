@@ -1,9 +1,10 @@
-// Schedules page: the job list, the job form with its result-contract help, and a job's run history.
-// Loaded as a classic <script> after schedule-form.js and before app.js (sets globalThis.Schedules); the pure helpers
-// are also loaded via require() in tests. Nothing here touches the DOM, AppUi or window.api at load time.
+// Schedules page: the job list, the job form with its result-contract help, and a run's summary (schedule-run.js).
+// Loaded as a classic <script> after schedule-form.js and schedule-run.js, before app.js (sets globalThis.Schedules);
+// the pure helpers are also loaded via require() in tests. Nothing here touches the DOM, AppUi or window.api at load time.
 "use strict";
 (function () {
   const SF = () => globalThis.ScheduleForm;
+  const SR = () => globalThis.ScheduleRun;
   const STATUS_ICON = { success: "✓", failed: "✗", aborted: "✗", timeout: "⏱", skipped: "⏭" };
   const NO_KEYCHAIN = "Secrets can't be saved: the system keychain is not available.";
   const RESULT_HINT = "The script must write to $JOB_RESULT, otherwise it only notifies about errors.";
@@ -95,7 +96,11 @@
   // ---------------------------------------------------------------------------
   // page
 
-  const st = { visible: false, mode: "list", jobId: null, runId: null, form: null, confirm: null, timer: null, seq: 0, secretsAvailable: true };
+  // mode: "list" | "form" | "run". notice: a one-off message on the list. open: the run page's toggled output blocks.
+  const st = {
+    visible: false, mode: "list", jobId: null, runId: null, form: null, confirm: null, notice: null, open: new Map(),
+    timer: null, seq: 0, secretsAvailable: true,
+  };
   const ui = () => globalThis.AppUi;
   const api = () => globalThis.api;
   const root = () => document.getElementById("schedules");
@@ -107,12 +112,13 @@
     document.body.classList.toggle("schedules-open", on);
     document.getElementById("btn-schedules")?.classList.toggle("active", on);
     clearInterval(st.timer);
-    st.timer = on ? setInterval(() => st.mode !== "form" && render(), REFRESH_MS) : null;
+    st.timer = on ? setInterval(() => st.mode === "list" && render(), REFRESH_MS) : null; // the list's "… ago" times
   }
 
   /** Show the page; an open form stays open (with what was typed), anything else goes back to the list. */
   function show() {
     setVisible(true);
+    st.notice = null;
     if (st.mode !== "form") st.mode = "list";
     render();
   }
@@ -121,9 +127,9 @@
     if (st.visible) setVisible(false);
   }
 
-  /** Task 8 turns this into the run summary; for now it shows the job's history. */
+  /** Show the page with a run's summary, from any state: an open form is discarded (a notification click lands here). */
   function openRun(jobId, runId) {
-    Object.assign(st, { mode: "history", jobId, runId, form: null });
+    Object.assign(st, { mode: "run", jobId, runId, form: null, confirm: null, notice: null, open: new Map() });
     setVisible(true);
     render();
   }
@@ -136,8 +142,8 @@
   async function render() {
     const seq = ++st.seq;
     try {
-      const el = st.mode === "form" ? renderForm() : st.mode === "history" ? await renderHistory() : await renderList();
-      if (seq === st.seq) root().replaceChildren(el);
+      const el = st.mode === "form" ? renderForm() : st.mode === "run" ? await renderRun() : await renderList();
+      if (seq === st.seq && el) root().replaceChildren(el);
     } catch (e) {
       if (seq === st.seq) root().replaceChildren(page("Schedules", null, ui().h("p", { class: "sch-error" }, e.message)));
     }
@@ -191,38 +197,40 @@
       "Schedules",
       h("button", { class: "primary", onclick: () => openForm(null) }, "+ New job"),
       loadError && h("div", { class: "sch-banner" }, `Couldn't read the saved jobs: ${loadError}. The file was kept aside.`),
+      st.notice && h("p", { class: "sch-notice" }, st.notice),
       status,
       jobs.length ? h("div", { class: "sch-list" }, jobs.map(row)) : h("p", { class: "hint" }, "No scheduled jobs yet."),
     );
   }
 
-  async function renderHistory() {
+  /** The run summary; a job or run that is gone (deleted, or dropped from the 20-run history) falls back to the list. */
+  async function renderRun() {
     const { h } = ui();
-    const [{ jobs }, runs] = await Promise.all([api().jobsList(), api().jobsRuns(st.jobId)]);
-    const job = jobs.find((j) => j.id === st.jobId);
+    const { jobId, runId } = st;
+    const [{ jobs }, run, runs] = await Promise.all([api().jobsList(), api().jobsRun(jobId, runId), api().jobsRuns(jobId)]);
+    const job = jobs.find((j) => j.id === jobId);
+    if (!job || !run) {
+      if (st.mode !== "run" || st.jobId !== jobId || st.runId !== runId) return null; // a newer render took over
+      Object.assign(st, { mode: "list", notice: SR().GONE });
+      return renderList();
+    }
     const back = h("button", { onclick: () => ((st.mode = "list"), render()) }, "← Back");
-    const item = (r) =>
-      h(
-        "button",
-        { class: "item sch-run" + (r.id === st.runId ? " active" : ""), title: r.summary ?? "", onclick: () => openRun(st.jobId, r.id) },
-        h("span", { class: "sch-icon" }, STATUS_ICON[r.status] ?? "?"),
-        h("span", { class: "sch-date" }, when(r.startedAt)),
-        h("span", { class: "sch-sum" }, r.summary ?? ""),
-      );
-    return page(
-      job ? job.name : "Job not found",
-      back,
-      h("h3", {}, "History"),
-      runs.length ? h("div", { class: "sch-list" }, runs.map(item)) : h("p", { class: "hint" }, "No runs yet."),
-    );
+    return page(job.name, back, ...SR().runView({
+      run, runs, open: st.open,
+      onHelp: () => openForm(job, { help: true }),
+      onOpenRun: (id) => openRun(jobId, id),
+      onLink: (href) => api().openLink(job.cwd, href),
+    }));
   }
 
   // ---------------------------------------------------------------------------
   // form
 
-  function openForm(job) {
-    Object.assign(st, { mode: "form", form: formFromJob(job), confirm: null });
+  /** help: open the result-contract panel and scroll to it (the run page's "How to report a result" link). */
+  function openForm(job, { help = false } = {}) {
+    Object.assign(st, { mode: "form", form: { ...formFromJob(job), helpOpen: help }, confirm: null, notice: null });
     render();
+    if (help) root().querySelector(".sch-help")?.scrollIntoView({ block: "start" });
   }
 
   function closeForm() {
@@ -313,7 +321,8 @@
         if (dir) cwd.value = f.cwd = dir;
       } catch (e) { showErr(e.message); }
     } }, "Pick…");
-    const help = helpPanel();
+    const help = helpPanel(f.helpOpen);
+    help.addEventListener("toggle", () => (f.helpOpen = help.open));
     const resultHint = h("p", { class: "hint" }, RESULT_HINT, " ", h("a", { class: "sch-link", onclick: () => ((help.open = true), help.scrollIntoView({ block: "nearest" })) }, "How to report a result"));
     const notify = select(Object.entries(SF().NOTIFY_LABELS), f.notify, (v) => ((f.notify = v), (resultHint.hidden = v !== "result")));
     resultHint.hidden = f.notify !== "result";
@@ -372,13 +381,13 @@
     return page(f.id ? `Edit "${f.name}"` : "New job", null, form);
   }
 
-  function helpPanel() {
+  function helpPanel(open) {
     const { h, copyBtn } = ui();
     const example = ([lang, code]) =>
       h("div", {}, h("div", { class: "m" }, lang), h("div", { class: "codewrap" }, h("pre", {}, h("code", {}, code)), copyBtn(() => code)));
     return h(
       "details",
-      { class: "sch-help" },
+      { class: "sch-help", open },
       h("summary", {}, HELP_SUMMARY),
       h("p", {}, "The app sets these variables for every run:"),
       h("ul", {},

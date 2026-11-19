@@ -2177,6 +2177,12 @@ $("#btn-schedules").addEventListener("click", () => {
   Schedules.show();
 });
 Schedules.init();
+// a notification click: the same path as ⏰, straight to the run (from any state, a session or an open job form too).
+// Registered at load time, so the message main sends after a fresh window's did-finish-load is not missed.
+api.onJobOpenRun(({ jobId, runId }) => {
+  filePreview.close();
+  Schedules.openRun(jobId, runId);
+});
 $("#search").addEventListener("input", renderList);
 // Left Shift for message recall (an arrow key's event doesn't say which Shift is down). Tracked on the whole document,
 // in the capture phase, so a Shift pressed before the message box got focus counts; reset whenever it can't be down.

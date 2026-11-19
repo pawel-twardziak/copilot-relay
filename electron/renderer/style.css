@@ -326,7 +326,7 @@ span.img-chip.off { border: 1px dashed var(--border); }
 /* ---------- schedules ---------- */
 /* the page replaces the chat area: every other child of #main is hidden, the sidebar keeps working */
 body.schedules-open #main > :not(#schedules) { display: none !important; }
-body.schedules-open .item.active { background: none; border-color: transparent; }
+body.schedules-open #session-list .item.active { background: none; border-color: transparent; }
 #btn-schedules.active { background: #1f6feb33; border-color: #1f6feb66; }
 #schedules { flex: 1; overflow-y: auto; min-height: 0; }
 .sch-page { max-width: 920px; padding: 14px 18px; }
@@ -369,3 +369,23 @@ body.schedules-open .item.active { background: none; border-color: transparent; 
 .sch-help summary { cursor: pointer; color: var(--accent); }
 .sch-help p, .sch-help ul { margin: 8px 0; }
 .sch-help pre { background: var(--panel); border: 1px solid var(--border); padding: 8px 10px; border-radius: 6px; overflow-x: auto; margin: 4px 0 8px; }
+/* the run summary */
+.sch-notice { color: var(--muted); border: 1px solid var(--border); background: var(--panel); border-radius: 6px; padding: 8px 12px; }
+.sch-run-head { padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); margin-bottom: 10px; }
+.sch-meta { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--muted); font-size: 12.5px; }
+.sch-meta > :first-child { font-weight: 500; color: var(--text); }
+.sch-success > :first-child { color: var(--ok); }
+.sch-failed > :first-child, .sch-aborted > :first-child, .sch-timeout > :first-child { color: var(--err); }
+.sch-summary { margin: 8px 0 0; font-size: 14px; overflow-wrap: anywhere; user-select: text; }
+.sch-details { line-height: 1.5; overflow-wrap: anywhere; user-select: text; margin-bottom: 10px; }
+.sch-details > :first-child { margin-top: 0; }
+.sch-details pre { background: var(--panel); border: 1px solid var(--border); padding: 10px; border-radius: 6px; overflow-x: auto; }
+.sch-details code { background: var(--panel-2); padding: 1px 4px; border-radius: 4px; }
+.sch-details pre code { background: none; padding: 0; }
+.sch-details a { color: var(--accent); cursor: pointer; }
+.sch-details table { border-collapse: collapse; }
+.sch-details th, .sch-details td { border: 1px solid var(--border); padding: 4px 8px; }
+.sch-out { margin: 0 0 8px; }
+.sch-out summary { cursor: pointer; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+.sch-out .hint { margin: 6px 0; }
+.sch-out pre { background: var(--panel); border: 1px solid var(--border); padding: 8px 10px; border-radius: 6px; overflow: auto; max-height: 420px; margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
