@@ -196,7 +196,7 @@
     return page(
       "Schedules",
       h("button", { class: "primary", onclick: () => openForm(null) }, "+ New job"),
-      loadError && h("div", { class: "sch-banner" }, `Couldn't read the saved jobs: ${loadError}. The file was kept aside.`),
+      loadError && h("div", { class: "sch-banner" }, loadError),
       st.notice && h("p", { class: "sch-notice" }, st.notice),
       status,
       jobs.length ? h("div", { class: "sch-list" }, jobs.map(row)) : h("p", { class: "hint" }, "No scheduled jobs yet."),

@@ -245,12 +245,25 @@ test("corrupt jobs.json is kept aside", (t) => {
   const warn = t.mock.method(console, "warn", () => {});
   s.start();
   s.stop();
-  assert.match(s.list().loadError, /jobs\.json\.corrupt-/);
+  assert.match(s.list().loadError, /^jobs\.json could not be read \(.+\)\. It was kept as jobs\.json\.corrupt-\d+\.$/);
   assert.equal(warn.mock.callCount(), 1);
   assert.ok(fs.readdirSync(dir).some((f) => f.startsWith("jobs.json.corrupt-")));
   assert.equal(fs.existsSync(path.join(dir, "jobs.json")), false);
   s.save(jobInput(dir));
   assert.equal(JSON.parse(fs.readFileSync(path.join(dir, "jobs.json"), "utf8")).jobs.length, 1);
+});
+
+test("an invalid stored job is skipped and reported, and jobs.json is left alone", (t) => {
+  const { s, dir } = setup(t);
+  const good = { id: "good", name: "Good", enabled: true, schedule: { kind: "cron", expr: "* * * * *" }, command: "echo",
+    cwd: dir, env: [{ name: "A", secret: false, value: "1" }, { name: "T", secret: true }], timeoutMinutes: 10, notify: "always" };
+  const text = JSON.stringify({ version: 1, jobs: [{ ...good, id: "bad", name: "Bad", command: 42 }, good] });
+  fs.writeFileSync(path.join(dir, "jobs.json"), text);
+  const warn = t.mock.method(console, "warn", () => {});
+  assert.deepEqual(s.list().jobs.map((j) => j.id), ["good"]);
+  assert.equal(warn.mock.callCount(), 1);
+  assert.equal(s.list().loadError, '1 saved job was invalid and was skipped: "Bad": Command is required.');
+  assert.equal(fs.readFileSync(path.join(dir, "jobs.json"), "utf8"), text);
 });
 
 test("corrupt job-runs.json is kept aside without a load error", (t) => {

@@ -3,7 +3,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { finishRun, isDue, scheduleInfo, shouldNotify, validateJob } from "./jobs.mjs";
+import { checkStoredJob, finishRun, isDue, scheduleInfo, shouldNotify, validateJob } from "./jobs.mjs";
 import { startRun as realStartRun } from "./job-runner.mjs";
 
 const HISTORY = 20;
@@ -256,7 +256,24 @@ export class JobScheduler {
     const isMap = (d) => d != null && typeof d === "object" && !Array.isArray(d);
     const secrets = this.#read("job-secrets.json", isMap);
     const history = this.#read("job-runs.json", isMap);
-    this.#jobs = jobs.data?.jobs ?? [];
+    this.#jobs = [];
+    const skipped = [];
+    const ids = new Set();
+    for (const job of jobs.data?.jobs ?? []) {
+      try {
+        checkStoredJob(job);
+        if (ids.has(job.id)) throw new Error("its id is listed twice");
+        ids.add(job.id);
+        this.#jobs.push(job);
+      } catch (e) {
+        skipped.push(`${typeof job?.name === "string" ? JSON.stringify(job.name) : "a job"}: ${message(e)}`);
+      }
+    }
+    if (skipped.length) {
+      this.#loadError = `${skipped.length === 1 ? "1 saved job was" : `${skipped.length} saved jobs were`} invalid and ` +
+        `${skipped.length === 1 ? "was" : "were"} skipped: ${skipped.join("; ")}.`;
+      console.warn(this.#loadError);
+    }
     this.#secretStore = secrets.data ?? {};
     this.#history = history.data ?? {};
     this.#loaded = true;

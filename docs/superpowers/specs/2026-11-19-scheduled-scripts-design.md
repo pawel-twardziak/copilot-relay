@@ -28,8 +28,8 @@ shows the script's result. First step towards scheduled Copilot prompts; this MV
 
 The feature has failed, even if it works, if:
 
-- a job can be created or changed by anything other than the user in the app window (no relay/MCP tool, no
-  model output, no file dropped by a session);
+- a job can be created or changed other than through the app's UI: the app offers no relay, MCP or session path to
+  jobs (a process running as the same user can still edit the files in `userData`, like any app setting);
 - a secret value shows up in `jobs.json`, in run output, in a summary or in a notification;
 - a hung script runs forever or survives the app quitting;
 - a run finishes without the user being able to see that it did.

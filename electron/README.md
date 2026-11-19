@@ -223,8 +223,9 @@ quitting the app (`aborted`) never notify, since the app is closing. Every run i
 ### Files and secrets
 
 Jobs, secrets and history are stored in the `userData` folder (see [Finding the Copilot CLI](#finding-the-copilot-cli)):
-`jobs.json`, `job-secrets.json` and `job-runs.json`. Jobs can only be created or changed in this window; there is no
-relay or MCP tool for them.
+`jobs.json`, `job-secrets.json` and `job-runs.json`. The app creates and changes jobs only through this page: there is
+no relay, MCP or session path to them. Like any app setting, the files can still be edited by a program running as
+your user; a saved job that doesn't have the expected shape is skipped and reported at the top of the page.
 
 Mark a variable **secret** to keep its value out of `jobs.json`. It is encrypted with the system keychain (Electron
 `safeStorage`) and stored in `job-secrets.json`. The form never shows it again, only `•••• (set)` and **Replace**.

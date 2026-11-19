@@ -203,3 +203,22 @@ export function validateJob(input) {
     notify,
   };
 }
+
+// Shape check for a job read back from jobs.json (validateJob without defaults, schedule parsing or folder checks:
+// a bad expression or a missing folder fails its runs instead). Throws with the reason.
+export function checkStoredJob(job) {
+  const str = (v) => typeof v === "string" && v.trim() !== "";
+  if (job == null || typeof job !== "object" || Array.isArray(job)) throw new Error("not an object");
+  if (!str(job.id)) throw new Error("Id is missing");
+  if (!str(job.name)) throw new Error("Name is required");
+  if (!str(job.command)) throw new Error("Command is required");
+  if (!str(job.cwd)) throw new Error("Working folder is required");
+  if (typeof job.enabled !== "boolean") throw new Error("Enabled must be true or false");
+  if (job.schedule?.kind !== "cron" || typeof job.schedule.expr !== "string") throw new Error("Invalid schedule");
+  if (!Number.isInteger(job.timeoutMinutes) || job.timeoutMinutes < 1 || job.timeoutMinutes > 1440) {
+    throw new Error("Timeout must be a whole number of minutes from 1 to 1440");
+  }
+  if (!NOTIFY_MODES.includes(job.notify)) throw new Error(`Unknown notify mode "${job.notify}"`);
+  if (!Array.isArray(job.env)) throw new Error("Environment variables must be a list");
+  validateEnv(job.env);
+}
