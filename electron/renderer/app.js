@@ -270,6 +270,13 @@ class SessionView {
     this.usageLabel = h("span", { class: "label" }, "context: —");
     this.usageChip = h("span", { class: "usage-chip" }, h("span", { class: "meter" }, this.usageFill), this.usageLabel);
     this.log = h("div", { class: "log" });
+    this.follow = true; // follow streamed output: off once you scroll up, on again near the bottom
+    this.lastTop = 0;
+    this.log.addEventListener("scroll", () => {
+      const { scrollTop: top, scrollHeight: height, clientHeight: client } = this.log;
+      this.follow = ScrollFollow.followAfterScroll(this.follow, this.lastTop, { top, height, client });
+      this.lastTop = top;
+    });
     this.input = h("textarea", { rows: 2, placeholder: "Message Copilot…  (Enter to send, Shift+Enter for a new line, Left Shift+↑/↓ for your earlier messages, Esc to stop)" });
     this.sendBtn = h("button", { class: "primary", onclick: () => this.send() }, "Send");
     this.stopBtn = h("button", { onclick: () => this.cancel(), disabled: true }, "Stop");
@@ -641,9 +648,10 @@ class SessionView {
     this.input.style.height = Math.min(this.input.scrollHeight + 2, 240) + "px";
   }
 
-  // --- scrolling: follow new output only while the user is at the bottom
-  nearBottom() {
-    return this.log.scrollHeight - this.log.scrollTop - this.log.clientHeight < 80;
+  // --- scrolling: follow new output until you scroll up (see scroll-follow.js)
+  toBottom() {
+    this.follow = true;
+    this.log.scrollTop = this.log.scrollHeight;
   }
   /** Your messages in this thread, oldest first. Relay messages from other sessions are not yours: live ones are
    *  .msg.relay, replayed ones are .msg.user with the broker's "[from <name>]" prefix. */
@@ -679,9 +687,8 @@ class SessionView {
 
   append(el) {
     this.markTurn(el);
-    const stick = this.nearBottom();
     this.log.append(el);
-    if (stick) this.log.scrollTop = this.log.scrollHeight;
+    if (this.follow) this.toBottom();
     return el;
   }
   /** Number user/relay messages (turn ordinals, as in events.jsonl) and give them and the first reply block of
@@ -1049,9 +1056,8 @@ class SessionView {
       this.renderQueued = false;
       const r = this.run;
       if (!r) return;
-      const stick = this.nearBottom();
       renderRun(r);
-      if (stick) this.log.scrollTop = this.log.scrollHeight;
+      if (this.follow) this.toBottom();
     });
   }
   flush() {
@@ -1469,7 +1475,7 @@ class SessionView {
       bubble._matchText = () => sent;
     }
     this.append(bubble);
-    this.log.scrollTop = this.log.scrollHeight;
+    this.toBottom();
     this.lastActivity = Date.now();
     this.setBusy(true);
     this.prompting = true;
@@ -1581,7 +1587,7 @@ async function openSession(s) {
     v.resuming = false;
     v.flush();
     v.setConfig(res.configOptions);
-    v.log.scrollTop = v.log.scrollHeight;
+    v.toBottom();
     v.setBusy(false);
     if (!v.log.childElementCount) v.system("No messages yet.");
   } catch (e) {
