@@ -18,5 +18,10 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            electron/package-lock.json
       - run: npm ci
+      # runtime deps of the desktop app's modules under test (croner); --omit=dev skips the Electron binary
+      - run: npm ci --prefix electron --omit=dev
       - run: npm test
