@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@highlightjs/cdn-assets": "^11.12.0",
+    "croner": "11.0.1",
     "dompurify": "^3.4.17",
     "marked": "^18.1.2"
   },
@@ -36,6 +37,9 @@
       "paths.mjs",
       "file-access.mjs",
       "delegation.mjs",
+      "jobs.mjs",
+      "job-runner.mjs",
+      "scheduler.mjs",
       "relay-client.mjs",
       "preload.cjs",
       "renderer/**",

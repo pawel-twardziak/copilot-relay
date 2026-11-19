@@ -1,4 +1,7 @@
-// Pure helpers for scheduled scripts: result parsing, secret masking, notify rules. No Electron imports.
+// Pure helpers for scheduled scripts: result parsing, secret masking, notify rules, schedule math, validation.
+// No Electron imports.
+import { randomUUID } from "node:crypto";
+import { Cron } from "croner";
 
 export const RESULT_CAP = 65536;
 export const MASK = "••••";
@@ -101,4 +104,86 @@ export function finishRun(raw, ctx) {
 function lastLine(text) {
   const lines = text.split(/\r?\n/).map((l) => l.trim()).filter((l) => l !== "");
   return lines.length ? lines[lines.length - 1] : null;
+}
+
+// ---- Schedule math ----
+
+export const RESERVED_ENV = ["JOB_RESULT", "JOB_NAME", "JOB_RUN_ID"];
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+function parseCron(expr) {
+  if (typeof expr !== "string" || expr.trim() === "") throw new Error("Invalid schedule: the expression is empty");
+  if (expr.trim().split(/\s+/).length !== 5) throw new Error("Invalid schedule: use exactly 5 fields (minute hour day month weekday)");
+  try {
+    return new Cron(expr.trim(), { paused: true });
+  } catch (e) {
+    throw new Error(`Invalid schedule: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+export function scheduleInfo(expr, from, n = 3) {
+  try {
+    const next = parseCron(expr).nextRuns(n, from).map((d) => d.toISOString());
+    return { ok: true, next };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+// True iff the first scheduled time after `lastCheckedAt` is at or before `now`.
+export function isDue(expr, lastCheckedAt, now) {
+  const next = parseCron(expr).nextRun(new Date(lastCheckedAt));
+  return next != null && next.getTime() <= now;
+}
+
+// ---- Validation ----
+
+function validateEnv(env) {
+  if (env == null) return [];
+  if (!Array.isArray(env)) throw new Error("Environment variables must be a list");
+  const seen = new Set();
+  return env.map((e) => {
+    const name = typeof e?.name === "string" ? e.name.trim() : "";
+    if (!ENV_NAME.test(name)) throw new Error(`Invalid variable name "${name}": use letters, digits and _, not starting with a digit`);
+    if (RESERVED_ENV.includes(name)) throw new Error(`Variable name ${name} is reserved`);
+    if (seen.has(name)) throw new Error(`Variable ${name} is listed twice`);
+    seen.add(name);
+    if (e.secret === true) {
+      if (e.value === undefined || e.value === null) return { name, secret: true };
+      if (typeof e.value !== "string" || e.value.length < 4) throw new Error(`Secret ${name} must be at least 4 characters`);
+      return { name, secret: true, value: e.value };
+    }
+    if (typeof e.value !== "string") throw new Error(`Variable ${name} needs a value`);
+    return { name, secret: false, value: e.value };
+  });
+}
+
+export function validateJob(input) {
+  const name = typeof input?.name === "string" ? input.name.trim() : "";
+  if (name === "") throw new Error("Name is required");
+  const command = typeof input.command === "string" ? input.command.trim() : "";
+  if (command === "") throw new Error("Command is required");
+  const cwd = typeof input.cwd === "string" ? input.cwd.trim() : "";
+  if (cwd === "") throw new Error("Working folder is required");
+  if (input.schedule?.kind !== "cron") throw new Error("Invalid schedule: only cron schedules are supported");
+  const expr = typeof input.schedule.expr === "string" ? input.schedule.expr.trim() : "";
+  const info = scheduleInfo(expr, new Date(), 1);
+  if (!info.ok) throw new Error(info.error);
+  const timeoutMinutes = input.timeoutMinutes ?? 10;
+  if (!Number.isInteger(timeoutMinutes) || timeoutMinutes < 1 || timeoutMinutes > 1440) {
+    throw new Error("Timeout must be a whole number of minutes from 1 to 1440");
+  }
+  const notify = input.notify ?? "always";
+  if (!NOTIFY_MODES.includes(notify)) throw new Error(`Unknown notify mode "${notify}"`);
+  return {
+    id: typeof input.id === "string" && input.id !== "" ? input.id : randomUUID(),
+    name,
+    enabled: Boolean(input.enabled),
+    schedule: { kind: "cron", expr },
+    command,
+    cwd,
+    env: validateEnv(input.env),
+    timeoutMinutes,
+    notify,
+  };
 }
