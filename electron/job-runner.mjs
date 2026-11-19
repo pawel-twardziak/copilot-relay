@@ -1,4 +1,5 @@
 // Runs one scheduled script: spawn, capped output, timeout/abort with tree kill, result file.
+// Output and the result file come back as raw bytes (Buffers): finishRun drops a cut secret before decoding.
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -29,7 +30,7 @@ function tailCollector() {
         buf = buf.subarray(buf.length - KEEP);
         truncated = true;
       }
-      return { text: buf.toString("utf8"), truncated };
+      return { bytes: buf, truncated };
     },
   };
 }
@@ -37,14 +38,14 @@ function tailCollector() {
 function readResult(file) {
   try {
     const size = fs.statSync(file).size;
-    if (size === 0) return { text: null, truncated: false };
+    if (size === 0) return { bytes: null, truncated: false };
     const len = Math.min(size, KEEP);
     const buf = Buffer.alloc(len);
     const fd = fs.openSync(file, "r");
     try { fs.readSync(fd, buf, 0, len, size - len); } finally { fs.closeSync(fd); }
-    return { text: buf.toString("utf8"), truncated: size > KEEP };
+    return { bytes: buf, truncated: size > KEEP };
   } catch {
-    return { text: null, truncated: false };
+    return { bytes: null, truncated: false };
   }
 }
 
@@ -67,7 +68,7 @@ function killTree(child, signal, sync = false) {
 }
 
 export function startRun({ command, cwd, env, timeoutMs, jobName, runId }) {
-  const empty = { stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false,
+  const empty = { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), stdoutTruncated: false, stderrTruncated: false,
     resultText: null, resultTruncated: false, durationMs: 0 };
   const failed = (error) => ({ abort() {}, done: Promise.resolve({ reason: "exit", exitCode: null, error, ...empty }) });
 
@@ -130,8 +131,8 @@ export function startRun({ command, cwd, env, timeoutMs, jobName, runId }) {
         const r = readResult(resultFile);
         result = {
           reason, exitCode: spawnError ? null : exitCode, signal: spawnError ? null : signal, error: spawnError,
-          stdout: o.text, stderr: e.text, stdoutTruncated: o.truncated, stderrTruncated: e.truncated,
-          resultText: r.text, resultTruncated: r.truncated, durationMs: Date.now() - started,
+          stdout: o.bytes, stderr: e.bytes, stdoutTruncated: o.truncated, stderrTruncated: e.truncated,
+          resultText: r.bytes, resultTruncated: r.truncated, durationMs: Date.now() - started,
         };
       } catch (e) {
         result = { reason, exitCode: null, error: e.message, ...empty, durationMs: Date.now() - started };

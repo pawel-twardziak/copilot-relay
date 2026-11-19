@@ -64,21 +64,31 @@ export function shouldNotify(mode, status, hasResult, override) {
 }
 
 // A tail that starts at an arbitrary cut can begin with the end of a secret, which no longer matches when masking.
-// Drops the first `maxLen - 1` bytes (and up to the next newline when it is near), never splitting a character.
-function dropCutSecret(text, maxLen) {
-  if (maxLen < 2) return text;
-  const buf = Buffer.from(text, "utf8");
+// Works on the raw bytes: drops the first `maxLen - 1` (and up to the next newline when it is near), then moves the
+// cut past every secret that still straddles it, so the cut never leaves a fragment; never splits a character.
+function dropCutSecret(buf, secrets, maxLen) {
+  if (maxLen < 2) return buf;
   let start = Math.min(buf.length, maxLen - 1);
   const nl = buf.indexOf(0x0a, start);
   if (nl >= 0 && nl - start < TAIL_SLACK) start = nl + 1;
+  for (let moved = true; moved;) {
+    moved = false;
+    for (const s of secrets) {
+      const at = buf.indexOf(s, Math.max(0, start - s.length + 1));
+      if (at >= 0 && at < start) { start = at + s.length; moved = true; }
+    }
+  }
   while (start < buf.length && (buf[start] & 0xc0) === 0x80) start++;
-  return buf.subarray(start).toString("utf8");
+  return buf.subarray(start);
 }
 
+// `raw.stdout`, `raw.stderr` and `raw.resultText` are the runner's raw bytes (Buffers); strings are accepted too.
 export function finishRun(raw, ctx) {
-  const maxLen = Math.max(0, ...(ctx.secrets ?? []).filter((x) => typeof x === "string").map((x) => Buffer.byteLength(x)));
-  const prep = (text, truncated) => {
-    const whole = truncated ? dropCutSecret(text ?? "", maxLen) : text ?? "";
+  const secrets = (ctx.secrets ?? []).filter((x) => typeof x === "string" && x !== "").map((x) => Buffer.from(x));
+  const maxLen = Math.max(0, ...secrets.map((b) => b.length));
+  const prep = (data, truncated) => {
+    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data ?? "", "utf8");
+    const whole = (truncated ? dropCutSecret(buf, secrets, maxLen) : buf).toString("utf8");
     const capped = capTail(maskSecrets(whole, ctx.secrets), RESULT_CAP);
     return { text: capped.text, truncated: capped.truncated || Boolean(truncated) };
   };
