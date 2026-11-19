@@ -160,7 +160,9 @@ runs that fall in a time the app was closed are skipped, not caught up later.
   custom 5-field cron expression, in your local time zone; the form shows the next three run times. The command is
   one line run by the system shell (`/bin/sh -c` on Linux and macOS, `cmd.exe` on Windows) in the job's folder, so
   `python3 report.py --project X` or `./run.sh a b` both work. The timeout is 10 minutes unless you set it (1 to
-  1440); after it the whole process tree is killed and the run is marked `⏱ timeout`.
+  1440); after it the whole process tree is killed and the run is marked `⏱ timeout`. When the script exits,
+  anything it left running in the background (e.g. `./server &`) is stopped after 1 second, so a job can't start
+  a long-lived process.
 - **One run per job at a time.** A due time while the previous run is still going is recorded as `⏭ skipped`.
   **▶ Run now** starts a run at once. Different jobs run in parallel. Quitting the app kills running jobs and
   records them as `aborted`; deleting a job kills its run and removes its history and secrets.
@@ -206,7 +208,7 @@ The same help, with copy buttons, is in the job form under **How a script report
 A finished run shows a desktop notification: `✓ <name>`, `✗ <name>` or `⏱ <name>` with the run's summary.
 Skipped runs never notify. Each job picks when:
 
-| Notify | success, no result | success with a result | failed, timeout or aborted |
+| Notify | success, no result | success with a result | failed or timeout |
 |---|---|---|---|
 | **Always** (default) | yes | yes | yes |
 | **When there is a result or an error** | no | yes | yes |
@@ -214,8 +216,8 @@ Skipped runs never notify. Each job picks when:
 | **Never** | no | no | no |
 
 "With a result" means the script wrote something to `$JOB_RESULT`. On success, a JSON result's `notify` overrides
-the table for that run: `true` notifies, `false` stays silent. On failure the job's setting applies. Every run is in
-the history either way.
+the table for that run: `true` notifies, `false` stays silent. On failure the job's setting applies. Runs stopped by
+quitting the app (`aborted`) never notify, since the app is closing. Every run is in the history either way.
 
 ### Files and secrets
 
