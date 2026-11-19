@@ -15,6 +15,7 @@
       <div class="side-actions">
         <button id="btn-new" class="primary" title="Start a new session in a folder">+ New session</button>
         <button id="btn-refresh" title="Reload the session list">↻</button>
+        <button id="btn-schedules" title="Schedules">⏰</button>
         <button id="btn-settings" title="Settings">⚙</button>
       </div>
       <input id="search" type="search" placeholder="Filter by title or folder…" />
@@ -29,6 +30,7 @@
         <p>Pick a session on the left to resume it, or start a new one in any folder.</p>
         <button id="btn-new-2" class="primary">+ New session</button>
       </div>
+      <section id="schedules" hidden></section>
       <!-- one .session-view per open session is inserted here -->
     </main>
 
@@ -114,6 +116,7 @@
     <script src="file-links.js"></script>
     <script src="ui-state.js"></script>
     <script src="schedule-form.js"></script>
+    <script src="schedules.js"></script>
     <script src="edit-message.js"></script>
     <script src="scroll-follow.js"></script>
     <script src="../node_modules/@highlightjs/cdn-assets/highlight.min.js"></script>

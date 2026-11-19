@@ -132,6 +132,8 @@ DOMPurify.addHook("uponSanitizeAttribute", (node, data) => {
   if (node.nodeName === "A" && data.attrName === "href" && /^file:/i.test(data.attrValue)) data.forceKeepAttr = true;
 });
 const md = (text, options) => DOMPurify.sanitize(marked.parse(text ?? ""), { ADD_ATTR: ["target"], ...options });
+// the DOM helpers schedules.js builds its page with (it loads before this file, so it reads them at call time)
+globalThis.AppUi = { h, md, copyBtn };
 
 // The full-screen file preview; one for the whole window, it closes when the active session changes.
 const filePreview = createFilePreview({
@@ -1558,7 +1560,9 @@ function renderRun(r, final = false) {
 // ---------------------------------------------------------------------------
 // opening / closing
 
-function activate(id) {
+/** keepSchedules: a session closing in the background must not close the Schedules page (it hides every view). */
+function activate(id, { keepSchedules = false } = {}) {
+  if (!keepSchedules) Schedules.hide();
   filePreview.close();
   activeId = id;
   for (const [sid, v] of views) v.el.classList.toggle("active", sid === id);
@@ -1625,7 +1629,7 @@ function dropView(id) {
   lastUsage.delete(id); // a re-opened session must not flash this stale snapshot
   early.delete(id);
   v?.el.remove();
-  if (activeId === id) activate([...views.keys()].pop() ?? null);
+  if (activeId === id) activate([...views.keys()].pop() ?? null, { keepSchedules: true });
 }
 
 /** Rebuild a closed session's view from its files (after its history changed or a delete failed); relay messages
@@ -2167,6 +2171,12 @@ $("#btn-new").addEventListener("click", () => newSession());
 $("#btn-new-2").addEventListener("click", () => newSession());
 $("#btn-refresh").addEventListener("click", refresh);
 $("#btn-settings").addEventListener("click", openSettings);
+// the page hides #empty and every .session-view (body.schedules-open); activeId stays, so the session list works as before
+$("#btn-schedules").addEventListener("click", () => {
+  filePreview.close();
+  Schedules.show();
+});
+Schedules.init();
 $("#search").addEventListener("input", renderList);
 // Left Shift for message recall (an arrow key's event doesn't say which Shift is down). Tracked on the whole document,
 // in the capture phase, so a Shift pressed before the message box got focus counts; reset whenever it can't be down.
