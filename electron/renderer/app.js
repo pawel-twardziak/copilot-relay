@@ -1267,40 +1267,51 @@ class SessionView {
     const previewsEl = h("div", { class: "previews" }, previewEls(previews));
     this.reopenRequests.set(requestId, previewsEl);
     this.flush();
+    const NOT_PENDING = "This request is no longer pending.";
     const answer = async (approved) => {
       this.reopenRequests.set(requestId, null);
       this.closeCard(card);
       opts.replaceChildren(h("span", {}, approved ? "Reopening…" : "Rejecting…"));
+      // each answer is false when the broker no longer has the request; a thrown one did not arrive
+      const say = async (ok, reason, text) => ((await api.answerReopen(this.sessionId, requestId, ok, reason)) ? text : NOT_PENDING);
       let result;
       try {
         if (!approved) {
-          await api.answerReopen(this.sessionId, requestId, false);
-          result = "→ Rejected";
+          result = await say(false, undefined, "→ Rejected");
         } else if (deleting.has(targetSessionId)) {
-          await api.answerReopen(this.sessionId, requestId, false);
-          result = "This session is being deleted.";
+          result = await say(false, undefined, "This session is being deleted.");
         } else {
           const tv = views.get(targetSessionId); // open (or a dead view): never "missing", that would forget its link
-          const target = tv
-            ? { sessionId: targetSessionId, cwd: tv.cwd, title: tv.title }
-            : (sessions.find((s) => s.sessionId === targetSessionId) ?? (await api.listSessions()).find((s) => s.sessionId === targetSessionId));
+          let target = tv ? { sessionId: targetSessionId, cwd: tv.cwd, title: tv.title } : sessions.find((s) => s.sessionId === targetSessionId);
+          let complete = true;
           if (!target) {
-            await api.answerReopen(this.sessionId, requestId, false, "missing");
-            result = "This session no longer exists.";
+            const listed = await api.listSessionsChecked();
+            target = listed.sessions.find((s) => s.sessionId === targetSessionId);
+            complete = listed.complete;
+          }
+          if (target) {
+            result = await say(true, undefined, "→ Approved");
+            // the queued message is delivered when it registers (no-op if open)
+            if (result !== NOT_PENDING) openSession(target, { activate: false });
+          } else if (!complete) {
+            // a partial list proves nothing: approve without forgetting; the message waits until it is opened
+            result = await say(true, undefined, "→ Approved. It was not found in the session list; open it to deliver the message.");
           } else {
-            await api.answerReopen(this.sessionId, requestId, true);
-            result = "→ Approved";
-            openSession(target, { activate: false }); // the queued message is delivered when it registers (no-op if open)
+            result = await say(false, "missing", "This session no longer exists.");
           }
         }
       } catch (e) {
-        this.reopenRequests.delete(requestId); // unanswered: the broker asks again on the next registration
-        result = `Could not answer: ${e.message}`;
+        // not answered: the buttons come back, so the user can try again
+        this.reopenRequests.set(requestId, previewsEl);
+        opts.replaceChildren(h("span", { class: "err" }, `Could not answer: ${e.message}`), ...buttons());
+        this.openCard(card);
+        return;
       }
       card.classList.add("done");
       opts.replaceChildren(h("span", {}, result));
     };
-    const opts = h("div", { class: "opts" }, h("button", { class: "primary", onclick: () => answer(true) }, "Approve"), h("button", { onclick: () => answer(false) }, "Reject"));
+    const buttons = () => [h("button", { class: "primary", onclick: () => answer(true) }, "Approve"), h("button", { onclick: () => answer(false) }, "Reject")];
+    const opts = h("div", { class: "opts" }, buttons());
     const card = h(
       "div",
       { class: "perm reopen" },
@@ -1850,10 +1861,11 @@ function relationChip(id, { child = false, grandchildren = 0 } = {}) {
   const v = views.get(id);
   const open = v && !v.dead;
   const reported = child && tree.link.get(id)?.reported;
+  const state = v?.dead ? "Its Copilot process ended" : open ? "Open" : "Closed";
   return h(
     "button",
-    { class: "rel-chip", title: `${open ? "Open" : "Closed"}${reported ? ", reported its result" : ""}\n${id}`, onclick: () => openRelative(id) },
-    h("span", { class: "dot" + (!open ? " off" : v.busy ? " busy" : "") }),
+    { class: "rel-chip", title: `${state}${reported ? ", reported its result" : ""}\n${id}`, onclick: () => openRelative(id) },
+    h("span", { class: "dot" + (v?.dead ? " dead" : !open ? " off" : v.busy ? " busy" : "") }),
     h("span", { class: "name" }, parentLabel(id)),
     reported && h("span", { class: "rel-done" }, "✓"),
     grandchildren > 0 && h("span", { class: "count", title: `${grandchildren} sub-session(s)` }, `+${grandchildren}`),
@@ -1891,7 +1903,7 @@ function item(s, v, { showProject = false, depth = 0 } = {}) {
         "div",
         { class: "t" },
         depth > 0 && h("span", { class: "branch", "aria-hidden": "true" }, "└"),
-        v && !v.dead && h("span", { class: "dot" + (v.busy ? " busy" : "") }),
+        v && h("span", v.dead ? { class: "dot dead", title: "Its Copilot process ended" } : { class: "dot" + (v.busy ? " busy" : "") }),
         h("b", {}, shortTitle(v?.title || s.title)),
         v?.needsAttention && h("span", { class: "attention", title: "Waiting for your answer" }, "!"),
       ),

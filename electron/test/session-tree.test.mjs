@@ -87,7 +87,7 @@ test("a link that names itself as parent is not its own child", () => {
 
 test("pruneCandidates skips excluded sessions", () => {
   const links = [L("a"), L("b"), L("c")];
-  assert.deepEqual(pruneCandidates(links, [], { listOk: true, exclude: new Set(["a", "c"]) }), ["cli:b"]);
+  assert.deepEqual(pruneCandidates(links, [S("x")], { listOk: true, exclude: new Set(["a", "c"]) }), ["cli:b"]);
 });
 
 test("pruneCandidates includes a missing parent once, but not the parent of an orphan", () => {
@@ -99,4 +99,17 @@ test("pruneCandidates includes a missing parent once, but not the parent of an o
 test("pruneCandidates never reports an online link, also not as a parent", () => {
   const links = [L("c", null, 1, { online: true }), L("g", "m", 2), L("m", null, 3, { online: true })];
   assert.deepEqual(pruneCandidates(links, [S("g")], { listOk: true }), []);
+});
+
+test("pruneCandidates prunes nothing when the list is empty while links exist", () => {
+  assert.deepEqual(pruneCandidates([L("a"), L("b", "a")], [], { listOk: true }), []);
+});
+
+test("pruneCandidates prunes nothing when more than half of the known cli keys would go", () => {
+  const links = [L("a"), L("b"), L("c"), L("d")];
+  assert.deepEqual(pruneCandidates(links, [S("a"), S("b")], { listOk: true }).sort(), ["cli:c", "cli:d"]); // half: ok
+  assert.deepEqual(pruneCandidates(links, [S("a")], { listOk: true }), []); // 3 of 4: suspicious list
+  // parents count as known keys too
+  assert.deepEqual(pruneCandidates([L("k", "p")], [S("k")], { listOk: true }), ["cli:p"]); // 1 of 2 (k and its parent p)
+  assert.deepEqual(pruneCandidates([L("k", "p")], [S("x")], { listOk: true }), []); // 2 of 2
 });

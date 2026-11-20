@@ -90,21 +90,26 @@ function relation(idx, id) {
 
 /** cli: keys missing from a successful list: linked sessions, and parents that still have (non-orphaned) children.
  *  Never a key whose link is online (a child being created is connected before Copilot lists it).
- *  exclude: bare ids never reported (open, being deleted, deleted — a new session may not be listed yet). */
+ *  exclude: bare ids never reported (open, being deleted, deleted — a new session may not be listed yet).
+ *  Sanity bound: nothing when the list is empty while links exist, or when more than half of the known cli: keys
+ *  would go (such a list is more likely broken than that many sessions deleted). */
 function pruneCandidates(links, sessions, { listOk, exclude = new Set() } = {}) {
-  if (!listOk) return [];
+  if (!listOk || (!sessions.length && links.length)) return [];
   const have = new Set(sessions.map((s) => s.sessionId));
   const online = new Set(links.filter((l) => l.online === true).map((l) => l.key));
+  const known = new Set();
   const out = new Set();
   const consider = (key) => {
     const id = strip(key);
-    if (id !== null && !have.has(id) && !exclude.has(id) && !online.has(key)) out.add(key);
+    if (id === null) return;
+    known.add(key);
+    if (!have.has(id) && !exclude.has(id) && !online.has(key)) out.add(key);
   };
   for (const l of links) {
     consider(l.key);
     if (!l.parentDeleted) consider(l.parent);
   }
-  return [...out];
+  return out.size * 2 > known.size ? [] : [...out];
 }
 
 const SessionTree = { index, descendants, closeOrder, nest, relation, pruneCandidates };
