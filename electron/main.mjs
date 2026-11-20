@@ -811,16 +811,6 @@ handle("delegation:answer", async (requestId, approved) => {
   return true;
 });
 
-handle("delegation:stopChildren", async (parentSessionId) => {
-  const children = [...open].filter(([, e]) => e.parentSessionId === parentSessionId).map(([id]) => id);
-  await Promise.all(
-    children.map(async (sessionId) => {
-      await closeEntry(sessionId).catch(() => {});
-      send("delegation:closed", { sessionId });
-    }),
-  );
-});
-
 handle("relay:ack", async (sessionId, id) => {
   const relay = open.get(sessionId)?.relay;
   if (!relay) return false;

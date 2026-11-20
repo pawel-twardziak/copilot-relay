@@ -20,7 +20,7 @@ function index(links = []) {
     link.set(id, l);
     const parent = l.parentDeleted ? null : strip(l.parent);
     parentOf.set(id, parent);
-    if (parent !== null) {
+    if (parent !== null && parent !== id) {
       if (!childrenOf.has(parent)) childrenOf.set(parent, []);
       childrenOf.get(parent).push(id);
     }

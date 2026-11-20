@@ -78,3 +78,9 @@ test("pruneCandidates returns only cli keys missing from the list", () => {
   const links = [L("a"), L("b"), { key: "other:z", parent: null }];
   assert.deepEqual(pruneCandidates(links, [S("a")], { listOk: true }), ["cli:b"]);
 });
+
+test("a link that names itself as parent is not its own child", () => {
+  const idx = index([L("c", "c", 1), L("d", "c", 2)]);
+  assert.deepEqual(idx.childrenOf.get("c"), ["d"]);
+  assert.deepEqual(relation(idx, "c").children, [{ id: "d", grandchildren: 0 }]);
+});

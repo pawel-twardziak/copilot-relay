@@ -227,6 +227,8 @@ function ago(iso) {
 // state
 
 let sessions = []; // from session/list: { sessionId, cwd, title, updatedAt }
+let links = []; // the broker's sub-session links (api.getLinks / api.onLinks), keys "cli:<sessionId>"
+let tree = SessionTree.index(links); // parent/child index over `links` (bare session ids)
 const views = new Map(); // sessionId -> SessionView
 let activeId = null;
 
@@ -243,10 +245,12 @@ function isEditableBubble(el) {
 class SessionView {
   constructor({ sessionId, cwd, title, parentSessionId, seenDeliveries, pendingNotes, holdInbox }) {
     Object.assign(this, { sessionId, cwd, title: title ?? "" });
-    this.parentSessionId = parentSessionId ?? null; // set for a session created by another one (delegated child)
+    // set for a session created by another one (from relay:status); the sidebar and the relation bar use `tree`
+    this.parentSessionId = parentSessionId ?? null;
     this.seenDeliveries = seenDeliveries ?? new Set(); // report ids already taken (the broker redelivers until acked)
     this.pendingNotes = pendingNotes ?? []; // non-waking notices, passed to the model with the next prompt
-    this.openCards = new Set(); // permission and delegation cards still waiting for an answer
+    this.openCards = new Set(); // permission, delegation and reopen cards still waiting for an answer
+    this.reopenRequests = new Set(); // requestIds of reopen cards shown here (the broker re-emits unanswered ones)
     this.busy = false;
     this.dead = false;
     this.run = null; // current streamed block { type, el, text }
@@ -282,11 +286,12 @@ class SessionView {
     this.sendBtn = h("button", { class: "primary", onclick: () => this.send() }, "Send");
     this.stopBtn = h("button", { onclick: () => this.cancel(), disabled: true }, "Stop");
     this.statusEl = h("div", { class: "status-line" });
-    this.stopChildrenBtn = h(
+    this.closeChildrenBtn = h(
       "button",
-      { class: "danger", hidden: true, title: "Close every session this one has created (they stay resumable)", onclick: () => api.stopChildren(this.sessionId).catch((e) => this.error(e.message)) },
-      "Stop all children",
+      { class: "danger", hidden: true, title: "Close every sub-session of this one (they stay resumable)", onclick: () => closeViews(openDescendants(this.sessionId)) },
+      "Close all sub-sessions",
     );
+    this.relationsEl = h("div", { class: "relations", hidden: true });
     this.agentOption = undefined; // latest ACP "agent" config option
     this.agentPicker = h("select", { class: "agent-picker", hidden: true });
     this.agentPicker.addEventListener("change", () => this.chooseAgent(this.agentPicker.value));
@@ -309,12 +314,13 @@ class SessionView {
         this.relayChip,
         this.usageChip,
         this.selects,
-        this.stopChildrenBtn,
+        this.closeChildrenBtn,
         this.filesBtn,
         h("button", { title: "Copy the whole conversation as Markdown", onclick: (e) => this.copyThread(e.currentTarget) }, "Copy thread"),
         h("button", { class: "danger", title: "Close this session in the app (it stays resumable)", onclick: () => closeView(this.sessionId) }, "Close"),
         h("button", { class: "danger", title: "Delete this whole session from disk", onclick: () => deleteSessionFlow({ sessionId: this.sessionId, cwd: this.cwd, title: this.title }) }, "Delete"),
       ),
+      this.relationsEl,
       this.log,
       this.editBar,
       h("div", { class: "composer" }, this.cmdPopup, this.input, this.agentPicker, h("div", { class: "btns" }, this.sendBtn, this.stopBtn)),
@@ -1247,6 +1253,65 @@ class SessionView {
     this.openCard(card);
   }
 
+  /** A relative of this session sent a message to a closed one: the user decides whether it is reopened. The names
+   *  and previews are model-written: plain text only. */
+  reopenCard({ requestId, targetSessionId, targetName, fromName, previews }) {
+    if (this.reopenRequests.has(requestId)) return; // the broker re-emits a request until it is answered
+    this.reopenRequests.add(requestId);
+    this.flush();
+    const answer = async (approved) => {
+      this.closeCard(card);
+      opts.replaceChildren(h("span", {}, approved ? "Reopening…" : "Rejecting…"));
+      let result;
+      try {
+        if (!approved) {
+          await api.answerReopen(this.sessionId, requestId, false);
+          result = "→ Rejected";
+        } else {
+          const target = sessions.find((s) => s.sessionId === targetSessionId) ?? (await api.listSessions()).find((s) => s.sessionId === targetSessionId);
+          if (!target) {
+            await api.answerReopen(this.sessionId, requestId, false, "missing");
+            result = "This session no longer exists.";
+          } else {
+            await api.answerReopen(this.sessionId, requestId, true);
+            result = "→ Approved";
+            openSession(target, { activate: false }); // the queued message is delivered when it registers
+          }
+        }
+      } catch (e) {
+        this.reopenRequests.delete(requestId); // unanswered: the broker asks again on the next registration
+        result = `Could not answer: ${e.message}`;
+      }
+      card.classList.add("done");
+      opts.replaceChildren(h("span", {}, result));
+    };
+    const opts = h("div", { class: "opts" }, h("button", { class: "primary", onclick: () => answer(true) }, "Approve"), h("button", { onclick: () => answer(false) }, "Reject"));
+    const card = h(
+      "div",
+      { class: "perm reopen" },
+      h("div", { class: "q" }, h("b", {}, fromName), ` wants to message the closed session `, h("b", {}, targetName), ". Reopen it?"),
+      (previews ?? []).map((p) => h("div", { class: "task" }, p)),
+      opts,
+    );
+    this.append(card);
+    this.openCard(card);
+  }
+
+  /** The bar under the header: this session's parent and sub-sessions from the link tree. */
+  renderRelations() {
+    const rel = SessionTree.relation(tree, this.sessionId);
+    const parent = rel.parent === this.sessionId ? null : rel.parent;
+    const parts = [];
+    if (parent) parts.push(h("span", { class: "rel" }, h("span", { class: "rel-label" }, "Parent:"), relationChip(parent)));
+    else if (rel.parentDeleted) parts.push(h("span", { class: "rel" }, h("span", { class: "rel-label" }, "Parent:"), h("span", { class: "rel-gone" }, "deleted")));
+    if (rel.children.length) {
+      parts.push(h("span", { class: "rel" }, h("span", { class: "rel-label" }, "Sub-sessions:"), rel.children.map((c) => relationChip(c.id, { child: true, grandchildren: c.grandchildren }))));
+    }
+    this.relationsEl.replaceChildren(...parts);
+    this.relationsEl.hidden = !parts.length;
+    this.closeChildrenBtn.hidden = !openDescendants(this.sessionId).length;
+  }
+
   get needsAttention() {
     return !this.dead && this.openCards.size > 0;
   }
@@ -1595,9 +1660,10 @@ function activate(id, { keepSchedules = false } = {}) {
   if (v && !v.dead) v.input.focus();
 }
 
-async function openSession(s) {
+/** activate false: resumed in the background (a reopen the user approved in another session's view). */
+async function openSession(s, { activate: show = true } = {}) {
   const existing = views.get(s.sessionId);
-  if (existing && !existing.dead) return activate(s.sessionId);
+  if (existing && !existing.dead) return show ? activate(s.sessionId) : undefined;
   if (existing) {
     existing.el.remove();
     views.delete(s.sessionId);
@@ -1606,7 +1672,7 @@ async function openSession(s) {
   views.set(s.sessionId, v);
   v.setBusy(true); // before flushEarly: an early relay message must wait until the session is open
   flushEarly(v);
-  activate(s.sessionId);
+  if (show) activate(s.sessionId);
   v.statusEl.textContent = "Resuming session…";
   v.resuming = true;
   try {
@@ -1679,13 +1745,30 @@ async function reopenView(old, error, { holdInbox = false, typed } = {}) {
   return v;
 }
 
+/** Open sub-sessions of id (all generations), deepest first; one being deleted is left to its delete. */
+const openDescendants = (id) => SessionTree.closeOrder(tree, id, (c) => views.has(c) && !views.get(c).deleting && !deleting.has(c));
+
+/** Close these views in this order after one question for the busy ones; nothing is closed if you cancel.
+ *  question: the text for a single busy session instead of the count. */
+async function closeViews(ids, question) {
+  const busy = ids.filter((id) => views.get(id)?.busy && !views.get(id).dead).length;
+  question ??= busy === 1 ? "1 session is still working. Stop it and close?" : `${busy} sessions are still working. Stop them and close?`;
+  if (busy && !confirm(question)) return;
+  for (const id of ids) {
+    const v = views.get(id);
+    if (!v || v.deleting || deleting.has(id)) continue; // a running delete closes it, or restores it if the delete fails
+    dropView(id);
+    await api.closeSession(id).catch(() => {});
+  }
+  renderList();
+}
+
+/** Close a session's view and every open sub-session below it (they all stay resumable). */
 async function closeView(id) {
   const v = views.get(id);
   if (!v || v.deleting) return; // a running delete closes it, or restores it if the delete fails
-  if (v.busy && !v.dead && !confirm("Copilot is still working in this session. Stop it and close?")) return;
-  dropView(id);
-  await api.closeSession(id).catch(() => {});
-  renderList();
+  const ids = openDescendants(id);
+  await closeViews([...ids, id], ids.length ? undefined : "Copilot is still working in this session. Stop it and close?");
 }
 
 // ---------------------------------------------------------------------------
@@ -1725,19 +1808,48 @@ function togglePin(id) {
   renderList();
 }
 
-/** The name of a child's parent in the sidebar: its title, else its relay name, else the start of its id. */
+/** The name of a related session (a child's parent in the sidebar, the relation bar): its title, else its relay name
+ *  (from its view or its link), else the start of its id. */
 function parentLabel(id) {
   const p = views.get(id);
   const title = p?.title || sessions.find((s) => s.sessionId === id)?.title;
-  return title ? shortTitle(title) : (p?.relayName ?? id.slice(0, 8));
+  return title ? shortTitle(title) : (p?.relayName ?? tree.link.get(id)?.name ?? id.slice(0, 8));
 }
 
-/** showProject: the session is listed outside its project (pinned), so its folder goes into the meta line. */
-function item(s, v, { showProject = false } = {}) {
+/** A relation bar entry: dot as in the sidebar (hollow when closed); for a child ✓ once it reported, +N sub-sessions. */
+function relationChip(id, { child = false, grandchildren = 0 } = {}) {
+  const v = views.get(id);
+  const open = v && !v.dead;
+  const reported = child && tree.link.get(id)?.reported;
+  return h(
+    "button",
+    { class: "rel-chip", title: `${open ? "Open" : "Closed"}${reported ? ", reported its result" : ""}\n${id}`, onclick: () => openRelative(id) },
+    h("span", { class: "dot" + (!open ? " off" : v.busy ? " busy" : "") }),
+    h("span", { class: "name" }, parentLabel(id)),
+    reported && h("span", { class: "rel-done" }, "✓"),
+    grandchildren > 0 && h("span", { class: "count", title: `${grandchildren} sub-session(s)` }, `+${grandchildren}`),
+  );
+}
+
+/** A relation bar click: show it if open, else resume it as from the sidebar (the click is the approval). */
+function openRelative(id) {
+  const v = views.get(id);
+  if (v && !v.dead) return activate(id);
+  if (deleting.has(id)) return setStatus("This session is being deleted.", true);
+  const s = sessions.find((x) => x.sessionId === id) ?? (v && { sessionId: id, cwd: v.cwd, title: v.title });
+  if (!s) return setStatus("This session is not in Copilot's session list.", true);
+  openSession(s);
+}
+
+/** showProject: the session is listed outside its project (pinned), so its folder goes into the meta line.
+ *  depth: its level under a parent shown in the same group (0 = top level, with "child of X" when it has a parent). */
+function item(s, v, { showProject = false, depth = 0 } = {}) {
   const pinned = ui.pinned.has(s.sessionId);
+  const parent = tree.parentOf.get(s.sessionId);
+  const relation = depth > 0 ? null : parent && parent !== s.sessionId ? `child of ${parentLabel(parent)}` : tree.link.get(s.sessionId)?.parentDeleted ? "parent deleted" : null;
   return h(
     "div",
-    { class: "item-row" },
+    { class: "item-row", style: depth > 0 ? `--depth: ${depth}` : null },
     h(
       "button",
       {
@@ -1749,11 +1861,12 @@ function item(s, v, { showProject = false } = {}) {
       h(
         "div",
         { class: "t" },
+        depth > 0 && h("span", { class: "branch", "aria-hidden": "true" }, "└"),
         v && !v.dead && h("span", { class: "dot" + (v.busy ? " busy" : "") }),
         h("b", {}, shortTitle(v?.title || s.title)),
         v?.needsAttention && h("span", { class: "attention", title: "Waiting for your answer" }, "!"),
       ),
-      h("div", { class: "m" }, [v?.parentSessionId && `child of ${parentLabel(v.parentSessionId)}`, showProject && baseName(s.cwd), s.updatedAt ? ago(s.updatedAt) : "", s.sessionId.slice(0, 8)].filter(Boolean).join(" · ")),
+      h("div", { class: "m" }, [relation, showProject && baseName(s.cwd), s.updatedAt ? ago(s.updatedAt) : "", s.sessionId.slice(0, 8)].filter(Boolean).join(" · ")),
     ),
     h(
       "div",
@@ -2015,7 +2128,7 @@ function toggleGroup(cwd, header, items) {
 }
 
 function groupBlock(g) {
-  const items = h("div", { class: "group-items" + (g.collapsed ? " collapsed" : "") }, h("div", {}, ...g.sessions.map((s) => item(s, views.get(s.sessionId)))));
+  const items = h("div", { class: "group-items" + (g.collapsed ? " collapsed" : "") }, h("div", {}, ...nestedItems(g.sessions)));
   items.inert = g.collapsed;
   const header = h(
     "div",
@@ -2051,22 +2164,27 @@ function groupBlock(g) {
   return [header, items];
 }
 
+/** A group's rows, children indented under a parent listed in the same group. */
+function nestedItems(list, opts = {}) {
+  return SessionTree.nest(list, tree).map(({ s, depth }) => item(s, views.get(s.sessionId), { ...opts, depth }));
+}
+
+/** Also redraws every view's relation bar: its dots and the Close all sub-sessions button follow the open views. */
 function renderList() {
   const q = $("#search").value.trim().toLowerCase();
   const out = [];
 
-  const parents = new Set([...views.values()].filter((v) => !v.dead).map((v) => v.parentSessionId));
-  for (const v of views.values()) v.stopChildrenBtn.hidden = !parents.has(v.sessionId);
+  for (const v of views.values()) v.renderRelations();
 
   const openOnes = [...views.values()].map((v) => sessions.find((s) => s.sessionId === v.sessionId) ?? { sessionId: v.sessionId, cwd: v.cwd, title: v.title });
   if (openOnes.length) {
     out.push(h("div", { class: "group-title" }, h("span", {}, "Open in app")));
-    for (const s of openOnes) out.push(item(s, views.get(s.sessionId)));
+    out.push(...nestedItems(openOnes));
   }
 
   const model = UiState.listModel(sessions, { pinned: ui.pinned, collapsed: ui.collapsed, query: q });
   if (model.pinned.length) {
-    out.unshift(h("div", { class: "group-title" }, h("span", {}, "📌 Pinned")), ...model.pinned.map((s) => item(s, views.get(s.sessionId), { showProject: true })));
+    out.unshift(h("div", { class: "group-title" }, h("span", {}, "📌 Pinned")), ...nestedItems(model.pinned, { showProject: true }));
   }
   for (const g of model.groups) out.push(...groupBlock(g));
   if (!out.length) out.push(h("div", { class: "group-title" }, h("span", {}, q ? "No matches" : "No sessions yet")));
@@ -2172,6 +2290,25 @@ api.onDelegationCreated(({ sessionId, cwd, configOptions, parentSessionId, title
   if (!v.busy) v.setBusy(false); // (an early message may already have started its turn)
   scheduleRefresh();
 });
+// a relative messaged a closed session: the card goes to the sender's view (which may not exist yet)
+api.onReopenRequest((r) => forView(r.sessionId, (v) => v.reopenCard(r)));
+
+// the sub-session tree: the cached links at once, the broker's fresh ones (and every change) through onLinks
+let freshLinks = false;
+function setLinks(next) {
+  links = Array.isArray(next) ? next : [];
+  tree = SessionTree.index(links);
+  renderList(); // redraws the relation bars too
+}
+api.onLinks((l) => {
+  freshLinks = true;
+  setLinks(l);
+});
+api
+  .getLinks()
+  .then((l) => freshLinks || setLinks(l))
+  .catch((e) => console.warn(`links: ${e.message}`));
+
 api.onDelegationClosed(({ sessionId }) => {
   dropView(sessionId); // safe for a view that was never built (a failed creation)
   renderList();
