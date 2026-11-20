@@ -27,6 +27,8 @@ const registry = new Registry({
 // An unreadable delegation store throws here and stops the broker: never run on (and later overwrite) data we could not read.
 const delegationStore = new DelegationStore();
 const delegation = new Delegation({ registry, store: delegationStore });
+registry.offlineRelative = (f, n, t) => delegation.messageClosed(f, n, t);
+registry.decorate = (k, p) => delegation.decorate(k, p);
 const handleMcp = createMcpHandler(registry, delegation);
 const names = new NameStore(process.env.COPILOT_RELAY_NAMES_FILE || undefined, {
   keep: (k) => delegationStore.parentOf(k) != null || delegationStore.childrenOf(k).length > 0,

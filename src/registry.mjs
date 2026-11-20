@@ -18,6 +18,15 @@ const OFFLINE_GRACE_MS = Number(process.env.COPILOT_RELAY_OFFLINE_GRACE_MS ?? 30
 /** First lines of a relay prompt: the sender, and the sender's folder when it has one (relative paths resolve against it). */
 export const relayPrefix = (name, cwd) => `[from ${name}]\n` + (cwd ? `[folder ${JSON.stringify(cwd)}]\n` : "");
 
+/** The prompt a session gets for `text` sent by another session (`name`, folder `cwd`). */
+export const relayPrompt = (name, cwd, text) =>
+  `${relayPrefix(name, cwd)}${text}\n\n` +
+  `(Relay note: ${name} cannot see your chat output — only your user can. ` +
+  `If this message asks you something or expects an answer, reply with the relay send_message tool ` +
+  `(relay_send_message), to: "${name}"; a summary in your chat does not reach them.)`;
+
+export const BUDGET_EXHAUSTED = "Not delivered: the relay message budget is exhausted. Finish your work and report to the user.";
+
 export function sanitizeName(s) {
   const n = String(s ?? "")
     .toLowerCase()
@@ -60,6 +69,10 @@ export class Registry extends EventEmitter {
     this.budget = maxAgentMessages;
     this.maxPairMessages = maxPairMessages;
     this.pairBudgets = new Map(); // `${parentKey}|${childKey}` -> remaining messages for a linked pair
+    /** Hook (fromKey, name, text) => string | null: answer for a message to a relative that is not online. */
+    this.offlineRelative = null;
+    /** Hook (toKey, prompt) => string: decorates prompts sent to a linked recipient. */
+    this.decorate = null;
   }
 
   /** True when one of the two peers is the parent of the other. */
@@ -67,8 +80,13 @@ export class Registry extends EventEmitter {
     return this.byKey.get(aKey)?.parentKey === bKey || this.byKey.get(bKey)?.parentKey === aKey;
   }
 
-  #pairKey(aKey, bKey) {
-    return this.byKey.get(aKey)?.parentKey === bKey ? `${bKey}|${aKey}` : `${aKey}|${bKey}`;
+  /** Take one message from the linked pair's budget; false (nothing taken) when it is exhausted. */
+  chargePair(parentKey, childKey) {
+    const pairKey = `${parentKey}|${childKey}`;
+    const remaining = this.pairBudgets.get(pairKey) ?? this.maxPairMessages;
+    if (remaining <= 0) return false;
+    this.pairBudgets.set(pairKey, remaining - 1);
+    return true;
   }
 
   /** Permanent unique name for `key` based on `wanted`: `<base>-<6 hex of the key hash>` (see uniqueName). */
@@ -191,28 +209,29 @@ export class Registry extends EventEmitter {
     const from = this.byKey.get(fromKey);
     if (!from) return "You are not registered with the relay broker.";
     const to = this.byName.get(String(toName).trim().toLowerCase());
-    if (!to) return `No session "${toName}". Call list_sessions to see who is online.`;
+    if (!to?.online) {
+      // a closed parent/child is queued for the user's reopen approval; others keep today's answers
+      const answer = this.offlineRelative?.(fromKey, toName, text);
+      if (answer != null) return answer;
+      if (!to) return `No session "${toName}". Call list_sessions to see who is online.`;
+    }
     if (to === from) return "You cannot message yourself.";
     const linked = this.isLinked(from.key, to.key);
-    const pairKey = linked ? this.#pairKey(from.key, to.key) : null;
-    const remaining = linked ? (this.pairBudgets.get(pairKey) ?? this.maxPairMessages) : this.budget;
-    if (remaining <= 0) {
+    const [parentKey, childKey] = from.parentKey === to.key ? [to.key, from.key] : [from.key, to.key];
+    if (linked ? !this.chargePair(parentKey, childKey) : this.budget <= 0) {
       this.emit("system", { text: `Blocked ${from.name} → ${to.name}: message budget exhausted (waiting for a human prompt).` });
-      return "Not delivered: the relay message budget is exhausted. Finish your work and report to the user.";
+      return BUDGET_EXHAUSTED;
     }
-    if (linked) this.pairBudgets.set(pairKey, remaining - 1);
-    else this.budget--;
-    this.emit("message", { from: from.name, to: to.name, fromKey: from.key, toKey: to.key, text, budget: linked ? remaining - 1 : this.budget });
+    if (!linked) this.budget--;
+    const budget = linked ? this.pairBudgets.get(`${parentKey}|${childKey}`) : this.budget;
+    this.emit("message", { from: from.name, to: to.name, fromKey: from.key, toKey: to.key, text, budget });
+    const prompt = relayPrompt(from.name, from.cwd, text);
     this.#deliver(to, {
       from: from.name,
       ...(from.cwd ? { fromCwd: from.cwd } : {}),
       human: false,
       text,
-      prompt:
-        `${relayPrefix(from.name, from.cwd)}${text}\n\n` +
-        `(Relay note: ${from.name} cannot see your chat output — only your user can. ` +
-        `If this message asks you something or expects an answer, reply with the relay send_message tool ` +
-        `(relay_send_message), to: "${from.name}"; a summary in your chat does not reach them.)`,
+      prompt: linked && this.decorate ? this.decorate(to.key, prompt) : prompt,
     });
     const how = to.kind === "mcp" ? "placed in their inbox" : to.online ? "delivered" : "queued (recipient briefly offline)";
     return `Message to ${to.name} ${how}. Their reply will arrive as a new message — do not wait for it.`;

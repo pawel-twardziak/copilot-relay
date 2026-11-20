@@ -514,3 +514,197 @@ test("onChange fires on link, setTask, report, setBusy and online/offline", () =
   bumped(() => registry.disconnect("cli:child"));
   clearTimeout(registry.get("cli:child").offlineTimer);
 });
+
+// ---- messages to a closed relative: reopen approval ----
+const CLOSED = (n) => `Session "${n}" is closed. The user was asked to reopen it; your message is queued and will be delivered if they approve. Do not wait for it.`;
+const NO_APP = (n) => `Session "${n}" is closed and you have no app connection to ask the user to reopen it.`;
+const REJECTED = (n) => `The user did not reopen "${n}"; your message was not delivered.`;
+
+/** setup() wired like server.mjs, with the child closed (gone from the registry). */
+function closedChild(opts) {
+  const s = setup(opts);
+  s.registry.offlineRelative = (f, n, t) => s.d.messageClosed(f, n, t);
+  s.registry.decorate = (k, p) => s.d.decorate(k, p);
+  s.registry.remove("cli:child");
+  s.reopens = () => s.parentControl.filter(([ev]) => ev === "reopen_request").map(([, p]) => p);
+  s.reopenChild = () =>
+    s.registry.upsert({ key: "cli:child", name: "badacz", kind: "cli", push: (m) => (s.childPush.push(m), true), control: (...a) => s.childControl.push(a) });
+  return s;
+}
+
+test("a message to a closed child is queued awaiting approval and a card is requested", () => {
+  const { registry, store, file, reopens } = closedChild();
+  assert.equal(registry.send("cli:parent", KID.toUpperCase(), "hello"), CLOSED(KID));
+  const [card] = reopens();
+  assert.deepEqual(card, {
+    requestId: card.requestId,
+    targetKey: "cli:child",
+    targetName: KID,
+    fromName: nm(registry, "cli:parent"),
+    previews: ["hello"],
+  });
+  assert.equal(store.pending("cli:child").length, 0);
+  const [item] = new DelegationStore(file).awaitingFor(card.requestId); // on disk
+  assert.equal(item.toKey, "cli:child");
+  assert.equal(item.text, "hello");
+  assert.match(item.prompt, new RegExp(String.raw`^\[from ${nm(registry, "cli:parent")}\]\nhello`));
+});
+
+test("two messages to the same closed child share one requestId", () => {
+  const { registry, store, reopens } = closedChild();
+  registry.send("cli:parent", KID, "one");
+  registry.send("cli:parent", KID, "x".repeat(250));
+  const [a, b] = reopens();
+  assert.equal(a.requestId, b.requestId);
+  assert.deepEqual(b.previews, ["one", `${"x".repeat(200)}…`]);
+  assert.equal(store.reopensFrom("cli:parent").length, 1);
+  assert.equal(store.awaitingFor(a.requestId).length, 2);
+});
+
+test("approve releases the queue; the child gets it on attach, decorated", () => {
+  const { registry, store, d, reopens, reopenChild, childPush } = closedChild();
+  registry.send("cli:parent", KID, "hello");
+  const [{ requestId }] = reopens();
+  assert.equal(d.answerReopen("cli:parent", requestId, true), true);
+  assert.equal(store.pending("cli:child").length, 1);
+  assert.equal(store.reopensFrom("cli:parent").length, 0);
+  assert.equal(childPush.length, 0);
+  reopenChild();
+  d.attached("cli:child");
+  assert.equal(childPush.length, 1);
+  assert.equal(childPush[0].wake, true);
+  assert.match(childPush[0].prompt, /hello[\s\S]*Your parent: "mama-/);
+  assert.ok(d.ack("cli:child", childPush[0].deliveryId));
+});
+
+test("approve delivers at once when the target was opened meanwhile; attach alone delivers nothing", () => {
+  const { registry, store, d, reopens, reopenChild, childPush } = closedChild();
+  registry.send("cli:parent", KID, "hello");
+  const [{ requestId }] = reopens();
+  reopenChild();
+  d.attached("cli:child");
+  assert.equal(childPush.length, 0); // still awaiting the user's answer
+  d.answerReopen("cli:parent", requestId, true);
+  assert.equal(childPush.length, 1);
+  assert.match(childPush[0].prompt, /hello/);
+  assert.equal(store.pending("cli:child").length, 1); // until acked
+});
+
+test("reject drops the queue and wakes the sender with the not-delivered notice", () => {
+  const { registry, store, d, reopens, parentPush } = closedChild();
+  registry.send("cli:parent", KID, "hello");
+  const [{ requestId }] = reopens();
+  assert.equal(d.answerReopen("cli:parent", requestId, false), true);
+  assert.equal(store.awaitingFor(requestId).length, 0);
+  assert.equal(store.reopensFrom("cli:parent").length, 0);
+  assert.ok(store.linkOf("cli:child"));
+  const notice = parentPush.at(-1);
+  assert.equal(notice.from, "relay");
+  assert.equal(notice.wake, true);
+  assert.equal(notice.text, REJECTED(KID));
+  assert.match(notice.prompt, new RegExp(String.raw`^\[from relay\]\n`));
+  assert.equal(store.pending("cli:parent").length, 1);
+  assert.equal(d.answerReopen("cli:parent", requestId, false), false); // already answered
+});
+
+test("a missing target on approve is forgotten", () => {
+  const { registry, store, d, reopens, parentPush } = closedChild();
+  registry.send("cli:parent", KID, "hello");
+  const [{ requestId }] = reopens();
+  d.answerReopen("cli:parent", requestId, false, "missing");
+  assert.equal(store.linkOf("cli:child"), null);
+  assert.equal(store.awaitingFor(requestId).length, 0);
+  assert.equal(store.reopensFrom("cli:parent").length, 0);
+  assert.equal(parentPush.at(-1).text, REJECTED(KID));
+});
+
+test("only the sender can answer its reopen request", () => {
+  const { registry, store, d, reopens } = closedChild();
+  registry.send("cli:parent", KID, "hello");
+  const [{ requestId }] = reopens();
+  assert.equal(d.answerReopen("cli:other", requestId, false), false);
+  assert.equal(store.awaitingFor(requestId).length, 1);
+});
+
+test("the sender's re-registration re-emits the same reopen_request", () => {
+  const { registry, d, file, reopens, parentPeer } = closedChild();
+  registry.send("cli:parent", KID, "hello");
+  const [first] = reopens();
+  registry.disconnect("cli:parent");
+  clearTimeout(registry.get("cli:parent").offlineTimer);
+  registry.upsert(parentPeer);
+  d.attached("cli:parent");
+  assert.equal(reopens().length, 2);
+  assert.deepEqual(reopens()[1], first);
+  d.attached("cli:parent");
+  assert.equal(reopens().length, 3); // once per attach
+  // after a broker restart too
+  const control = [];
+  const registry2 = new Registry();
+  registry2.upsert({ ...parentPeer, control: (...a) => control.push(a) });
+  new Delegation({ registry: registry2, store: new DelegationStore(file) }).attached("cli:parent");
+  assert.deepEqual(control, [["reopen_request", { ...first, fromName: nm(registry2, "cli:parent") }]]);
+});
+
+test("a child messaging its offline parent asks for a reopen on its own control stream", () => {
+  const s = setup();
+  s.registry.offlineRelative = (f, n, t) => s.d.messageClosed(f, n, t);
+  s.registry.disconnect("cli:parent");
+  clearTimeout(s.registry.get("cli:parent").offlineTimer);
+  const name = nm(s.registry, "cli:parent");
+  assert.equal(s.registry.send("cli:child", name, "hi"), CLOSED(name));
+  assert.equal(s.childControl.at(-1)[0], "reopen_request");
+  assert.equal(s.childControl.at(-1)[1].targetKey, "cli:parent");
+});
+
+test("a closed unrelated session still gets No session", () => {
+  const { registry, store } = closedChild();
+  registry.upsert({ key: "cli:solo", name: "solo", kind: "cli", push: () => true });
+  const solo = nm(registry, "cli:solo");
+  registry.remove("cli:solo");
+  assert.match(registry.send("cli:parent", solo, "hi"), /^No session/);
+  assert.match(registry.send("cli:parent", "nobody", "hi"), /^No session "nobody"/);
+  assert.equal(store.reopensFrom("cli:parent").length, 0);
+});
+
+test("a sender without app control gets the no-app-connection copy and nothing is queued", () => {
+  const { registry, store } = closedChild();
+  registry.get("cli:parent").control = null;
+  assert.equal(registry.send("cli:parent", KID, "hello"), NO_APP(KID));
+  registry.get("cli:parent").control = () => {
+    throw new Error("stream closed");
+  };
+  assert.equal(registry.send("cli:parent", KID, "hello"), NO_APP(KID));
+  assert.equal(store.reopensFrom("cli:parent").length, 0);
+  assert.equal(Object.keys(store.data.outbox).length, 0);
+});
+
+test("the pair budget is charged for a message to a closed relative", () => {
+  const registry = new Registry({ maxAgentMessages: 5, maxPairMessages: 2 });
+  const s = setup({ registry });
+  s.registry.offlineRelative = (f, n, t) => s.d.messageClosed(f, n, t);
+  assert.match(registry.send("cli:parent", KID, "live"), /delivered/); // charged to the same pair
+  registry.remove("cli:child");
+  assert.equal(registry.send("cli:parent", KID, "one"), CLOSED(KID));
+  assert.match(registry.send("cli:parent", KID, "two"), /budget is exhausted/);
+  assert.equal(registry.budget, 5); // the global budget is untouched
+  const [r] = s.store.reopensFrom("cli:parent");
+  assert.equal(s.store.awaitingFor(r.requestId).length, 1);
+});
+
+test("a linked send to an online relative carries the family block", () => {
+  const { registry, d, childPush } = setup();
+  registry.decorate = (k, p) => d.decorate(k, p);
+  registry.send("cli:parent", KID, "hi");
+  assert.match(childPush[0].prompt, /hi[\s\S]*Your parent: "mama-/);
+});
+
+test("onChange fires on a new reopen request and on its answer", () => {
+  const { registry, d, reopens } = closedChild();
+  let n = 0;
+  d.onChange(() => n++);
+  registry.send("cli:parent", KID, "hello");
+  assert.equal(n, 1);
+  d.answerReopen("cli:parent", reopens()[0].requestId, true);
+  assert.equal(n, 2);
+});

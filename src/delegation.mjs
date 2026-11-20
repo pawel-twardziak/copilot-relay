@@ -1,7 +1,7 @@
 // Delegated sessions: a parent session asks for a child, the child reports back. Links and undelivered
 // reports/notices are durable (DelegationStore); delivery is at-least-once until the parent's app acknowledges.
 import { randomUUID } from "node:crypto";
-import { relayPrefix } from "./registry.mjs";
+import { BUDGET_EXHAUSTED, relayPrompt } from "./registry.mjs";
 
 export class Delegation {
   #listeners = [];
@@ -124,11 +124,7 @@ export class Delegation {
       from: child.name,
       ...(child.cwd ? { fromCwd: child.cwd } : {}),
       text,
-      prompt:
-        `${relayPrefix(child.name, child.cwd)}${text}\n\n` +
-        `(Relay note: ${child.name} cannot see your chat output — only your user can. ` +
-        `If this message asks you something or expects an answer, reply with the relay send_message tool ` +
-        `(relay_send_message), to: "${child.name}"; a summary in your chat does not reach them.)`,
+      prompt: relayPrompt(child.name, child.cwd, text),
     };
     this.store.enqueue(item); // on disk before any delivery attempt
     this.store.markReported(callerKey);
@@ -154,13 +150,97 @@ export class Delegation {
     this.#deliver(item);
   }
 
-  /** A peer registered: redeliver its unacknowledged items, restore its link, and check its children later. */
+  /**
+   * A message from `fromKey` to `name`, which is not online: when it names the sender's parent or a direct child,
+   * queue it until the user approves reopening that session (one request per pair). Null when no relative matches.
+   */
+  messageClosed(fromKey, name, text) {
+    const from = this.registry.get(fromKey);
+    if (!from) return null;
+    const wanted = String(name).trim().toLowerCase();
+    const parent = this.store.parentOf(fromKey);
+    const targetKey = [...(parent ? [parent] : []), ...this.store.childrenOf(fromKey)].find(
+      (k) => !this.registry.get(k)?.online && [this.registry.get(k)?.name, this.store.nameOf(k)].some((n) => n && n.toLowerCase() === wanted),
+    );
+    if (!targetKey) return null;
+    const targetName = this.#nameOf(targetKey);
+    const noApp = `Session "${targetName}" is closed and you have no app connection to ask the user to reopen it.`;
+    if (!from.control) return noApp;
+    const [parentKey, childKey] = targetKey === parent ? [targetKey, fromKey] : [fromKey, targetKey];
+    if (!this.registry.chargePair(parentKey, childKey)) return BUDGET_EXHAUSTED;
+    const existing = this.store.reopenFor(fromKey, targetKey);
+    const reopen = existing ?? { requestId: this.newId(), fromKey, targetKey };
+    const item = {
+      id: this.newId(),
+      toKey: targetKey,
+      from: from.name,
+      ...(from.cwd ? { fromCwd: from.cwd } : {}),
+      text,
+      prompt: relayPrompt(from.name, from.cwd, text),
+      awaiting: reopen.requestId,
+    };
+    this.store.enqueue(item); // on disk before the user is asked
+    if (!existing) this.store.addReopen(reopen);
+    if (!this.#askReopen(reopen)) {
+      this.store.remove(item.id);
+      if (!existing) this.store.removeReopen(reopen.requestId);
+      return noApp;
+    }
+    this.#changed();
+    return `Session "${targetName}" is closed. The user was asked to reopen it; your message is queued and will be delivered if they approve. Do not wait for it.`;
+  }
+
+  /**
+   * The user answered the sender's reopen request. Approved: the queued messages become deliverable (now, if the
+   * target is already open). Rejected, or `reason: "missing"` (the target no longer exists; its link is forgotten):
+   * the messages are dropped and the sender is told. False when the sender has no such request.
+   */
+  answerReopen(fromKey, requestId, approved, reason) {
+    const reopen = this.store.reopensFrom(fromKey).find((r) => r.requestId === requestId);
+    if (!reopen) return false;
+    const targetName = this.#nameOf(reopen.targetKey);
+    if (approved && reason !== "missing") {
+      const items = this.store.awaitingFor(requestId);
+      this.store.release(requestId);
+      for (const item of items) this.#deliver(item);
+    } else {
+      this.store.dropAwaiting(requestId);
+      if (reason === "missing") this.store.forget(reopen.targetKey);
+      const text = `The user did not reopen "${targetName}"; your message was not delivered.`;
+      const item = { id: this.newId(), toKey: fromKey, from: "relay", text, prompt: `[from relay]\n${text}` };
+      this.store.enqueue(item);
+      this.#deliver(item);
+    }
+    this.store.removeReopen(requestId);
+    this.#changed();
+    return true;
+  }
+
+  /** Emit the reopen card for `reopen` on its sender's control stream; false when that is not possible. */
+  #askReopen({ requestId, fromKey, targetKey }) {
+    const from = this.registry.get(fromKey);
+    if (!from?.control) return false;
+    const previews = this.store.awaitingFor(requestId).map((i) => (i.text.length > 200 ? `${i.text.slice(0, 200)}…` : i.text));
+    try {
+      from.control("reopen_request", { requestId, targetKey, targetName: this.#nameOf(targetKey), fromName: from.name, previews });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  #nameOf(key) {
+    return this.registry.get(key)?.name || this.store.nameOf(key) || "session";
+  }
+
+  /** A peer registered: redeliver its unacknowledged items, restore its link, re-ask its pending reopen requests. */
   attached(key) {
     const peer = this.registry.get(key);
     const parent = this.store.parentOf(key);
     if (peer && parent && !peer.parentKey) peer.parentKey = parent;
     if (peer && parent && peer.name !== this.store.nameOf(key)) this.store.link(key, parent, peer.name);
     for (const item of this.store.pending(key)) this.#deliver(item);
+    for (const reopen of this.store.reopensFrom(key)) this.#askReopen(reopen);
     this.#changed();
   }
 
@@ -178,7 +258,7 @@ export class Delegation {
   #endedNotice(childKey) {
     const parentKey = this.store.parentOf(childKey);
     if (!parentKey || !this.store.markEndedNotice(childKey)) return;
-    const name = this.registry.get(childKey)?.name || this.store.nameOf(childKey) || "session";
+    const name = this.#nameOf(childKey);
     const text = `Session "${name}" ended without reporting a result. You can ask the user to reopen it.`;
     const item = { id: this.newId(), toKey: parentKey, from: "relay", text, prompt: `[from relay]\n${text}` };
     this.store.enqueue(item);
