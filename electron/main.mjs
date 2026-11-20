@@ -15,6 +15,7 @@ import { createUsagePusher } from "./usage.mjs";
 import { JobScheduler } from "./scheduler.mjs";
 import { scheduleInfo } from "./jobs.mjs";
 import { PendingRequests, childPrompt, findModelOption, limitError, reloadWarning, resolveConfig, unreportedChildren, withDeadline } from "./delegation.mjs";
+import { createTierStore, effectiveTier, normalizeTier, tierArgs, withContextOption } from "./context-tier.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 let win = null;
@@ -64,6 +65,12 @@ function saveSettings(s) {
   writeFileSync(settingsFile(), JSON.stringify(s, null, 2));
 }
 const copilotCommand = () => loadSettings().copilotCommand || process.env.COPILOT_PATH || "copilot";
+
+// Context window per session (200k / 1M): an override per session, else the Settings default (see context-tier.mjs)
+const tiers = createTierStore(path.join(app.getPath("userData"), "context-tiers.json"));
+const sessionTier = (sessionId) => effectiveTier(tiers.get(sessionId), loadSettings().contextTier);
+/** The config options as the window gets them: Copilot's own plus the Context select. */
+const viewConfig = (sessionId, configOptions) => withContextOption(configOptions, tiers.get(sessionId), loadSettings().contextTier);
 
 // Sign-in problems are recognized by ACP's auth_required error code, not by guessing from the wording (Copilot
 // uses other codes for other errors: -32002 resource not found, -32602 invalid params…).
@@ -153,8 +160,8 @@ const send = (channel, payload) => win && !win.isDestroyed() && win.webContents.
 
 // ---------- connections ----------
 
-async function connect(cwd, deadline) {
-  const conn = new AcpConnection({ command: copilotCommand(), cwd });
+async function connect(cwd, deadline, args = []) {
+  const conn = new AcpConnection({ command: copilotCommand(), cwd, args });
   try {
     await (deadline ? withDeadline(conn.start(), deadline, SETUP_TIMEOUT_TEXT) : conn.start());
   } catch (e) {
@@ -198,7 +205,10 @@ function attach(sessionId, conn, cwd, relay, link) {
   entry.update = (u) => {
     if (u?.sessionUpdate === "tool_call" && u.title) entry.toolTitles.set(u.toolCallId, u.title);
     if (u?.sessionUpdate === "usage_update" && open.get(sessionId) === entry) usage.context(sessionId, { used: u.used, size: u.size });
-    if (u?.sessionUpdate === "config_option_update" && Array.isArray(u.configOptions)) entry.configOptions = u.configOptions;
+    if (u?.sessionUpdate === "config_option_update" && Array.isArray(u.configOptions)) {
+      entry.configOptions = u.configOptions;
+      u = { ...u, configOptions: viewConfig(sessionId, u.configOptions) };
+    }
     // /rename answers with a chat line ("Session renamed to: …"); the new title arrives as session_info_update
     if (entry.renaming && u?.sessionUpdate === "agent_message_chunk") return;
     send("acp:update", { sessionId, update: u });
@@ -272,10 +282,11 @@ handle("sessions:list", async () => {
 const CHILD_SETUP_TIMEOUT_MS = 30_000; // from the approval until the child's agent and model are set
 const SETUP_TIMEOUT_TEXT = `Copilot did not answer within ${CHILD_SETUP_TIMEOUT_MS / 1000} seconds.`;
 
-/** Start a Copilot process with a new session and attach it. `link` ({ name, parentKey }) is for delegated sessions. */
-async function createSession(cwd, link = {}, deadline) {
+/** Start a Copilot process with a new session and attach it. `link` ({ name, parentKey }) is for delegated sessions;
+ *  `tier` is the context tier to start with (null: the Settings default). */
+async function createSession(cwd, link = {}, deadline, tier = null) {
   requireDir(cwd);
-  const conn = await connect(cwd, deadline);
+  const conn = await connect(cwd, deadline, tierArgs(tier ?? effectiveTier(null, loadSettings().contextTier)));
   const relay = relayPrepare();
   // the agent may send updates (available_commands_update…) before it answers session/new: keep them
   const early = [];
@@ -300,7 +311,7 @@ async function createSession(cwd, link = {}, deadline) {
 
 handle("sessions:new", async (cwd) => {
   const { sessionId, cwd: dir, configOptions } = await createSession(cwd);
-  return { sessionId, cwd: dir, configOptions }; // the entry stays here: it can't cross IPC
+  return { sessionId, cwd: dir, configOptions: viewConfig(sessionId, configOptions) }; // the entry stays here: it can't cross IPC
 });
 
 // sessions being opened (id -> number of opens in flight) / deleted: a delete must not race a resume that hasn't
@@ -327,7 +338,7 @@ handle("sessions:open", async (sessionId, cwd) => {
 
 async function openSession(sessionId, cwd) {
   requireDir(cwd);
-  const conn = await connect(cwd);
+  const conn = await connect(cwd, undefined, tierArgs(sessionTier(sessionId)));
   const relay = relayPrepare();
   // the agent replays the history as session/update notifications before answering session/load
   const entry = attach(sessionId, conn, cwd, relay);
@@ -335,7 +346,7 @@ async function openSession(sessionId, cwd) {
     const res = await conn.request("session/load", { sessionId, cwd, mcpServers: relay.mcpServers });
     entry.configOptions = res?.configOptions ?? entry.configOptions;
     if (open.get(sessionId) === entry) usage.refresh(sessionId);
-    return { sessionId, cwd, configOptions: res?.configOptions ?? [] };
+    return { sessionId, cwd, configOptions: viewConfig(sessionId, res?.configOptions) };
   } catch (e) {
     entry.relay?.stop();
     open.delete(sessionId);
@@ -679,8 +690,10 @@ async function createChild(req) {
     if (announced) send("delegation:closed", { sessionId: child.sessionId });
   };
   try {
-    child = await createSession(parent.cwd, { name, parentKey: `cli:${parentSessionId}` }, deadline);
+    const tier = sessionTier(parentSessionId); // the child works on the parent's context window
+    child = await createSession(parent.cwd, { name, parentKey: `cli:${parentSessionId}` }, deadline, tier);
     const { sessionId, entry } = child;
+    tiers.set(sessionId, tier); // as an override, so a later reopen keeps it
     if (!entry.relay) throw new Error("The relay is switched off in this app, so the new session cannot be linked to its parent.");
     // once registered, the entry itself counts as a child: its place in `creating` would count it twice
     entry.relay.registered.then(release);
@@ -692,7 +705,7 @@ async function createChild(req) {
     }
     for (const { configId, value } of config.sets) await withDeadline(setConfigOption(sessionId, entry, configId, value), deadline, SETUP_TIMEOUT_TEXT);
 
-    send("delegation:created", { sessionId, cwd: child.cwd, configOptions: entry.configOptions, parentSessionId, title: name });
+    send("delegation:created", { sessionId, cwd: child.cwd, configOptions: viewConfig(sessionId, entry.configOptions), parentSessionId, title: name });
     announced = true;
 
     if (!(await waitRegistered(entry.relay, REGISTER_TIMEOUT_MS))) {
@@ -816,7 +829,9 @@ handle("sessions:fork", async (sessionId, target) => {
   target = cutTarget(target);
   refuseWhilePrompting(sessionId);
   refuseWhileDeleting(sessionId);
-  return forkSession(sessionId, target);
+  const res = forkSession(sessionId, target);
+  tiers.copy(sessionId, res.sessionId); // a long history must not land in a smaller window
+  return res;
 });
 
 // cut the history in place; the session is closed first and the renderer reopens it via sessions:open
@@ -855,6 +870,7 @@ handle("sessions:delete", async (sessionId) => {
     }
     // missingOk: a session that never wrote its dir (or is already gone) just has its store rows removed
     const res = await deleteSession(sessionId, { missingOk: true });
+    tiers.delete(sessionId);
     if (res.leftover) console.warn(`[delete] could not remove ${res.leftover}`);
     if (res.store.error) console.warn(`[delete] session-store.db: ${res.store.error}`);
     return res;
@@ -864,7 +880,8 @@ handle("sessions:delete", async (sessionId) => {
 });
 
 handle("sessions:setConfig", async (sessionId, configId, value) => {
-  return setConfigOption(sessionId, getOpen(sessionId), configId, value);
+  const updated = await setConfigOption(sessionId, getOpen(sessionId), configId, value);
+  return updated && viewConfig(sessionId, updated);
 });
 
 handle("permission:answer", async (sessionId, reqId, optionId) => {
@@ -894,9 +911,10 @@ handle("settings:get", async () => ({
   relay: loadSettings().relay !== false,
   relayAvailable: Boolean(RelayClient),
   relayUrl: relayConfig().url,
+  contextTier: normalizeTier(loadSettings().contextTier) ?? "default",
 }));
 handle("settings:set", async (s) => {
-  saveSettings({ ...loadSettings(), copilotCommand: String(s.copilotCommand ?? "").trim(), relay: s.relay !== false });
+  saveSettings({ ...loadSettings(), copilotCommand: String(s.copilotCommand ?? "").trim(), relay: s.relay !== false, contextTier: normalizeTier(s.contextTier) ?? "default" });
   lister?.kill();
   lister = null;
   return true;
