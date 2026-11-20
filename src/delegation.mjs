@@ -38,7 +38,7 @@ export class Delegation {
     if (this.store.isReported(callerKey)) return "You have already reported. Use send_message for further exchanges.";
     const item = {
       id: this.newId(),
-      parentKey,
+      toKey: parentKey,
       from: child.name,
       ...(child.cwd ? { fromCwd: child.cwd } : {}),
       text,
@@ -62,7 +62,7 @@ export class Delegation {
   }
 
   outcome(parentKey, { kind, text }) {
-    const item = { id: this.newId(), parentKey, from: "relay", text, prompt: `[from relay]\n${text}` };
+    const item = { id: this.newId(), toKey: parentKey, from: "relay", text, prompt: `[from relay]\n${text}` };
     if (kind === "created") {
       this.registry.pushTo(parentKey, { from: "relay", human: false, text, prompt: item.prompt, wake: false });
       return;
@@ -105,14 +105,14 @@ export class Delegation {
     if (!parentKey || !this.store.markEndedNotice(childKey)) return;
     const name = currentName || this.registry.get(childKey)?.name || this.store.nameOf(childKey) || "session";
     const text = `Session "${name}" ended without reporting a result. You can ask the user to reopen it.`;
-    const item = { id: this.newId(), parentKey, from: "relay", text, prompt: `[from relay]\n${text}` };
+    const item = { id: this.newId(), toKey: parentKey, from: "relay", text, prompt: `[from relay]\n${text}` };
     this.store.enqueue(item);
     this.#deliver(item);
   }
 
   #deliver(item) {
     // pushTo, not Registry.send: reports and notices are charged to no budget
-    return this.registry.pushTo(item.parentKey, {
+    return this.registry.pushTo(item.toKey, {
       from: item.from,
       ...(item.fromCwd ? { fromCwd: item.fromCwd } : {}),
       human: false,

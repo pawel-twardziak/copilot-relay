@@ -7,7 +7,7 @@ import { stateFile } from "./name-store.mjs";
 export class DelegationStore {
   constructor(file = process.env.COPILOT_RELAY_DELEGATIONS_FILE ?? stateFile("delegations.json")) {
     this.file = file;
-    this.data = { links: {}, outbox: {} };
+    this.data = { links: {}, outbox: {}, reopens: {} };
     let raw;
     try {
       raw = readFileSync(file, "utf8");
@@ -18,7 +18,9 @@ export class DelegationStore {
     if (raw !== undefined) {
       try {
         const d = JSON.parse(raw);
-        this.data = { links: d.links ?? {}, outbox: d.outbox ?? {} };
+        this.data = { links: d.links ?? {}, outbox: d.outbox ?? {}, reopens: d.reopens ?? {} };
+        // older files keyed the recipient as parentKey
+        for (const i of Object.values(this.data.outbox)) if (i.toKey === undefined) i.toKey = i.parentKey;
       } catch (e) {
         const aside = `${file}.corrupt-${Date.now()}`;
         renameSync(file, aside);
@@ -35,8 +37,52 @@ export class DelegationStore {
       name: name || prev?.name || "",
       reported: prev?.parent === parent ? prev.reported : false,
       ended: prev?.parent === parent ? prev.ended : false,
+      createdAt: prev?.createdAt ?? Date.now(),
+      ...(prev?.task ? { task: prev.task } : {}),
+      ...(prev?.parentDeleted && prev.parent === parent ? { parentDeleted: true } : {}),
     };
     this.#save();
+  }
+
+  /** Set the task once; false when there is no link or a task is already set. */
+  setTask(child, task) {
+    const l = this.data.links[child];
+    if (!l || l.task) return false;
+    l.task = task;
+    this.#save();
+    return true;
+  }
+
+  taskOf(child) {
+    return this.data.links[child]?.task ?? "";
+  }
+
+  linkOf(child) {
+    return this.data.links[child] ?? null;
+  }
+
+  allLinks() {
+    return Object.entries(this.data.links);
+  }
+
+  /** All transitive children, depth-first, siblings by createdAt; cycle-safe; never includes `key`. */
+  descendantsOf(key) {
+    const seen = new Set([key]);
+    const out = [];
+    const walk = (k) => {
+      const kids = this.allLinks()
+        .filter(([, l]) => l.parent === k)
+        .sort(([, a], [, b]) => (a.createdAt ?? 0) - (b.createdAt ?? 0))
+        .map(([c]) => c);
+      for (const c of kids) {
+        if (seen.has(c)) continue;
+        seen.add(c);
+        out.push(c);
+        walk(c);
+      }
+    };
+    walk(key);
+    return out;
   }
 
   parentOf(child) {
@@ -76,8 +122,57 @@ export class DelegationStore {
     this.#save();
   }
 
-  pending(parentKey) {
-    return Object.values(this.data.outbox).filter((i) => i.parentKey === parentKey);
+  pending(toKey) {
+    return Object.values(this.data.outbox).filter((i) => i.toKey === toKey && !i.awaiting);
+  }
+
+  awaitingFor(requestId) {
+    return Object.values(this.data.outbox).filter((i) => i.awaiting === requestId);
+  }
+
+  /** The user approved the reopen: the held items become deliverable. */
+  release(requestId) {
+    const items = this.awaitingFor(requestId);
+    if (!items.length) return;
+    for (const i of items) delete i.awaiting;
+    this.#save();
+  }
+
+  /** The user rejected the reopen: remove and return the held items. */
+  dropAwaiting(requestId) {
+    const items = this.awaitingFor(requestId);
+    if (!items.length) return [];
+    for (const i of items) delete this.data.outbox[i.id];
+    this.#save();
+    return items;
+  }
+
+  addReopen({ requestId, fromKey, targetKey }) {
+    this.data.reopens[requestId] = { requestId, fromKey, targetKey };
+    this.#save();
+  }
+
+  reopensFrom(fromKey) {
+    return Object.values(this.data.reopens).filter((r) => r.fromKey === fromKey);
+  }
+
+  reopenFor(fromKey, targetKey) {
+    return Object.values(this.data.reopens).find((r) => r.fromKey === fromKey && r.targetKey === targetKey) ?? null;
+  }
+
+  removeReopen(requestId) {
+    if (!this.data.reopens[requestId]) return;
+    delete this.data.reopens[requestId];
+    this.#save();
+  }
+
+  /** The session is gone for good: drop its link, queued items and reopen requests; its children keep `parent` but are orphans. */
+  forget(key) {
+    delete this.data.links[key];
+    for (const [id, i] of Object.entries(this.data.outbox)) if (i.toKey === key) delete this.data.outbox[id];
+    for (const [id, r] of Object.entries(this.data.reopens)) if (r.fromKey === key || r.targetKey === key) delete this.data.reopens[id];
+    for (const l of Object.values(this.data.links)) if (l.parent === key) l.parentDeleted = true;
+    this.#save();
   }
 
   remove(id) {
