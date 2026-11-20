@@ -43,11 +43,6 @@ export class NameStore {
     this.#save();
   }
 
-  /** Names currently reserved by other keys (so new random names don't collide with them). */
-  isTakenByOther(name, key) {
-    return Object.entries(this.data).some(([k, v]) => k !== key && v.name === name);
-  }
-
   #save() {
     const entries = Object.entries(this.data);
     if (entries.length > MAX_ENTRIES) {

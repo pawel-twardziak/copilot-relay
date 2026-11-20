@@ -30,14 +30,14 @@ test("an old base name does not reach the renamed session", () => {
   const r = new Registry();
   r.upsert({ key: "cli:s", name: "sender", kind: "cli", push: () => true });
   r.upsert({ key: "cli:t", name: "old", kind: "cli", push: () => true });
+  const oldFull = r.get("cli:t").name;
   r.rename("cli:t", "new");
-  assert.match(r.send("cli:s", "old", "hi"), /^No session "old"/);
+  assert.match(r.send("cli:s", oldFull, "hi"), new RegExp(`^No session "${oldFull}"`));
 });
 test("reserved names still get another name", () => {
   const r = new Registry();
   const p = r.upsert({ key: "cli:c", name: "relay", kind: "cli" });
   assert.equal(p.name, `relay-session-${nameSuffix("cli:c")}`);
-  assert.notEqual(p.name.replace(/-[0-9a-f]{6}$/, ""), "relay");
   assert.throws(() => r.rename("cli:c", "relay"), /reserved/);
   assert.throws(() => r.rename("cli:c", "user"), /reserved/);
 });
