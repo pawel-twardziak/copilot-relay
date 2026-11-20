@@ -73,7 +73,7 @@ to live until the user or the parent's closing ends them, and no caps.
 A link record becomes:
 
 ```
-links[childKey] = { parent, name, task, createdAt, reported, ended, parentDeleted, closedBy, missing }
+links[childKey] = { parent, name, task, createdAt, reported, ended, parentDeleted, closedBy }
 ```
 
 - `task`: the `task` text from `create_session`, stored when the link is created. Links that exist from before this
@@ -121,16 +121,22 @@ parameter vs. a follow-up POST, given task length).
 
 ### 4. Reopen on message
 
-**Addressing (call made in the builder check).** Names are freed 30 s after a session disconnects, so a closed
-child's name can be taken by another session, and two closed siblings can share a stored name. Therefore:
+**Addressing: permanent unique names (decided by the user).** Today a name is freed 30 s after its session
+disconnects, so a closed child's name can be taken by another session. Instead every relay name becomes
+`<base>-<suffix>`:
 
-- `send_message`'s `to` also accepts a session key (`cli:<id>`, or the short key shown in "Your children").
-- Resolution order in `Registry.send`: (1) exact key; (2) the sender's **relatives** (parent, direct children) by
-  stored name, online or closed; (3) online peers by name. A relative therefore wins over an unrelated session that
-  took its name.
-- Two relatives with the same name → not delivered; the tool returns both keys and asks the model to use one.
-- A reopened session whose old name is taken comes back with a new name as today; the store's `name` is updated on
-  registration and the next "Your children" block shows it.
+- `suffix` = first 6 hex characters of SHA-256 of the peer key (`cli:<sessionId>`, MCP keys likewise). It is fixed
+  for the life of the session: `rename` / `set_name` / `create_session`'s `name` change only `base`; a requested name
+  that already ends with the session's own suffix is not suffixed twice.
+- `base` is the requested or random name, normalised as today.
+- The name is reserved permanently: `freeName` no longer appends `-2`, and a name is never handed to another key.
+  If two keys ever produce the same full name (same base, colliding 6-hex suffix), the later key's suffix is extended
+  to 8 characters.
+- `NameStore`'s 1000-entry pruning must not drop the name of a session that still has a link in `DelegationStore`.
+- Existing sessions migrate on their next registration: their current name becomes the base and gets the suffix.
+  Links and outbox items keep keys, so nothing else migrates.
+- Lookup in `Registry.send`: full name, case-insensitive, across online peers **and** linked relatives (closed
+  included). No key-based addressing is needed. "Your children" and `list_sessions` always show full names.
 
 In `Registry.send(fromKey, to, text)`, when `to` resolves to a relative that is not online:
 
@@ -145,7 +151,7 @@ In `Registry.send(fromKey, to, text)`, when `to` resolves to a relative that is 
    marker, and an OS notification fires if the window is unfocused (same as permission cards).
 5. Approve → the renderer resumes the target (same path as clicking it in the sidebar, **without** activating it).
    On its registration the broker's existing `attached()` redelivery delivers the queued item.
-6. Reject, or the sender's view closing while the card is open → the outbox item is dropped and the sender gets a
+6. Reject → the outbox item is dropped and the sender gets a
    waking `[from relay]` notice: `The user did not reopen "<name>"; your message was not delivered.`
 7. Several messages to the same closed target before an answer: one card, messages queue in order (builder detail).
 
@@ -156,8 +162,8 @@ In `Registry.send(fromKey, to, text)`, when `to` resolves to a relative that is 
   restart, reload, broker restart) the broker re-emits `reopen_request` and the card reappears.
 - If the user opens the target some other way while a card is pending, nothing is delivered; the card stays, and
   Approve then just delivers (no resume needed).
-- If the target session no longer exists on disk, Approve fails visibly in the card ("This session no longer
-  exists"), the item is dropped and the sender gets the not-delivered notice.
+- If the target turns out not to exist on disk when Approve resumes it, the card says so, the item is dropped, the
+  sender gets the not-delivered notice, and the link is pruned as in section 9.
 
 ### 5. What the parent model sees
 
@@ -165,13 +171,13 @@ In `Registry.send(fromKey, to, text)`, when `to` resolves to a relative that is 
 
 ```
 Your children (3):
-- "api-tests" (cli:…1a2b) — open, working — task: Write e2e tests for /orders … [has 2 children]
-- "docs-update" (cli:…9f0c) — closed, reported — task: Update README for the new flags
-- "perf-probe" (cli:…77aa) — open, idle — task: (task not recorded)
-Your parent: "refactor-api" (cli:…c3d4) — closed
+- "api-tests-1a2b3c" — open, working — task: Write e2e tests for /orders … [has 2 children]
+- "docs-update-9f0c4e" — closed, reported — task: Update README for the new flags
+- "perf-probe-77aa01" — open, idle — task: (task not recorded)
+Your parent: "refactor-api-c3d4e5" — closed
 ```
 
-- Each child line: current name, short key (enough to disambiguate equal-looking names), state, task (first line,
+- Each child line: full unique name, state, task (first line,
   truncated at a builder-chosen length with "…"), and `[has N children]` when it has descendants.
 - State is `open`/`closed` plus `working`/`idle` when open, plus `reported`. `working`/`idle` comes from the app:
   the renderer already knows `busy`; main reports it to the broker over the peer connection whenever it changes
@@ -225,13 +231,16 @@ dialog:
   nodes `parentDeleted`.
 - Sessions without descendants keep today's `confirm()`.
 
-### 9. Sessions missing on disk (call made in the builder check)
+### 9. Sessions missing on disk (decided by the user: prune)
 
-Sessions can vanish without the in-app delete (Copilot cleanup, terminal, web GUI). Links are **not** pruned
-automatically. After loading its session list, the app reports keys it knows from `/api/links` but cannot find on
-disk; the broker marks them `missing` (cleared if they reappear). Missing sessions show greyed "missing" in the
-sidebar tree, the relation bar and "Your children"; messages to them are refused at once (no card). The user can
-remove a missing entry from the tree by deleting it (delete then only forgets the link).
+Sessions can vanish without the in-app delete (Copilot cleanup, terminal, web GUI). They are removed from the tree:
+
+- After the app has loaded its session list **successfully and completely**, it sends the broker the `cli:` keys
+  from `/api/links` that are not on disk; the broker forgets them exactly like a delete (section 8): their links and
+  outbox items go, their kept children become orphans (`parentDeleted`).
+- No pruning when the list failed, is partial, or is still loading, and never for non-`cli:` keys (the app cannot see
+  those sessions). This guard is what prevents a transient listing error from wiping the tree.
+- Messages addressed to a pruned session get the ordinary `No session "…"` error.
 
 ## Constraints
 
