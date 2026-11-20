@@ -76,7 +76,7 @@ to live until the user or the parent's closing ends them, and no caps.
 A link record becomes:
 
 ```
-links[childKey] = { parent, name, task, createdAt, reported, ended, parentDeleted, closedBy }
+links[childKey] = { parent, name, task, createdAt, reported, ended, parentDeleted }
 ```
 
 - `task`: the `task` text from `create_session`, stored when the link is created. Links that exist from before this
@@ -115,12 +115,13 @@ parameter vs. a follow-up POST, given task length).
 - A parent's process dying (crash/kill, `markDead`) is **not** a close: its children keep running (decided by the
   user). Their reports wait durably and arrive when the parent is resumed. The dead parent is shown as dead in the
   tree.
-- **Deliberate closes** (call made in the builder check): the app tells the broker before it closes a session on
-  purpose — view close, subtree close, "Close all sub-sessions", window reload after the user agreed, app quit after
-  the confirmation. The broker stores `closedBy: "user"` on the link (cleared when the session registers again).
-- `childGone` / `#sweep` ("ended without reporting" notice): fires only for children without `closedBy`, i.e. whose
-  process ended on its own. A deliberately closed child produces at most a non-waking "closed by the user" notice to
-  its parent, if the parent is open; the parent's reopen sweep never reports deliberately closed children.
+- **Deliberate vs. died** (call made in the builder check, refined while planning): every close is deliberate unless
+  the app reports otherwise. Only the app can tell a crash from a close (its Copilot process exited while still
+  open, the path that shows "Copilot process exited" today), so it then calls the broker's new `died` endpoint for
+  that session. Only children can be delegated by app sessions, so every child has an app watching it.
+- The "ended without reporting" notice fires only on `died` for an unreported child. The broker's current triggers
+  (`childGone` on registry removal and the parent's `#sweep`) are removed, so view close, subtree close, reload and
+  quit never produce it. A deliberately closed child produces no notice; the tree and "Your children" show it closed.
 
 ### 4. Reopen on message
 
