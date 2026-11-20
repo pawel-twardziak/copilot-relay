@@ -250,7 +250,9 @@ class SessionView {
     this.seenDeliveries = seenDeliveries ?? new Set(); // report ids already taken (the broker redelivers until acked)
     this.pendingNotes = pendingNotes ?? []; // non-waking notices, passed to the model with the next prompt
     this.openCards = new Set(); // permission, delegation and reopen cards still waiting for an answer
-    this.reopenRequests = new Set(); // requestIds of reopen cards shown here (the broker re-emits unanswered ones)
+    // requestId -> previews element of its reopen card while it is open, null once answered (the broker re-emits a
+    // request, with every queued message, until it is answered)
+    this.reopenRequests = new Map();
     this.busy = false;
     this.dead = false;
     this.run = null; // current streamed block { type, el, text }
@@ -1256,10 +1258,17 @@ class SessionView {
   /** A relative of this session sent a message to a closed one: the user decides whether it is reopened. The names
    *  and previews are model-written: plain text only. */
   reopenCard({ requestId, targetSessionId, targetName, fromName, previews }) {
-    if (this.reopenRequests.has(requestId)) return; // the broker re-emits a request until it is answered
-    this.reopenRequests.add(requestId);
+    const previewEls = (list) => (list ?? []).map((p) => h("div", { class: "task" }, p));
+    if (this.reopenRequests.has(requestId)) {
+      // another message to the same closed target: the open card shows every queued one; an answered id stays ignored
+      this.reopenRequests.get(requestId)?.replaceChildren(...previewEls(previews));
+      return;
+    }
+    const previewsEl = h("div", { class: "previews" }, previewEls(previews));
+    this.reopenRequests.set(requestId, previewsEl);
     this.flush();
     const answer = async (approved) => {
+      this.reopenRequests.set(requestId, null);
       this.closeCard(card);
       opts.replaceChildren(h("span", {}, approved ? "Reopening…" : "Rejecting…"));
       let result;
@@ -1267,15 +1276,21 @@ class SessionView {
         if (!approved) {
           await api.answerReopen(this.sessionId, requestId, false);
           result = "→ Rejected";
+        } else if (deleting.has(targetSessionId)) {
+          await api.answerReopen(this.sessionId, requestId, false);
+          result = "This session is being deleted.";
         } else {
-          const target = sessions.find((s) => s.sessionId === targetSessionId) ?? (await api.listSessions()).find((s) => s.sessionId === targetSessionId);
+          const tv = views.get(targetSessionId); // open (or a dead view): never "missing", that would forget its link
+          const target = tv
+            ? { sessionId: targetSessionId, cwd: tv.cwd, title: tv.title }
+            : (sessions.find((s) => s.sessionId === targetSessionId) ?? (await api.listSessions()).find((s) => s.sessionId === targetSessionId));
           if (!target) {
             await api.answerReopen(this.sessionId, requestId, false, "missing");
             result = "This session no longer exists.";
           } else {
             await api.answerReopen(this.sessionId, requestId, true);
             result = "→ Approved";
-            openSession(target, { activate: false }); // the queued message is delivered when it registers
+            openSession(target, { activate: false }); // the queued message is delivered when it registers (no-op if open)
           }
         }
       } catch (e) {
@@ -1290,7 +1305,7 @@ class SessionView {
       "div",
       { class: "perm reopen" },
       h("div", { class: "q" }, h("b", {}, fromName), ` wants to message the closed session `, h("b", {}, targetName), ". Reopen it?"),
-      (previews ?? []).map((p) => h("div", { class: "task" }, p)),
+      previewsEl,
       opts,
     );
     this.append(card);
