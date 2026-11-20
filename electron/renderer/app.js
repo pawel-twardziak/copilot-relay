@@ -1279,7 +1279,14 @@ class SessionView {
     this.statusEl.textContent = "Restarting Copilot with the new context window…";
     let failure = null;
     try {
-      await api.setContextTier(this.sessionId, sel.value);
+      const res = await api.setContextTier(this.sessionId, sel.value);
+      if (res?.refused) {
+        // nothing was changed or closed: the session stays as it is
+        sel.value = previous;
+        this.setBusy(false);
+        this.error(`Could not change the context window: ${res.refused}`);
+        return;
+      }
     } catch (e) {
       failure = e;
       await api.closeSession(this.sessionId).catch(() => {}); // closed for sure: the reopen replays it unchanged

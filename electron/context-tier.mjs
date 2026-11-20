@@ -52,7 +52,9 @@ export function withContextOption(configOptions, override, globalDefault) {
   return [...own, contextOption(override, globalDefault)];
 }
 
-/** Per-session overrides in a small JSON file ({ [sessionId]: tier }); no entry means "follow Settings". */
+/** Per-session overrides in a small JSON file ({ [sessionId]: tier }); no entry means "follow Settings".
+ *  `set` throws when the file can't be written; `copy` and `delete` are bookkeeping after a fork / delete that
+ *  already succeeded, so a failed write there is only logged. */
 export function createTierStore(file) {
   const read = () => {
     try {
@@ -75,10 +77,39 @@ export function createTierStore(file) {
     else return;
     write(data);
   };
+  const bestEffort = (fn) => {
+    try {
+      fn();
+    } catch (e) {
+      console.warn(`[context-tier] could not write ${file}: ${e.message}`);
+    }
+  };
   return {
     get: (id) => normalizeTier(read()[id]),
     set: put,
-    delete: (id) => put(id, null),
-    copy: (fromId, toId) => put(toId, read()[fromId]),
+    delete: (id) => bestEffort(() => put(id, null)),
+    copy: (fromId, toId) => bestEffort(() => put(toId, read()[fromId])),
   };
+}
+
+/**
+ * Switch a session's context window: refusals come back as { refused } before anything changes, so the window
+ * keeps the session as it is. Otherwise the override is saved and the session's process closed ({ reopen: true }:
+ * the caller reopens it, which starts Copilot with the new flag). A failed close restores the previous override.
+ * @param {{ sessionId: string, value: unknown, tiers: ReturnType<typeof createTierStore>,
+ *           refusal: () => string | null, close: () => Promise<void> }} o
+ */
+export async function switchTier({ sessionId, value, tiers, refusal, close }) {
+  if (!isContextChoice(value)) return { refused: `Unknown context window: ${value}` };
+  const refused = refusal();
+  if (refused) return { refused };
+  const prev = tiers.get(sessionId);
+  tiers.set(sessionId, value);
+  try {
+    await close();
+  } catch (e) {
+    tiers.set(sessionId, prev ?? INHERIT);
+    throw e;
+  }
+  return { reopen: true };
 }

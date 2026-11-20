@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
-import { contextOption, createTierStore, effectiveTier, isContextChoice, tierArgs, withContextOption } from "../context-tier.mjs";
+import { contextOption, createTierStore, effectiveTier, isContextChoice, switchTier, tierArgs, withContextOption } from "../context-tier.mjs";
 
 let dir;
 let file;
@@ -98,4 +98,59 @@ test("store: a missing, empty or corrupt file reads as no overrides", () => {
 test("isContextChoice accepts the select's values only", () => {
   for (const v of ["inherit", "default", "long_context"]) assert.equal(isContextChoice(v), true);
   for (const v of ["", "1M", null, undefined, 1, "Default"]) assert.equal(isContextChoice(v), false);
+});
+
+test("store: copy and delete are best-effort, set reports a failed write", () => {
+  fs.writeFileSync(path.join(dir, "sub"), "a file where the folder should be");
+  const s = createTierStore(file);
+  assert.doesNotThrow(() => s.copy("a", "b"));
+  assert.doesNotThrow(() => s.delete("a"));
+  assert.throws(() => s.set("a", "long_context"));
+});
+
+function fakeSwitch({ refusal = null, closeError = null, saved = null, storeFile = file } = {}) {
+  const store = createTierStore(storeFile);
+  if (saved) store.set("s1", saved);
+  let closed = 0;
+  const run = (value) =>
+    switchTier({
+      sessionId: "s1",
+      value,
+      tiers: store,
+      refusal: () => refusal,
+      close: async () => {
+        closed++;
+        if (closeError) throw closeError;
+      },
+    });
+  return { store, run, closed: () => closed };
+}
+
+test("switchTier: a refusal changes nothing and closes nothing", async () => {
+  const f = fakeSwitch({ refusal: "Wait until Copilot finishes this turn.", saved: "default" });
+  assert.deepEqual(await f.run("long_context"), { refused: "Wait until Copilot finishes this turn." });
+  assert.equal(f.closed(), 0);
+  assert.equal(f.store.get("s1"), "default");
+});
+
+test("switchTier: an unknown value is refused before anything else", async () => {
+  const f = fakeSwitch();
+  assert.deepEqual(await f.run("1M"), { refused: "Unknown context window: 1M" });
+  assert.equal(f.closed(), 0);
+});
+
+test("switchTier: saves the override, then closes; the caller reopens", async () => {
+  const f = fakeSwitch();
+  assert.deepEqual(await f.run("long_context"), { reopen: true });
+  assert.equal(f.closed(), 1);
+  assert.equal(f.store.get("s1"), "long_context");
+});
+
+test("switchTier: a failed close restores the previous override and throws", async () => {
+  const f = fakeSwitch({ closeError: new Error("Copilot did not exit"), saved: "default" });
+  await assert.rejects(f.run("long_context"), /did not exit/);
+  assert.equal(f.store.get("s1"), "default");
+  const g = fakeSwitch({ closeError: new Error("stuck"), storeFile: path.join(dir, "other.json") });
+  await assert.rejects(g.run("long_context"), /stuck/);
+  assert.equal(g.store.get("s1"), null);
 });

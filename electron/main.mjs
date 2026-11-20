@@ -15,7 +15,7 @@ import { createUsagePusher } from "./usage.mjs";
 import { JobScheduler } from "./scheduler.mjs";
 import { scheduleInfo } from "./jobs.mjs";
 import { PendingRequests, childPrompt, findModelOption, limitError, reloadWarning, resolveConfig, unreportedChildren, withDeadline } from "./delegation.mjs";
-import { INHERIT, createTierStore, effectiveTier, isContextChoice, normalizeTier, tierArgs, withContextOption } from "./context-tier.mjs";
+import { createTierStore, effectiveTier, normalizeTier, switchTier, tierArgs, withContextOption } from "./context-tier.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 let win = null;
@@ -885,22 +885,28 @@ handle("sessions:setConfig", async (sessionId, configId, value) => {
 });
 
 // a new context window takes a new Copilot process: the session is closed here and the renderer reopens it
-// (sessions:open starts Copilot with the new flag and replays the history)
+// (sessions:open starts Copilot with the new flag and replays the history). Refusals come back as { refused }
+// with the session untouched: the window must not close and reopen it (a delegated child may still be set up).
 handle("sessions:setContextTier", async (sessionId, value) => {
-  if (!isSessionId(sessionId)) throw new Error(`Invalid session id: ${sessionId}`);
-  if (!isContextChoice(value)) throw new Error(`Unknown context window: ${value}`);
-  refuseWhilePrompting(sessionId);
-  return historyOp(sessionId, async () => {
-    const prev = tiers.get(sessionId);
-    tiers.set(sessionId, value);
+  if (!isSessionId(sessionId)) return { refused: `Invalid session id: ${sessionId}` };
+  const refusal = () => {
+    if (open.get(sessionId)?.prompting) return "Wait until Copilot finishes this turn.";
+    if (deleting.has(sessionId)) return "This session is being deleted.";
+    if (lingering.has(sessionId)) return LINGERING;
+    if (opening.has(sessionId)) return "This session is still opening. Try again when it has loaded.";
+    if (historyBusy.has(sessionId)) return "Wait until the delete of a message has finished.";
+    return null;
+  };
+  // marked as a history op while it closes, so a delete or another switch is refused meanwhile
+  const close = async () => {
+    historyBusy.add(sessionId);
     try {
       await closeAndWait(sessionId);
-    } catch (e) {
-      tiers.set(sessionId, prev ?? INHERIT);
-      throw e;
+    } finally {
+      historyBusy.delete(sessionId);
     }
-    return { reopen: true };
-  });
+  };
+  return switchTier({ sessionId, value, tiers, refusal, close });
 });
 
 handle("permission:answer", async (sessionId, reqId, optionId) => {
