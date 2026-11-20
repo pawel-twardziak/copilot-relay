@@ -28,7 +28,9 @@ const registry = new Registry({
 const delegationStore = new DelegationStore();
 const delegation = new Delegation({ registry, store: delegationStore });
 const handleMcp = createMcpHandler(registry, delegation);
-const names = new NameStore(process.env.COPILOT_RELAY_NAMES_FILE || undefined);
+const names = new NameStore(process.env.COPILOT_RELAY_NAMES_FILE || undefined, {
+  keep: (k) => delegationStore.parentOf(k) != null || delegationStore.childrenOf(k).length > 0,
+});
 
 // Persist names/roles of terminal sessions (key = Copilot sessionId, stable across --resume).
 const persist = (p) => p.key?.startsWith("cli:") && names.set(p.key, p.name, p.role);
@@ -37,14 +39,12 @@ registry.on("peer_updated", persist);
 registry.on("peer_removed", (e) => delegation.childGone(e.key, e.name));
 
 function pickName(key, explicit) {
+  // the returned name is only the wanted base: Registry#upsert makes it permanent and unique (-<suffix>)
   if (explicit) return explicit;
   const stored = names.get(key)?.name;
   if (stored) return stored;
-  for (let i = 0; i < 50; i++) {
-    const n = randomName();
-    if (!registry.getByName(n) && !names.isTakenByOther(n, key)) return n;
-  }
-  return `${randomName()}-${Math.random().toString(36).slice(2, 5)}`;
+  // upsert appends the key-hash suffix, so a random name needs no collision check
+  return randomName();
 }
 
 // ---------- SSE to GUI ----------

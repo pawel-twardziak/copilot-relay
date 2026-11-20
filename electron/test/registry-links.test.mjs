@@ -1,30 +1,54 @@
 // Tests for parent-child links and per-pair message budgets in src/registry.mjs.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { Registry } from "../../src/registry.mjs";
+import { Registry, nameSuffix, uniqueName } from "../../src/registry.mjs";
 
 const ok = () => true;
 
-test("relay and user are reserved: a child requested as relay gets another name", () => {
+test("a name gets the key's 6-hex suffix and keeps it across renames", () => {
+  const r = new Registry();
+  const p = r.upsert({ key: "cli:aaa", name: "api-tests", kind: "cli" });
+  assert.equal(p.name, `api-tests-${nameSuffix("cli:aaa")}`);
+  assert.match(p.name, /^api-tests-[0-9a-f]{6}$/);
+  assert.equal(r.rename("cli:aaa", "docs"), `docs-${nameSuffix("cli:aaa")}`);
+});
+test("a requested name already carrying the own suffix is not suffixed twice", () => {
+  const r = new Registry();
+  const n = `x-${nameSuffix("cli:aaa")}`;
+  assert.equal(r.upsert({ key: "cli:aaa", name: n, kind: "cli" }).name, n);
+});
+test("same base for two keys gives two different names; a suffix collision extends to 8", () => {
+  assert.notEqual(uniqueName("w", "cli:a", () => false), uniqueName("w", "cli:b", () => false));
+  const six = uniqueName("w", "cli:a", () => false);
+  assert.equal(uniqueName("w", "cli:a", (n) => n === six), `w-${nameSuffix("cli:a", 8)}`);
+});
+test("a long base is cut so the full name stays within 32 chars", () => {
+  const n = uniqueName("a".repeat(40), "cli:a", () => false);
+  assert.ok(n.length <= 32 && /^[a-z0-9][a-z0-9_-]{0,31}$/.test(n));
+});
+test("an old base name does not reach the renamed session", () => {
+  const r = new Registry();
+  r.upsert({ key: "cli:s", name: "sender", kind: "cli", push: () => true });
+  r.upsert({ key: "cli:t", name: "old", kind: "cli", push: () => true });
+  r.rename("cli:t", "new");
+  assert.match(r.send("cli:s", "old", "hi"), /^No session "old"/);
+});
+test("reserved names still get another name", () => {
   const r = new Registry();
   const p = r.upsert({ key: "cli:c", name: "relay", kind: "cli" });
-  assert.notEqual(p.name, "relay");
+  assert.equal(p.name, `relay-session-${nameSuffix("cli:c")}`);
+  assert.notEqual(p.name.replace(/-[0-9a-f]{6}$/, ""), "relay");
   assert.throws(() => r.rename("cli:c", "relay"), /reserved/);
-});
-
-test("a taken name yields a suffixed final name", () => {
-  const r = new Registry();
-  r.upsert({ key: "a", name: "badacz", kind: "cli" });
-  assert.equal(r.upsert({ key: "b", name: "badacz", kind: "cli" }).name, "badacz-2");
+  assert.throws(() => r.rename("cli:c", "user"), /reserved/);
 });
 
 test("linked messages use the pair budget, not the global one", () => {
   const r = new Registry({ maxAgentMessages: 1, maxPairMessages: 2 });
   r.upsert({ key: "p", name: "p", kind: "cli", push: ok });
   r.upsert({ key: "c", name: "c", kind: "cli", parentKey: "p", push: ok });
-  assert.match(r.send("c", "p", "1"), /delivered/);
-  assert.match(r.send("p", "c", "2"), /delivered/);
-  assert.match(r.send("c", "p", "3"), /budget/);
+  assert.match(r.send("c", r.get("p").name, "1"), /delivered/);
+  assert.match(r.send("p", r.get("c").name, "2"), /delivered/);
+  assert.match(r.send("c", r.get("p").name, "3"), /budget/);
   assert.equal(r.budget, 1);
 });
 
@@ -33,31 +57,31 @@ test("a human prompt in either session refills only that pair", () => {
   for (const n of ["p1", "c1", "p2", "c2"]) {
     r.upsert({ key: n, name: n, kind: "cli", push: ok, parentKey: n[0] === "c" ? "p" + n[1] : null });
   }
-  assert.match(r.send("c1", "p1", "x"), /delivered/);
-  assert.match(r.send("c2", "p2", "x"), /delivered/);
-  assert.match(r.send("c1", "p1", "x"), /budget/);
-  assert.match(r.send("c2", "p2", "x"), /budget/);
+  assert.match(r.send("c1", r.get("p1").name, "x"), /delivered/);
+  assert.match(r.send("c2", r.get("p2").name, "x"), /delivered/);
+  assert.match(r.send("c1", r.get("p1").name, "x"), /budget/);
+  assert.match(r.send("c2", r.get("p2").name, "x"), /budget/);
   r.humanPrompt("p1");
-  assert.match(r.send("c1", "p1", "x"), /delivered/);
-  assert.match(r.send("c2", "p2", "x"), /budget/);
+  assert.match(r.send("c1", r.get("p1").name, "x"), /delivered/);
+  assert.match(r.send("c2", r.get("p2").name, "x"), /budget/);
   // the child side refills too
-  assert.match(r.send("c1", "p1", "x"), /budget/);
+  assert.match(r.send("c1", r.get("p1").name, "x"), /budget/);
   r.humanPrompt("c1");
-  assert.match(r.send("p1", "c1", "x"), /delivered/);
+  assert.match(r.send("p1", r.get("c1").name, "x"), /delivered/);
   // sendFromUser passes the target's key
-  assert.match(r.send("c2", "p2", "x"), /budget/);
+  assert.match(r.send("c2", r.get("p2").name, "x"), /budget/);
   r.sendFromUser("p2", "hi");
-  assert.match(r.send("c2", "p2", "x"), /delivered/);
+  assert.match(r.send("c2", r.get("p2").name, "x"), /delivered/);
 });
 
 test("unlinked messages still use the global budget", () => {
   const r = new Registry({ maxAgentMessages: 2, maxPairMessages: 9 });
   r.upsert({ key: "a", name: "a", kind: "cli", push: ok });
   r.upsert({ key: "b", name: "b", kind: "cli", push: ok });
-  assert.match(r.send("a", "b", "1"), /delivered/);
-  assert.match(r.send("b", "a", "2"), /delivered/);
+  assert.match(r.send("a", r.get("b").name, "1"), /delivered/);
+  assert.match(r.send("b", r.get("a").name, "2"), /delivered/);
   assert.equal(r.budget, 0);
-  assert.match(r.send("a", "b", "3"), /budget/);
+  assert.match(r.send("a", r.get("b").name, "3"), /budget/);
 });
 
 test("pushTo is false for an offline peer", () => {
@@ -95,9 +119,9 @@ test("a sender with a folder: the push carries fromCwd and the prompt a folder l
   const got = [];
   r.upsert({ key: "x", name: "x", kind: "cli", cwd: "/a b", push: ok });
   r.upsert({ key: "y", name: "y", kind: "cli", push: (m) => (got.push(m), true) });
-  r.send("x", "y", "hello");
+  r.send("x", r.get("y").name, "hello");
   assert.equal(got[0].fromCwd, "/a b");
-  assert.match(got[0].prompt, /^\[from x\]\n\[folder "\/a b"\]\nhello/);
+  assert.match(got[0].prompt, new RegExp(String.raw`^\[from ${r.get("x").name}\]\n\[folder "/a b"\]\nhello`));
 });
 
 test("a sender without a folder: no fromCwd and no folder line", () => {
@@ -105,17 +129,17 @@ test("a sender without a folder: no fromCwd and no folder line", () => {
   const got = [];
   r.upsert({ key: "x", name: "x", kind: "cli", push: ok });
   r.upsert({ key: "y", name: "y", kind: "cli", push: (m) => (got.push(m), true) });
-  r.send("x", "y", "hello");
+  r.send("x", r.get("y").name, "hello");
   assert.equal("fromCwd" in got[0], false);
-  assert.match(got[0].prompt, /^\[from x\]\nhello/);
+  assert.match(got[0].prompt, new RegExp(String.raw`^\[from ${r.get("x").name}\]\nhello`));
 });
 
 test("a message queued while the recipient is offline keeps fromCwd in the inbox", () => {
   const r = new Registry();
   r.upsert({ key: "x", name: "x", kind: "cli", cwd: "/a b", push: ok });
   r.upsert({ key: "y", name: "y", kind: "mcp" });
-  r.send("x", "y", "hello");
+  r.send("x", r.get("y").name, "hello");
   const item = r.get("y").inbox[0];
   assert.equal(item.fromCwd, "/a b");
-  assert.match(item.prompt, /^\[from x\]\n\[folder "\/a b"\]\nhello/);
+  assert.match(item.prompt, new RegExp(String.raw`^\[from ${r.get("x").name}\]\n\[folder "/a b"\]\nhello`));
 });

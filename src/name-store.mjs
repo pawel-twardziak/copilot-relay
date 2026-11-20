@@ -23,8 +23,9 @@ export function randomName() {
 }
 
 export class NameStore {
-  constructor(file = stateFile("names.json")) {
+  constructor(file = stateFile("names.json"), { keep = () => false } = {}) {
     this.file = file;
+    this.keep = keep; // keys that must never be pruned (e.g. sessions in a parent-child tree)
     try {
       this.data = JSON.parse(readFileSync(file, "utf8"));
     } catch {
@@ -51,7 +52,14 @@ export class NameStore {
     const entries = Object.entries(this.data);
     if (entries.length > MAX_ENTRIES) {
       entries.sort((a, b) => b[1].seen - a[1].seen);
-      this.data = Object.fromEntries(entries.slice(0, MAX_ENTRIES));
+      const kept = [];
+      let rest = entries.length;
+      for (const e of entries.reverse()) {
+        // oldest first: drop until within the limit, but never an entry `keep` protects
+        if (rest > MAX_ENTRIES && !this.keep(e[0])) rest--;
+        else kept.push(e);
+      }
+      this.data = Object.fromEntries(kept.reverse());
     }
     mkdirSync(path.dirname(this.file), { recursive: true });
     const tmp = `${this.file}.tmp`;

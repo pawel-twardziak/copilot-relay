@@ -6,11 +6,12 @@ import path from "node:path";
 import { afterEach, test } from "node:test";
 import { Delegation } from "../../src/delegation.mjs";
 import { DelegationStore } from "../../src/delegation-store.mjs";
-import { Registry } from "../../src/registry.mjs";
+import { Registry, nameSuffix } from "../../src/registry.mjs";
 import { onceDelivery } from "../../extension/copilot-relay/relay-client.mjs";
 
 const dirs = [];
 const tick = (ms = 20) => new Promise((r) => setTimeout(r, ms));
+const KID = `badacz-${nameSuffix("cli:child")}`; // the child's permanent registry name
 const req = { name: "badacz", task: "do it", agent: "", model: "" };
 afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
@@ -69,9 +70,9 @@ test("a report reaches the parent and stays on disk until acked", () => {
   const { d, store, file, parentPush, childControl } = setup();
   d.report("cli:child", "wynik");
   assert.equal(parentPush[0].wake, true);
-  assert.equal(parentPush[0].from, "badacz");
+  assert.equal(parentPush[0].from, KID);
   assert.equal(parentPush[0].human, false);
-  assert.match(parentPush[0].prompt, /^\[from badacz\]\nwynik/);
+  assert.match(parentPush[0].prompt, new RegExp(String.raw`^\[from ${KID}\]\nwynik`));
   assert.equal(store.pending("cli:parent").length, 1);
   assert.equal(new DelegationStore(file).pending("cli:parent").length, 1);
   assert.deepEqual(childControl.at(-1), ["reported", {}]);
@@ -90,7 +91,7 @@ test("report_result works once and is refused for a non-child", () => {
 test("a report made with the budget spent is still delivered", () => {
   const registry = new Registry({ maxAgentMessages: 0, maxPairMessages: 0 });
   const { d, parentPush } = setup({ registry });
-  assert.match(registry.send("cli:child", "mama", "hi"), /budget/);
+  assert.match(registry.send("cli:child", registry.get("cli:parent").name, "hi"), /budget/);
   d.report("cli:child", "wynik");
   assert.equal(parentPush.length, 1);
   assert.equal(parentPush[0].wake, true);
@@ -158,7 +159,7 @@ test("a child gone without a report notifies the parent once", () => {
   assert.equal(store.pending("cli:parent").length, 1);
   assert.equal(parentPush.length, 1);
   assert.equal(parentPush[0].wake, true);
-  assert.match(parentPush[0].text, /Session "badacz" ended without reporting a result\. You can ask the user to reopen it\./);
+  assert.match(parentPush[0].text, new RegExp(String.raw`Session "${KID}" ended without reporting a result\. You can ask the user to reopen it\.`));
 });
 
 test("the ended notice uses the child's name at removal, else the stored name", () => {
@@ -168,7 +169,7 @@ test("the ended notice uses the child's name at removal, else the stored name", 
   const stored = setup();
   stored.registry.remove("cli:child");
   stored.d.childGone("cli:child");
-  assert.match(stored.parentPush.at(-1).text, /Session "badacz" ended/);
+  assert.match(stored.parentPush.at(-1).text, new RegExp(String.raw`Session "${KID}" ended`));
 });
 
 test("report says delivered when pushed, stored when the parent is away", () => {
@@ -234,7 +235,7 @@ test("attached sweeps offline unreported children, but not online ones", async (
   d.attached("cli:parent");
   await tick();
   assert.equal(store.pending("cli:parent").length, 1);
-  assert.match(parentPush[0].text, /"badacz"/);
+  assert.match(parentPush[0].text, new RegExp(String.raw`"${KID}"`));
   d.childGone("cli:child");
   assert.equal(store.pending("cli:parent").length, 1);
 });
@@ -286,12 +287,12 @@ test("list_sessions marks parent and child with current names", () => {
   registry.upsert({ key: "cli:parent", name: "parent-name", kind: "cli" });
   registry.upsert({ key: "cli:child", name: "child-name", kind: "cli", parentKey: "cli:parent" });
   registry.upsert({ key: "cli:other", name: "other-name", kind: "cli" });
-  assert.match(formatList(registry, "cli:child"), /- parent-name .*your parent/);
-  assert.match(formatList(registry, "cli:parent"), /- child-name .*your child/);
+  assert.match(formatList(registry, "cli:child"), /- parent-name\S* .*your parent/);
+  assert.match(formatList(registry, "cli:parent"), /- child-name\S* .*your child/);
   assert.doesNotMatch(formatList(registry, "cli:child"), /other-name.*your (parent|child)/);
   assert.doesNotMatch(formatList(registry, "cli:other"), /your (parent|child)/);
   registry.rename("cli:parent", "renamed");
-  assert.match(formatList(registry, "cli:child"), /- renamed .*your parent/);
+  assert.match(formatList(registry, "cli:child"), /- renamed\S* .*your parent/);
 });
 
 test("delegation tools exist only for desktop aliases", () => {
@@ -305,20 +306,20 @@ test("a report from a child with a folder carries fromCwd and keeps it through t
   registry.upsert({ key: "cli:child", name: "badacz", kind: "cli", cwd: "/kid dir", push: () => true });
   d.report("cli:child", "wynik");
   assert.equal(parentPush[0].fromCwd, "/kid dir");
-  assert.match(parentPush[0].prompt, /^\[from badacz\]\n\[folder "\/kid dir"\]\nwynik/);
+  assert.match(parentPush[0].prompt, new RegExp(String.raw`^\[from ${KID}\]\n\[folder "\/kid dir"\]\nwynik`));
   const push = [];
   const registry2 = new Registry();
   registry2.upsert({ key: "cli:parent", name: "mama", kind: "cli", push: (m) => (push.push(m), true) });
   new Delegation({ registry: registry2, store: new DelegationStore(file), sweepDelayMs: 1000 }).attached("cli:parent");
   assert.equal(push[0].fromCwd, "/kid dir");
-  assert.match(push[0].prompt, /^\[from badacz\]\n\[folder "\/kid dir"\]\nwynik/);
+  assert.match(push[0].prompt, new RegExp(String.raw`^\[from ${KID}\]\n\[folder "\/kid dir"\]\nwynik`));
 });
 
 test("a report from a child without a folder has no fromCwd; relay notices never get one", () => {
   const { d, parentPush } = setup();
   d.report("cli:child", "wynik");
   assert.equal("fromCwd" in parentPush[0], false);
-  assert.match(parentPush[0].prompt, /^\[from badacz\]\nwynik/);
+  assert.match(parentPush[0].prompt, new RegExp(String.raw`^\[from ${KID}\]\nwynik`));
   d.outcome("cli:parent", { requestId: "r", kind: "created", name: "badacz", text: "ok" });
   assert.equal("fromCwd" in parentPush[1], false);
 });

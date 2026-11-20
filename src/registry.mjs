@@ -5,6 +5,7 @@
 //   kind "cli" – a terminal/app session running the copilot-relay extension, delivery = push over SSE
 //                (the extension injects it with session.send)
 //   kind "mcp" – any MCP client (VS Code, other tools); delivery = mailbox (read_inbox / wait_for_message)
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 
 const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
@@ -24,6 +25,29 @@ export function sanitizeName(s) {
     .replace(/^[-_]+|-+$/g, "")
     .slice(0, 32);
   return n || "session";
+}
+
+/** First `len` hex chars of SHA-256 of the peer key: the permanent part of a session's name. */
+export const nameSuffix = (key, len = 6) => createHash("sha256").update(key).digest("hex").slice(0, len);
+
+/**
+ * Final name `<base>-<suffix>` for `key`: sanitised, an own suffix already present is stripped,
+ * reserved bases get "-session", the base is cut so the whole name fits 32 chars.
+ * The suffix is 6 hex chars, 8 when `taken(fullName)` reports a collision.
+ */
+export function uniqueName(wanted, key, taken) {
+  let base = sanitizeName(wanted);
+  for (const len of [8, 6]) {
+    const tail = `-${nameSuffix(key, len)}`;
+    if (base.endsWith(tail) && base.length > tail.length) {
+      base = base.slice(0, -tail.length);
+      break;
+    }
+  }
+  if (RESERVED.has(base)) base = `${base}-session`;
+  const build = (len) => `${base.slice(0, 32 - 1 - len).replace(/[-_]+$/, "") || "session"}-${nameSuffix(key, len)}`;
+  const six = build(6);
+  return taken(six) ? build(8) : six;
 }
 
 export class Registry extends EventEmitter {
@@ -47,13 +71,9 @@ export class Registry extends EventEmitter {
     return this.byKey.get(aKey)?.parentKey === bKey ? `${bKey}|${aKey}` : `${aKey}|${bKey}`;
   }
 
-  /** Pick a free name based on `wanted` (adds -2, -3… on collision). */
+  /** Permanent unique name for `key` based on `wanted`: `<base>-<6 hex of the key hash>` (see uniqueName). */
   freeName(wanted, key) {
-    let base = sanitizeName(wanted);
-    if (RESERVED.has(base)) base = `${base}-session`;
-    let name = base;
-    for (let i = 2; this.byName.has(name) && this.byName.get(name).key !== key; i++) name = `${base.slice(0, 28)}-${i}`;
-    return name;
+    return uniqueName(wanted, key, (n) => this.byName.has(n) && this.byName.get(n).key !== key);
   }
 
   /**
@@ -86,11 +106,9 @@ export class Registry extends EventEmitter {
     if (!peer) throw new Error("unknown peer");
     const wantedClean = sanitizeName(wanted);
     if (RESERVED.has(wantedClean)) throw new Error(`Name "${wantedClean}" is reserved.`);
-    if (this.byName.has(wantedClean) && this.byName.get(wantedClean) !== peer)
-      throw new Error(`Name "${wantedClean}" is taken.`);
     const old = peer.name;
     this.byName.delete(old);
-    peer.name = wantedClean;
+    peer.name = this.freeName(wantedClean, key);
     this.byName.set(peer.name, peer);
     this.emit("peer_renamed", { old, ...this.describe(peer) });
     return peer.name;
