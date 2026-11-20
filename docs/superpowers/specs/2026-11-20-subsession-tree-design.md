@@ -51,6 +51,9 @@ to live until the user or the parent's closing ends them, and no caps.
 | Depth | Unlimited tree. |
 | What the parent model sees | Its **direct** children only, each with a badge if it has children of its own. |
 | How the model gets it | A "Your children" section in `list_sessions`, **and** a compact current list appended to every prompt delivered to a parent from a relative or from relay. |
+| Session names | Permanent and unique: `<base>-<6-hex hash of the key>`, never reused (section 4). |
+| Sessions missing on disk | Pruned from the tree (section 9). |
+| Parent process crash | Not a close; children keep running. |
 | Limits | Removed entirely. |
 | Idle close | Removed entirely. |
 
