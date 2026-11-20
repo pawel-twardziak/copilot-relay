@@ -725,3 +725,16 @@ test("a child messaging its closed root parent gets the card via the nameOf fall
   assert.equal(card.targetName, name);
   assert.equal(d2.familyBlock("cli:child"), `Your parent: "${name}" — closed`);
 });
+
+test("a deleted parent is not offered for reopen: No session", () => {
+  const s = setup();
+  const name = nm(s.registry, "cli:parent");
+  s.registry.remove("cli:parent");
+  s.store.forget("cli:parent");
+  const d2 = new Delegation({ registry: s.registry, store: s.store, nameOf: (k) => (k === "cli:parent" ? name : undefined) });
+  s.registry.offlineRelative = (f, n, t) => d2.messageClosed(f, n, t);
+  assert.match(d2.familyBlock("cli:child"), /— deleted$/);
+  assert.match(s.registry.send("cli:child", name, "hi"), /^No session/);
+  assert.equal(s.childControl.filter(([ev]) => ev === "reopen_request").length, 0);
+  assert.equal(s.store.reopensFrom("cli:child").length, 0);
+});

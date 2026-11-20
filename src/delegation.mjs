@@ -160,7 +160,8 @@ export class Delegation {
     const from = this.registry.get(fromKey);
     if (!from) return null;
     const wanted = String(name).trim().toLowerCase();
-    const parent = this.store.parentOf(fromKey);
+    // a deleted parent stays in the link (as an orphan marker) but cannot be reopened
+    const parent = this.store.linkOf(fromKey)?.parentDeleted ? null : this.store.parentOf(fromKey);
     const targetKey = [...(parent ? [parent] : []), ...this.store.childrenOf(fromKey)].find(
       (k) => !this.registry.get(k)?.online && [this.registry.get(k)?.name, this.store.nameOf(k), this.nameOf(k)].some((n) => n && n.toLowerCase() === wanted),
     );
