@@ -118,7 +118,7 @@ an ordinary session: it appears in the list, you can open it, read what it did, 
   task. If `model` is left out, the child uses the parent's current model. If `agent` is left out, it uses the
   default Copilot agent; the parent's agent is not inherited. A model or agent the session doesn't offer creates no
   child, and the parent is told the valid values. A child appears in the list without taking you away from what is
-  on screen, and cannot create further sessions.
+  on screen. It can create children of its own, to any depth; there is no limit on their number.
 - **`report_result(text)`** is called by the child, once, when it is done. It has no recipient: the broker knows
   the parent. The report wakes the parent as a "from …" bubble and is kept on disk until the parent's prompt has
   started, so it survives a parent that is busy or closed, a broker restart and an app restart. A rare duplicate is
@@ -130,17 +130,24 @@ an ordinary session: it appears in the list, you can open it, read what it did, 
 - **No isolation.** A child works in **the same folder and on the same branch as its parent**. There is no worktree or
   sandbox, and the tool has no folder parameter. Children that edit files can get in each other's way or in the
   parent's.
-- **Limits.** At most 3 children per parent and 5 in the app. A child counts as long as its process is running, also
-  after it has reported, so a reported child that is still open keeps its place. A request over a limit shows no
-  card and the parent is told why. Messages between a parent and its child have their own budget of 12, refilled by a human prompt in either session;
-  reports and relay notices are charged to nothing.
-- **Settings.** There is no dialog for the limits. Add `maxChildrenPerParent` and `maxChildrenTotal` to the settings
-  file (its location is shown in **⚙ Settings → Files**). The pair budget is `maxAgentMessagesPerPair` in the
-  broker's `relay.config.json`.
-- **Ending a child.** **Stop all children** in the parent's header closes every child of that session; they stay
-  resumable. A child with no running turn and no open question for 15 minutes loses its process but stays in the
-  list. A child that ends without reporting (closed, stopped, or the app crashed) sends the parent one
+- **Budget.** Messages between a parent and its child have their own budget of 12, refilled by a human prompt in
+  either session; reports and relay notices are charged to nothing. It is `maxAgentMessagesPerPair` in the broker's
+  `relay.config.json`.
+- **The tree.** In the list, a child sits indented under its parent when both are in the same folder group, otherwise
+  it shows "child of …". A session view has a relation bar with its parent and its children (a dot when open, ✓ once
+  a child has reported, +N for its own children); a click opens one. Names are unique and permanent:
+  `<base>-<6 hex>`, the suffix derived from the session, so an old name never points to another session.
+- **Closing.** Closing a session closes its open children with it, at every depth; **Close all sub-sessions** in the
+  header closes only the children. They all stay resumable and nothing closes by itself. Reopening a parent does not
+  reopen its children. A child that ends without reporting (closed, stopped, or the app crashed) sends the parent one
   "ended without reporting" notice, which wakes it.
+- **Messages to a closed relative.** A `send_message` from a parent to a closed child, or from a child to its closed
+  parent, shows a reopen card in the sender's view. **Approve** resumes the session and delivers every queued message;
+  **Reject** drops them and tells the sender. The sender is told at once that the message waits.
+- **Deleting.** A session with sub-sessions is deleted through a dialog that lists them as a tree, each with its own
+  **Delete too** box (unchecked by default). The ones you keep are closed and stay resumable; one whose parent was
+  deleted shows "parent deleted". Sessions that disappear from disk outside the app (terminal, Copilot's cleanup)
+  leave the tree after the next complete refresh of the list.
 - **Reloading the window** (**View → Reload**, Ctrl+R) stops delegated sessions, after a confirmation, because a
   reloaded window cannot show their cards. Waiting requests for a new session are dropped too. Stopped children stay
   resumable. With no child open and no waiting request, a reload asks nothing.

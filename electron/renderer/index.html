@@ -70,6 +70,21 @@
       </form>
     </dialog>
 
+    <dialog id="delete-tree">
+      <form method="dialog">
+        <h2 id="del-title"></h2>
+        <p class="hint" id="del-where"></p>
+        <p class="del-warning" id="del-warning"></p>
+        <h3>Sub-sessions</h3>
+        <p class="hint">Each one is deleted only if you check it. The ones you keep are closed if open and stay resumable; a kept one whose parent is deleted shows "parent deleted".</p>
+        <div id="del-list" class="del-list"></div>
+        <div class="dialog-actions">
+          <button value="cancel" autofocus>Cancel</button>
+          <button value="delete" class="danger">Delete</button>
+        </div>
+      </form>
+    </dialog>
+
     <div id="viewer" hidden tabindex="-1" role="dialog" aria-label="Image viewer">
       <div class="viewer-stage"><img alt="" draggable="false" /></div>
       <div class="viewer-bar">

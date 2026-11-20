@@ -338,7 +338,8 @@ function handle(channel, fn) {
 let purging = Promise.resolve(); // leftovers of failed deletes are removed before the first list (briefly waited for:
 // they have no workspace.yaml/events.jsonl left, so a slow purge of a big one must not hold up the sidebar)
 
-handle("sessions:list", async () => {
+/** Copilot's session list, at most 50 pages; complete is false when it stopped with pages left. */
+async function listSessions() {
   await Promise.race([purging, new Promise((r) => setTimeout(r, 1000))]);
   const conn = await getLister();
   const all = [];
@@ -350,8 +351,11 @@ handle("sessions:list", async () => {
     cursor = res.nextCursor;
     if (!cursor) break;
   }
-  return all;
-});
+  return { sessions: all, complete: !cursor };
+}
+handle("sessions:list", async () => (await listSessions()).sessions);
+// the sidebar's refresh: only a complete list may prune the sub-session tree
+handle("sessions:listChecked", listSessions);
 
 const CHILD_SETUP_TIMEOUT_MS = 30_000; // from the approval until the child's agent and model are set
 const SETUP_TIMEOUT_TEXT = `Copilot did not answer within ${CHILD_SETUP_TIMEOUT_MS / 1000} seconds.`;

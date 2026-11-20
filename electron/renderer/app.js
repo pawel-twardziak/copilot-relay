@@ -1796,9 +1796,13 @@ function setStatus(text, isError = false) {
 }
 
 async function refresh() {
+  const known = links; // only links that existed before the list was asked for are checked against it
+  let listed = [];
+  let complete = false;
   try {
+    ({ sessions: listed, complete } = await api.listSessionsChecked());
     // a list fetched while a delete was running may still contain that session
-    sessions = (await api.listSessions()).filter((s) => !deleting.has(s.sessionId) && !deletedIds.has(s.sessionId));
+    sessions = listed.filter((s) => !deleting.has(s.sessionId) && !deletedIds.has(s.sessionId));
     for (const s of sessions) {
       const v = views.get(s.sessionId);
       if (v && s.title && !v.title) v.setTitle(s.title);
@@ -1808,6 +1812,16 @@ async function refresh() {
     setStatus(e.message, true);
   }
   renderList();
+  pruneMissing(known, listed, complete);
+}
+
+/** Tell the broker which linked sessions are gone from disk (deleted in a terminal, by Copilot's cleanup…). Only
+ *  after a successful, complete list; never an open session or one being deleted here (a new session may not be
+ *  listed yet, a delete forgets its own links). */
+function pruneMissing(known, listed, listOk) {
+  const exclude = new Set([...views.keys(), ...deleting, ...deletedIds]);
+  const keys = SessionTree.pruneCandidates(known, listed, { listOk, exclude });
+  if (keys.length) api.reportMissing(keys).catch((e) => console.warn(`links: ${e.message}`));
 }
 
 let refreshTimer;
@@ -1894,23 +1908,93 @@ function item(s, v, { showProject = false, depth = 0 } = {}) {
 
 const deleting = new Set(); // sessions whose delete is running
 const deletedIds = new Set(); // deleted in this run of the app
-/** Delete a whole session from disk after asking; closes its view first. */
+const DELETE_WARNING =
+  "Its whole history is removed from disk and cannot be restored. Files changed by the agent are not reverted. " +
+  "Don't use this while the session is open in a terminal Copilot CLI.";
+const sessionName = (s) => shortTitle(s.title) || s.sessionId.slice(0, 8);
+/** A session to delete by id: its list entry, else what its view knows. */
+const sessionById = (id) => {
+  const v = views.get(id);
+  return sessions.find((x) => x.sessionId === id) ?? { sessionId: id, cwd: v?.cwd, title: v?.title || tree.link.get(id)?.name };
+};
+
+/** Delete a whole session from disk after asking; closes its view first. A session with sub-sessions asks in
+ *  #delete-tree which of them go too. */
 async function deleteSessionFlow(s) {
   if (deleting.has(s.sessionId)) return;
+  const refusal = deleteRefusal(s.sessionId);
+  if (refusal) return setStatus(refusal, true);
   const v = views.get(s.sessionId);
-  // refused before asking: main would refuse a session that is still resuming, and a Fork/Delete of a message
-  // reopens the session when it is done
-  if (v?.resuming) return setStatus("This session is still opening. Delete it when it has loaded.", true);
-  if (v?.historyOp) return setStatus("Wait until the fork or delete of a message has finished.", true);
-  const name = shortTitle(s.title) || s.sessionId.slice(0, 8);
-  const ok = confirm(
-    `Delete the session "${name}"?\n\n` +
-      `${s.cwd ?? ""}\n${s.sessionId}\n\n` +
-      (v?.prompting && !v.dead ? "Copilot is still working in it and will be stopped.\n\n" : "") +
-      "Its whole history is removed from disk and cannot be restored. Files changed by the agent are not reverted. " +
-      "Don't use this while the session is open in a terminal Copilot CLI.",
-  );
-  if (!ok) return;
+  const idx = tree; // the tree as asked about: forgetting the deleted keys changes `tree` meanwhile
+  const below = SessionTree.descendants(idx, s.sessionId);
+  if (!below.length) {
+    const ok = confirm(
+      `Delete the session "${sessionName(s)}"?\n\n` +
+        `${s.cwd ?? ""}\n${s.sessionId}\n\n` +
+        (v?.prompting && !v.dead ? "Copilot is still working in it and will be stopped.\n\n" : "") +
+        DELETE_WARNING,
+    );
+    if (!ok) return;
+    const r = await deleteOne(s);
+    const forgot = r.deleted ? await forgetDeleted(idx, [s.sessionId]) : null;
+    setStatus(forgot ? `${r.text}; ${forgot}` : r.text, r.isError || !!forgot);
+    if (r.deleted && r.clean && !forgot) scheduleRefresh(); // a refresh would replace a warning with the session count
+    return;
+  }
+  const checked = await askDeleteTree(s, idx, below);
+  if (!checked) return;
+  // the chosen session first, then the checked sub-sessions deepest first; the first one not deleted stops the rest
+  const order = [s, ...SessionTree.closeOrder(idx, s.sessionId, (c) => checked.has(c)).map(sessionById)];
+  const deleted = [];
+  const warnings = [];
+  let failed = null;
+  for (const t of order) {
+    const r = await deleteOne(t);
+    if (!r.deleted) {
+      failed = { t, r };
+      break;
+    }
+    deleted.push(t.sessionId);
+    if (r.isError) warnings.push(`"${sessionName(t)}": ${r.text}`); // deleted, with a problem
+  }
+  const parts = [];
+  if (deleted.length) {
+    const forgot = await forgetDeleted(idx, deleted);
+    if (forgot) warnings.push(forgot);
+    // kept sub-sessions close with their deleted parent (they stay resumable)
+    await closeViews(SessionTree.closeOrder(idx, s.sessionId, (c) => !checked.has(c) && views.has(c) && !views.get(c).deleting && !deleting.has(c)));
+    const subs = deleted.length - 1;
+    parts.push(`Session "${sessionName(s)}"${subs ? ` and ${subs} sub-session(s)` : ""} deleted`);
+  }
+  if (failed) {
+    const left = order.length - deleted.length - 1;
+    parts.push(
+      (failed.t === s ? failed.r.text : `"${sessionName(failed.t)}": ${failed.r.text}`) +
+        (left ? ` (${left} more checked sub-session(s) were not deleted)` : ""),
+    );
+  }
+  parts.push(...warnings);
+  setStatus(parts.join("; "), !!failed || warnings.length > 0);
+  if (!failed && !warnings.length) scheduleRefresh();
+}
+
+/** Why a session can't be deleted right now, or null. Main would refuse a session that is still resuming, and a
+ *  Fork/Delete of a message reopens the session when it is done. */
+function deleteRefusal(id) {
+  const v = views.get(id);
+  if (deleting.has(id)) return "This session is being deleted.";
+  if (v?.resuming) return "This session is still opening. Delete it when it has loaded.";
+  if (v?.historyOp) return "Wait until the fork or delete of a message has finished.";
+  return null;
+}
+
+/** Delete one session through main, closing its view; returns { deleted, clean, text, isError } for the status line
+ *  (deleted with problems: isError, not clean). */
+async function deleteOne(s) {
+  const refusal = deleteRefusal(s.sessionId);
+  if (refusal) return { deleted: false, text: refusal, isError: true };
+  const v = views.get(s.sessionId);
+  const name = sessionName(s);
   deleting.add(s.sessionId);
   setStatus("Deleting session…");
   const setDeleting = (on) => {
@@ -1920,21 +2004,18 @@ async function deleteSessionFlow(s) {
   };
   setDeleting(true);
   const listed = sessions.find((x) => x.sessionId === s.sessionId); // its list entry, put back if it isn't deleted
-  let clean = false;
   try {
     const res = await api.deleteSession(s.sessionId); // main closes the session first
     if (res.refused) {
       // nothing was touched: the session is still open (or still opening) as it was
       setDeleting(false);
-      setStatus(`Could not delete the session: ${res.refused}`, true);
-      return;
+      return { deleted: false, text: `Could not delete the session: ${res.refused}`, isError: true };
     }
     if (res.stuck) {
       // closed, but its Copilot process would not exit: main refuses to open it again until that process is gone
       const lost = v && views.get(s.sessionId) === v ? v.inbox.length : 0;
       dropView(s.sessionId);
-      setStatus(`Could not delete the session: ${res.stuck}${lost ? ` (${lost} waiting relay message(s) were discarded)` : ""}`, true);
-      return;
+      return { deleted: false, text: `Could not delete the session: ${res.stuck}${lost ? ` (${lost} waiting relay message(s) were discarded)` : ""}`, isError: true };
     }
     deletedIds.add(s.sessionId);
     if (ui.pinned.delete(s.sessionId)) saveUi();
@@ -1947,22 +2028,75 @@ async function deleteSessionFlow(s) {
       res.leftover && `some files could not be removed yet (retried on the next start): ${res.leftover}`,
       res.store?.error && `its entry in session-store.db could not be removed: ${res.store.error}`,
     ].filter(Boolean);
-    setStatus(problems.length ? `Session deleted, but ${problems.join("; ")}` : `Session "${name}" deleted`, problems.length > 0);
-    clean = !problems.length;
+    return problems.length
+      ? { deleted: true, clean: false, text: `Session deleted, but ${problems.join("; ")}`, isError: true }
+      : { deleted: true, clean: true, text: `Session "${name}" deleted`, isError: false };
   } catch (e) {
-    setStatus(`Could not delete the session: ${e.message}`, true);
     // main may have closed it before failing: reopen the view from the session's files (as after deleting messages)
     if (v && views.get(s.sessionId) === v) {
       await api.closeSession(s.sessionId).catch(() => {});
       await reopenView(v, `Could not delete the session: ${e.message}`);
     }
+    return { deleted: false, text: `Could not delete the session: ${e.message}`, isError: true };
   } finally {
     deleting.delete(s.sessionId);
     // not deleted: a refresh while it ran may have left it out of the list (see refresh)
     if (listed && !deletedIds.has(s.sessionId) && !sessions.some((x) => x.sessionId === s.sessionId)) sessions.push(listed);
     renderList();
   }
-  if (clean) scheduleRefresh(); // a refresh would replace the warning in the status line with the session count
+}
+
+/** The broker forgets deleted sessions that are in the tree (a child, or a parent: its kept children become
+ *  "parent deleted"). The sessions are already gone, so a failure is only a warning; returns its text or null. */
+async function forgetDeleted(idx, ids) {
+  const keys = ids.filter((id) => idx.link.has(id) || idx.childrenOf.has(id)).map((id) => `cli:${id}`);
+  if (!keys.length) return null;
+  try {
+    await api.forgetLinks(keys);
+    return null;
+  } catch (e) {
+    return `the sub-session tree could not be updated: ${e.message}`;
+  }
+}
+
+/** #delete-tree: the warning, then the sub-sessions indented by depth, each with its own unchecked "Delete too".
+ *  Resolves to the set of checked ids, or null when cancelled (Cancel, Escape). */
+function askDeleteTree(s, idx, below) {
+  const dlg = $("#delete-tree");
+  const v = views.get(s.sessionId);
+  $("#del-title").textContent = `Delete the session "${sessionName(s)}"?`;
+  $("#del-where").textContent = `${s.cwd ?? ""}\n${s.sessionId}`;
+  $("#del-warning").textContent = (v?.prompting && !v.dead ? "Copilot is still working in it and will be stopped.\n\n" : "") + DELETE_WARNING;
+  const depth = new Map([[s.sessionId, 0]]);
+  const boxes = below.map((id) => {
+    depth.set(id, (depth.get(idx.parentOf.get(id)) ?? 0) + 1); // descendants() lists a parent before its children
+    const cv = views.get(id);
+    const box = h("input", { type: "checkbox", disabled: deleting.has(id) });
+    const meta = [deleting.has(id) ? "being deleted" : cv && !cv.dead ? (cv.busy ? "working" : "open") : "closed", id.slice(0, 8)];
+    $("#del-list").append(
+      h(
+        "div",
+        { class: "del-row", style: `--depth: ${depth.get(id)}`, title: id },
+        h("span", { class: "branch", "aria-hidden": "true" }, "└"),
+        h("span", { class: "del-name" }, parentLabel(id)),
+        h("span", { class: "del-meta" }, meta.join(" · ")),
+        h("label", {}, box, "Delete too"),
+      ),
+    );
+    return [id, box];
+  });
+  dlg.returnValue = ""; // Escape keeps the previous value
+  dlg.showModal();
+  return new Promise((resolve) => {
+    dlg.addEventListener(
+      "close",
+      () => {
+        $("#del-list").replaceChildren();
+        resolve(dlg.returnValue === "delete" ? new Set(boxes.filter(([, b]) => b.checked).map(([id]) => id)) : null);
+      },
+      { once: true },
+    );
+  });
 }
 
 // Sidebar state kept across restarts: pinned sessions, collapsed project folders, chat text scale.

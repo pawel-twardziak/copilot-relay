@@ -84,3 +84,14 @@ test("a link that names itself as parent is not its own child", () => {
   assert.deepEqual(idx.childrenOf.get("c"), ["d"]);
   assert.deepEqual(relation(idx, "c").children, [{ id: "d", grandchildren: 0 }]);
 });
+
+test("pruneCandidates skips excluded sessions", () => {
+  const links = [L("a"), L("b"), L("c")];
+  assert.deepEqual(pruneCandidates(links, [], { listOk: true, exclude: new Set(["a", "c"]) }), ["cli:b"]);
+});
+
+test("pruneCandidates includes a missing parent once, but not the parent of an orphan", () => {
+  const links = [L("a", "p", 1), L("b", "p", 2), L("o", "gone", 3, { parentDeleted: true })];
+  assert.deepEqual(pruneCandidates(links, [S("a"), S("b"), S("o")], { listOk: true }), ["cli:p"]);
+  assert.deepEqual(pruneCandidates(links, [S("a"), S("b"), S("o")], { listOk: true, exclude: new Set(["p"]) }), []);
+});

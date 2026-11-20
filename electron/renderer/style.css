@@ -235,6 +235,14 @@ dialog h3 { font-size: 13px; margin: 16px 0 8px; color: var(--muted); text-trans
 .store .path { user-select: text; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; overflow-wrap: anywhere; }
 .store-actions { display: flex; gap: 8px; }
 .store .hint { margin: 2px 0; }
+/* the delete dialog of a session with sub-sessions: one row per descendant, indented by depth */
+.del-warning { white-space: pre-wrap; }
+.del-list { display: flex; flex-direction: column; gap: 2px; max-height: 45vh; overflow-y: auto; margin-bottom: 14px; padding: 4px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; }
+.del-row { display: flex; align-items: center; gap: 8px; padding: 3px 6px 3px calc(6px + (var(--depth, 1) - 1) * 16px); }
+.del-row .branch { color: var(--muted); }
+.del-row .del-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.del-row .del-meta { color: var(--muted); font-size: 12px; white-space: nowrap; }
+dialog .del-row label { flex-direction: row; align-items: center; gap: 6px; font-size: 12px; white-space: nowrap; }
 
 .cmd-popup { position: absolute; left: 14px; right: 14px; bottom: 100%; max-height: 224px; overflow-y: auto; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.4); z-index: 20; }
 .cmd-popup[hidden] { display: none; }

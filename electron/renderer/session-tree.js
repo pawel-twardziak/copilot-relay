@@ -88,11 +88,21 @@ function relation(idx, id) {
   };
 }
 
-/** cli: keys of links whose session is missing from a successful list. */
-function pruneCandidates(links, sessions, { listOk } = {}) {
+/** cli: keys missing from a successful list: linked sessions, and parents that still have (non-orphaned) children.
+ *  exclude: bare ids never reported (open, being deleted, deleted — a new session may not be listed yet). */
+function pruneCandidates(links, sessions, { listOk, exclude = new Set() } = {}) {
   if (!listOk) return [];
   const have = new Set(sessions.map((s) => s.sessionId));
-  return links.filter((l) => strip(l.key) !== null && !have.has(strip(l.key))).map((l) => l.key);
+  const out = new Set();
+  const consider = (key) => {
+    const id = strip(key);
+    if (id !== null && !have.has(id) && !exclude.has(id)) out.add(key);
+  };
+  for (const l of links) {
+    consider(l.key);
+    if (!l.parentDeleted) consider(l.parent);
+  }
+  return [...out];
 }
 
 const SessionTree = { index, descendants, closeOrder, nest, relation, pruneCandidates };
