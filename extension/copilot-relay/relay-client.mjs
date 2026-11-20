@@ -115,9 +115,13 @@ export class RelayClient {
     await this.#post("/api/peer/died", { key: this.key }).catch(() => {});
   }
 
-  /** The user's answer to a reopen_request. */
+  /** The user's answer to a reopen_request. Throws when it did not arrive; a refusal carries the HTTP `status`
+   *  (404: the request is not pending any more). */
   async answerReopen(requestId, approved, reason) {
-    await this.#post("/api/peer/reopen-answer", { key: this.key, requestId, approved, reason }).catch(() => {});
+    const r = await this.#post("/api/peer/reopen-answer", { key: this.key, requestId, approved, reason });
+    if (r.ok) return;
+    const error = await r.json().then((j) => j?.error, () => null);
+    throw Object.assign(new Error(error ?? `broker answered ${r.status}`), { status: r.status });
   }
 
   /** The broker's link tree (array of links). Throws on a non-2xx answer. */

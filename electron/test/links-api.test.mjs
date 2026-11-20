@@ -116,6 +116,22 @@ test("missing logs what it forgot; forget does not", () => {
   assert.doesNotMatch(logs[0], /acp:x/);
 });
 
+test("the client's answerReopen throws on a refused answer (with its status) and on an unreachable broker", async () => {
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => res.writeHead(404, { "content-type": "application/json" }).end('{"error":"This reopen request is not pending."}'));
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const port = server.address().port;
+  const client = new RelayClient({ url: `http://127.0.0.1:${port}`, key: "cli:me", cwd: "/", onMessage() {} });
+  try {
+    await assert.rejects(client.answerReopen("r1", true), (e) => e.status === 404 && /not pending/.test(e.message));
+  } finally {
+    server.closeAllConnections();
+    await new Promise((r) => server.close(r));
+  }
+  await assert.rejects(client.answerReopen("r1", true), (e) => e.status === undefined);
+});
 
 test("the client calls onReopenRequest and onLinksChanged for their events, and fetchLinks/posts work", async () => {
   const seen = [];
