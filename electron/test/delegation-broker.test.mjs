@@ -17,13 +17,13 @@ afterEach(() => {
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
-function setup({ sweepDelayMs = 0, registry = new Registry() } = {}) {
+function setup({ registry = new Registry() } = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "deleg-"));
   dirs.push(dir);
   const file = path.join(dir, "delegations.json");
   const store = new DelegationStore(file);
   let n = 0;
-  const d = new Delegation({ registry, store, sweepDelayMs, newId: () => `id${++n}` });
+  const d = new Delegation({ registry, store, newId: () => `id${++n}` });
   const parentPush = [];
   const parentControl = [];
   const childPush = [];
@@ -42,12 +42,6 @@ function setup({ sweepDelayMs = 0, registry = new Registry() } = {}) {
   d.link("cli:child", "cli:parent");
   return { dir, file, store, registry, d, parentPush, parentControl, childPush, childControl, parentPeer };
 }
-
-test("create_session is refused for a child", () => {
-  const { d, childControl } = setup();
-  assert.match(d.requestCreate("cli:child", req), /cannot create/i);
-  assert.equal(childControl.length, 0);
-});
 
 test("create_session is refused when the app connection is down", () => {
   const { d, registry, parentControl } = setup();
@@ -117,7 +111,7 @@ test("an unacknowledged report survives a new store and is redelivered", () => {
   const push = [];
   const registry2 = new Registry();
   registry2.upsert({ key: "cli:parent", name: "mama", kind: "cli", push: (m) => (push.push(m), true) });
-  const d2 = new Delegation({ registry: registry2, store: store2, sweepDelayMs: 1000 });
+  const d2 = new Delegation({ registry: registry2, store: store2 });
   d2.attached("cli:parent");
   assert.equal(push.length, 1);
   assert.match(push[0].prompt, /wynik/);
@@ -127,7 +121,7 @@ test("attached restores parentKey from the store", () => {
   const { file } = setup();
   const registry2 = new Registry();
   registry2.upsert({ key: "cli:child", name: "badacz", kind: "cli", push: () => true });
-  const d2 = new Delegation({ registry: registry2, store: new DelegationStore(file), sweepDelayMs: 1000 });
+  const d2 = new Delegation({ registry: registry2, store: new DelegationStore(file) });
   assert.equal(registry2.get("cli:child").parentKey, null);
   d2.attached("cli:child");
   assert.equal(registry2.get("cli:child").parentKey, "cli:parent");
@@ -150,26 +144,6 @@ test("rejected, limit, invalid and failed outcomes wake and persist", () => {
   assert.equal(parentPush.length, 4);
   assert.ok(parentPush.every((m) => m.wake === true && m.deliveryId));
   assert.equal(store.pending("cli:parent").length, 4);
-});
-
-test("a child gone without a report notifies the parent once", () => {
-  const { d, store, parentPush } = setup();
-  d.childGone("cli:child");
-  d.childGone("cli:child");
-  assert.equal(store.pending("cli:parent").length, 1);
-  assert.equal(parentPush.length, 1);
-  assert.equal(parentPush[0].wake, true);
-  assert.match(parentPush[0].text, new RegExp(String.raw`Session "${KID}" ended without reporting a result\. You can ask the user to reopen it\.`));
-});
-
-test("the ended notice uses the child's name at removal, else the stored name", () => {
-  const renamed = setup();
-  renamed.d.childGone("cli:child", "badacz-2");
-  assert.match(renamed.parentPush[0].text, /Session "badacz-2" ended/);
-  const stored = setup();
-  stored.registry.remove("cli:child");
-  stored.d.childGone("cli:child");
-  assert.match(stored.parentPush.at(-1).text, new RegExp(String.raw`Session "${KID}" ended`));
 });
 
 test("report says delivered when pushed, stored when the parent is away", () => {
@@ -215,40 +189,6 @@ test("extension delivery leaves plain messages alone and lets a failed injection
   await deliver({ prompt: "x" });
   assert.deepEqual(sent, ["p", "x", "x"]);
   assert.deepEqual(acks, ["d1"]);
-});
-
-test("a child gone after reporting produces no notice", () => {
-  const { d, store, parentPush } = setup();
-  d.report("cli:child", "done");
-  d.ack("cli:parent", parentPush[0].deliveryId);
-  d.childGone("cli:child");
-  assert.equal(parentPush.length, 1);
-  assert.equal(store.pending("cli:parent").length, 0);
-});
-
-test("attached sweeps offline unreported children, but not online ones", async () => {
-  const { d, registry, store, parentPush } = setup();
-  registry.upsert({ key: "cli:child2", name: "drugi", kind: "cli", push: () => true });
-  d.link("cli:child2", "cli:parent");
-  registry.disconnect("cli:child");
-  clearTimeout(registry.get("cli:child").offlineTimer);
-  d.attached("cli:parent");
-  await tick();
-  assert.equal(store.pending("cli:parent").length, 1);
-  assert.match(parentPush[0].text, new RegExp(String.raw`"${KID}"`));
-  d.childGone("cli:child");
-  assert.equal(store.pending("cli:parent").length, 1);
-});
-
-test("a child that re-registers before the sweep produces no notice", async () => {
-  const { d, registry, store, parentPush } = setup({ sweepDelayMs: 5 });
-  registry.disconnect("cli:child");
-  clearTimeout(registry.get("cli:child").offlineTimer);
-  d.attached("cli:parent");
-  registry.upsert({ key: "cli:child", name: "badacz", kind: "cli", push: () => true });
-  await tick(30);
-  assert.equal(parentPush.length, 0);
-  assert.equal(store.pending("cli:parent").length, 0);
 });
 
 test("a corrupt store file is preserved aside and not overwritten", () => {
@@ -310,7 +250,7 @@ test("a report from a child with a folder carries fromCwd and keeps it through t
   const push = [];
   const registry2 = new Registry();
   registry2.upsert({ key: "cli:parent", name: "mama", kind: "cli", push: (m) => (push.push(m), true) });
-  new Delegation({ registry: registry2, store: new DelegationStore(file), sweepDelayMs: 1000 }).attached("cli:parent");
+  new Delegation({ registry: registry2, store: new DelegationStore(file) }).attached("cli:parent");
   assert.equal(push[0].fromCwd, "/kid dir");
   assert.match(push[0].prompt, new RegExp(String.raw`^\[from ${KID}\]\n\[folder "\/kid dir"\]\nwynik`));
 });
@@ -439,4 +379,139 @@ test("reopens survive a new store instance", () => {
   assert.equal(again.reopenFor("cli:a", "cli:b").requestId, "r1");
   again.removeReopen("r1");
   assert.equal(new DelegationStore(file).reopenFor("cli:a", "cli:b"), null);
+});
+
+test("a child can request its own child", () => {
+  const { d, childControl } = setup();
+  assert.match(d.requestCreate("cli:child", req), /Do not wait/);
+  assert.equal(childControl[0][0], "session_request");
+});
+
+test("died sends the ended notice once, only for an unreported child", () => {
+  const { d, store, parentPush } = setup();
+  d.died("cli:child");
+  d.died("cli:child");
+  assert.equal(store.pending("cli:parent").length, 1);
+  assert.equal(parentPush.length, 1);
+  assert.equal(parentPush[0].wake, true);
+  assert.match(parentPush[0].text, new RegExp(String.raw`Session "${KID}" ended without reporting a result\. You can ask the user to reopen it\.`));
+  const rep = setup();
+  rep.d.report("cli:child", "done");
+  rep.d.died("cli:child");
+  assert.equal(rep.parentPush.length, 1);
+  assert.doesNotMatch(rep.parentPush[0].text, /ended without/);
+});
+
+test("removing a peer from the registry produces no notice", () => {
+  const { registry, parentPush, store } = setup();
+  registry.remove("cli:child");
+  assert.equal(parentPush.length, 0);
+  assert.equal(store.pending("cli:parent").length, 0);
+});
+
+function family() {
+  const s = setup();
+  s.registry.upsert({ key: "cli:kid2", name: "docs", kind: "cli", push: () => true });
+  s.registry.upsert({ key: "cli:grand", name: "wnuk", kind: "cli", push: () => true });
+  s.d.link("cli:kid2", "cli:parent");
+  s.d.link("cli:grand", "cli:child");
+  s.d.setTask("cli:child", "Write e2e tests for /orders\nsecond line");
+  s.d.setBusy("cli:child", true);
+  s.d.report("cli:kid2", "ok");
+  s.registry.disconnect("cli:kid2");
+  clearTimeout(s.registry.get("cli:kid2").offlineTimer);
+  return s;
+}
+const nm = (r, k) => r.get(k).name;
+
+test("familyBlock lists direct children with state, task and grandchild badge", () => {
+  const { d, registry } = family();
+  assert.equal(
+    d.familyBlock("cli:parent"),
+    [
+      "Your children (2) — names are current; a closed child can still be messaged (the user is asked to reopen it):",
+      `- "${nm(registry, "cli:child")}" — open, working — task: Write e2e tests for /orders [has 1 children]`,
+      `- "${nm(registry, "cli:kid2")}" — closed, reported — task: (task not recorded)`,
+    ].join("\n"),
+  );
+  assert.equal(d.familyBlock("cli:grand"), `Your parent: "${nm(registry, "cli:child")}" — open`);
+  d.setBusy("cli:child", false);
+  assert.match(d.familyBlock("cli:parent"), /— open, idle —/);
+  d.setTask("cli:grand", "x".repeat(130));
+  assert.match(d.familyBlock("cli:child"), new RegExp(`task: ${"x".repeat(120)}…$`, "m"));
+});
+
+test("familyBlock parent line shows closed and deleted", () => {
+  const { d, store, registry } = setup();
+  registry.disconnect("cli:parent");
+  clearTimeout(registry.get("cli:parent").offlineTimer);
+  assert.match(d.familyBlock("cli:child"), /— closed$/);
+  store.forget("cli:parent");
+  assert.match(d.familyBlock("cli:child"), /— deleted$/);
+});
+
+test("familyBlock is empty for a session without relatives", () => {
+  const { d, registry } = setup();
+  registry.upsert({ key: "cli:solo", name: "solo", kind: "cli" });
+  assert.equal(d.familyBlock("cli:solo"), "");
+  assert.equal(d.decorate("cli:solo", "hi"), "hi");
+});
+
+test("isRelative is true for parent and child only", () => {
+  const { d } = family();
+  assert.ok(d.isRelative("cli:parent", "cli:child") && d.isRelative("cli:child", "cli:parent"));
+  assert.ok(!d.isRelative("cli:parent", "cli:grand"));
+});
+
+test("a report delivered to a parent carries the children block; the stored prompt stays raw", () => {
+  const { d, parentPush, store } = setup();
+  d.setTask("cli:child", "do it");
+  d.report("cli:child", "wynik");
+  assert.match(parentPush[0].prompt, /wynik[\s\S]*Your children \(1\)[\s\S]*task: do it/);
+  assert.doesNotMatch(store.pending("cli:parent")[0].prompt, /Your children/);
+});
+
+test("list_sessions shows the family block even when nobody else is online", () => {
+  const { d, registry } = setup();
+  registry.remove("cli:child");
+  registry.upsert({ key: "cli:child", name: "badacz", kind: "cli" });
+  registry.get("cli:child").online = false;
+  const out = formatList(registry, "cli:parent", d);
+  assert.match(out, /Your children \(1\)/);
+  const lone = new Registry();
+  lone.upsert({ key: "cli:x", name: "x", kind: "cli" });
+  assert.equal(formatList(lone, "cli:x", null), "(no other sessions online)");
+});
+
+test("snapshot reports online and busy from the registry", () => {
+  const { d, registry } = family();
+  const snap = Object.fromEntries(d.snapshot().map((e) => [e.key, e]));
+  assert.equal(snap["cli:child"].busy, true);
+  assert.equal(snap["cli:child"].online, true);
+  assert.equal(snap["cli:child"].parent, "cli:parent");
+  assert.equal(snap["cli:child"].name, nm(registry, "cli:child"));
+  assert.equal(snap["cli:kid2"].online, false);
+  assert.equal(snap["cli:kid2"].reported, true);
+  assert.equal(typeof snap["cli:child"].createdAt, "number");
+  d.setBusy("nope", true); // unknown key: no-op
+});
+
+test("onChange fires on link, setTask, report, setBusy and online/offline", () => {
+  const { d, registry } = setup();
+  let n = 0;
+  d.onChange(() => n++);
+  d.onChange(() => {
+    throw new Error("boom");
+  });
+  const bumped = (fn) => {
+    const before = n;
+    fn();
+    assert.ok(n > before);
+  };
+  bumped(() => d.link("cli:child", "cli:parent"));
+  bumped(() => d.setTask("cli:child", "t"));
+  bumped(() => d.setBusy("cli:child", true));
+  bumped(() => d.report("cli:child", "r"));
+  bumped(() => registry.disconnect("cli:child"));
+  clearTimeout(registry.get("cli:child").offlineTimer);
 });
