@@ -2,19 +2,6 @@
 
 const isChild = (e) => Boolean(e?.parentSessionId);
 
-export function limitError(entries, parentId, { perParent = 3, total = 5 } = {}, creating = []) {
-  const kids = [...entries].filter(isChild);
-  const live = kids.length + creating.length;
-  const own = kids.filter((e) => e.parentSessionId === parentId).length + creating.filter((id) => id === parentId).length;
-  if (own >= perParent) {
-    return `This session already has ${own} delegated sessions running; the limit is ${perParent} per session. A slot frees up when a delegated session of yours is closed, not when it reports.`;
-  }
-  if (live >= total) {
-    return `The app already has ${live} delegated sessions running; the limit is ${total} in total. A slot frees up when a delegated session is closed, not when it reports.`;
-  }
-  return null;
-}
-
 export function findModelOption(options) {
   return (options ?? []).find((o) => o?.id === "model");
 }

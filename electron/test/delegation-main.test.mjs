@@ -5,7 +5,6 @@ import {
   PendingRequests,
   childPrompt,
   findModelOption,
-  limitError,
   reloadWarning,
   resolveConfig,
   unreportedChildren,
@@ -13,7 +12,6 @@ import {
 } from "../delegation.mjs";
 
 const MODEL_ID = "model";
-const children = (parent, n) => Array.from({ length: n }, () => ({ parentSessionId: parent }));
 const opt = (id, currentValue, values) => ({
   id,
   category: id === "agent" ? "_agent" : id,
@@ -23,25 +21,6 @@ const opt = (id, currentValue, values) => ({
 });
 const options = [opt("model", "gpt-a", ["gpt-a", "gpt-b", "gpt-b"]), opt("agent", "", ["", "reviewer"])];
 const noAgent = [opt("model", "gpt-a", ["gpt-a", "gpt-b"])];
-
-test("limits: 3 per parent, 5 in total", () => {
-  assert.match(limitError(children("p", 3), "p"), /3/);
-  assert.equal(limitError(children("p", 2), "p"), null);
-  assert.match(limitError([...children("p", 2), ...children("q", 3)], "p"), /5/);
-});
-
-test("creations in progress count toward the limit", () => {
-  assert.match(limitError(children("p", 2), "p", {}, ["p"]), /3/);
-  assert.match(limitError(children("q", 4), "p", {}, ["p"]), /5/);
-});
-
-test("limits are configurable", () => {
-  assert.match(limitError(children("p", 1), "p", { perParent: 1 }), /1/);
-});
-
-test("entries without a parent do not count toward the per-parent limit", () => {
-  assert.equal(limitError([{}, {}, {}, { parentSessionId: null }], "p"), null);
-});
 
 test("findModelOption finds the option by id", () => {
   assert.equal(findModelOption(options).id, MODEL_ID);
@@ -129,17 +108,6 @@ test("unreportedChildren returns children without a report from any iterable", (
     ["d", { parentSessionId: "q" }],
   ]);
   assert.deepEqual(unreportedChildren(entries.values()), [entries.get("a"), entries.get("d")]);
-});
-
-test("the limit notices name the limit and say a slot frees up when a session is closed", () => {
-  for (const [text, number] of [
-    [limitError(children("p", 3), "p"), /limit is 3/],
-    [limitError(children("q", 5), "p"), /limit is 5/],
-  ]) {
-    assert.match(text, number);
-    assert.match(text, /frees up when a delegated session.* is closed/);
-    assert.doesNotMatch(text, /report back|Wait for/);
-  }
 });
 
 test("the reload warning names what it stops and discards", () => {

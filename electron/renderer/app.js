@@ -247,7 +247,6 @@ class SessionView {
     this.seenDeliveries = seenDeliveries ?? new Set(); // report ids already taken (the broker redelivers until acked)
     this.pendingNotes = pendingNotes ?? []; // non-waking notices, passed to the model with the next prompt
     this.openCards = new Set(); // permission and delegation cards still waiting for an answer
-    this.lastActivity = Date.now(); // for the idle close of delegated children
     this.busy = false;
     this.dead = false;
     this.run = null; // current streamed block { type, el, text }
@@ -929,7 +928,6 @@ class SessionView {
 
   setBusy(b) {
     this.busy = b;
-    this.lastActivity = Date.now();
     const off = b || this.dead || this.deleting; // this.deleting: the whole session is being deleted
     this.el.classList.toggle("busy", off); // disables the fork/delete actions
     this.sendBtn.disabled = off;
@@ -1082,7 +1080,6 @@ class SessionView {
 
   // --- ACP session/update
   onUpdate(u) {
-    this.lastActivity = Date.now();
     this.lastUpdate = Date.now();
     this.delivery?.update(u);
     const text = u.content?.type === "text" ? u.content.text : "";
@@ -1505,7 +1502,6 @@ class SessionView {
     }
     this.append(bubble);
     this.toBottom();
-    this.lastActivity = Date.now();
     this.setBusy(true);
     this.prompting = true;
     const before = isCmd ? await api.userMessages(this.sessionId).catch(() => null) : null;
@@ -2290,13 +2286,5 @@ document.addEventListener("keydown", (e) => {
   }
 });
 setInterval(renderList, 60_000); // keep "x min ago" fresh
-// a delegated child with nothing to do closes by itself (it stays resumable from the list)
-setInterval(() => {
-  const now = Date.now();
-  for (const [id, v] of views) {
-    const state = { parentSessionId: v.parentSessionId, busy: v.busy, inboxLength: v.inbox.length, pendingPermissions: v.openCards.size, active: id === activeId, lastActivity: v.lastActivity };
-    if (UiState.shouldCloseIdle(state, now)) closeView(id);
-  }
-}, 60_000);
 setStatus("Loading sessions…");
 refresh();

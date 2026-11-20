@@ -39,6 +39,14 @@ contextBridge.exposeInMainWorld("api", {
   relayAck: (sessionId, id) => call("relay:ack", sessionId, id),
   answerDelegation: (requestId, approved) => call("delegation:answer", requestId, approved),
   stopChildren: (parentSessionId) => call("delegation:stopChildren", parentSessionId),
+  // the broker's sub-session links ({ key: "cli:<id>", parent, name, task, createdAt, reported, parentDeleted, online,
+  // busy }): the cached snapshot at once, the fresh one follows through onLinks
+  getLinks: () => call("links:get"),
+  // keys are "cli:<sessionId>": removed from the tree by the user / no longer in Copilot's session list
+  forgetLinks: (keys) => call("links:forget", keys),
+  reportMissing: (keys) => call("links:missing", keys),
+  // the user's answer to a reopen card; reason "missing" when the target session no longer exists
+  answerReopen: (sessionId, requestId, approved, reason) => call("reopen:answer", sessionId, requestId, approved, reason),
   pickDir: () => call("dialog:pickDir"),
   getSettings: () => call("settings:get"),
   setSettings: (s) => call("settings:set", s),
@@ -88,4 +96,7 @@ contextBridge.exposeInMainWorld("api", {
   onDelegationRequest: on("delegation:request"),
   onDelegationCreated: on("delegation:created"),
   onDelegationClosed: on("delegation:closed"),
+  onLinks: on("links:update"),
+  // { sessionId (the sender), requestId, targetSessionId, targetName, fromName, previews }
+  onReopenRequest: on("reopen:request"),
 });
