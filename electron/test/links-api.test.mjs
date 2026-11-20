@@ -25,9 +25,10 @@ function setup() {
   const delegation = new Delegation({ registry, store, newId: () => `id${++n}` });
   const controls = [];
   for (const [key, name] of [["cli:parent", "mama"], ["cli:child", "badacz"]])
-    registry.upsert({ key, name, kind: "cli", push: () => true, control: (...a) => controls.push([key, ...a]) });
+    registry.upsert({ key, name, kind: "cli", app: true, push: () => true, control: (...a) => controls.push([key, ...a]) });
   delegation.link("cli:child", "cli:parent");
-  return { registry, store, delegation, routes: linksRoutes({ delegation }), controls };
+  const logs = [];
+  return { registry, store, delegation, routes: linksRoutes({ delegation, log: (m) => logs.push(m) }), controls, logs };
 }
 
 test("GET /api/links returns the snapshot", () => {
@@ -92,6 +93,29 @@ test("reopen-answer approve releases the queue", () => {
   assert.equal(store.awaitingFor(requestId).length, 0);
   assert.equal(routes["POST /api/peer/reopen-answer"]({ key: "cli:parent", approved: true }).status, 400);
 });
+
+test("reopen-answer for a request that is not pending is 404", () => {
+  const { routes, registry, delegation, controls } = setup();
+  registry.get("cli:child").online = false;
+  delegation.messageClosed("cli:parent", registry.get("cli:child").name, "hello");
+  const { requestId } = controls.find((c) => c[1] === "reopen_request")[2];
+  assert.equal(routes["POST /api/peer/reopen-answer"]({ key: "cli:parent", requestId, approved: false }).status, 204);
+  const again = routes["POST /api/peer/reopen-answer"]({ key: "cli:parent", requestId, approved: false });
+  assert.equal(again.status, 404);
+  assert.match(again.json.error, /not pending/);
+  assert.equal(routes["POST /api/peer/reopen-answer"]({ key: "cli:other", requestId: "nope", approved: true }).status, 404);
+});
+
+test("missing logs what it forgot; forget does not", () => {
+  const { routes, logs } = setup();
+  routes["POST /api/links/forget"]({ keys: [] });
+  assert.deepEqual(logs, []);
+  routes["POST /api/links/missing"]({ keys: ["cli:child", "acp:x"] });
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /cli:child/);
+  assert.doesNotMatch(logs[0], /acp:x/);
+});
+
 
 test("the client calls onReopenRequest and onLinksChanged for their events, and fetchLinks/posts work", async () => {
   const seen = [];

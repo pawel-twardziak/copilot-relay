@@ -166,13 +166,22 @@ export class DelegationStore {
     this.#save();
   }
 
-  /** The session is gone for good: drop its link, queued items and reopen requests; its children keep `parent` but are orphans. */
+  /**
+   * The session is gone for good: drop its link, queued items and reopen requests; its children keep `parent` but are
+   * orphans. Returns the dropped reopen requests of other senders that targeted it (their senders must be told).
+   */
   forget(key) {
+    const targeting = [];
     delete this.data.links[key];
     for (const [id, i] of Object.entries(this.data.outbox)) if (i.toKey === key) delete this.data.outbox[id];
-    for (const [id, r] of Object.entries(this.data.reopens)) if (r.fromKey === key || r.targetKey === key) delete this.data.reopens[id];
+    for (const [id, r] of Object.entries(this.data.reopens)) {
+      if (r.fromKey !== key && r.targetKey !== key) continue;
+      if (r.fromKey !== key) targeting.push(r);
+      delete this.data.reopens[id];
+    }
     for (const l of Object.values(this.data.links)) if (l.parent === key) l.parentDeleted = true;
     this.#save();
+    return targeting;
   }
 
   remove(id) {

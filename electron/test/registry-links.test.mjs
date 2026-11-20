@@ -143,3 +143,20 @@ test("a message queued while the recipient is offline keeps fromCwd in the inbox
   assert.equal(item.fromCwd, "/a b");
   assert.match(item.prompt, new RegExp(String.raw`^\[from ${r.get("x").name}\]\n\[folder "/a b"\]\nhello`));
 });
+
+test("an explicit name is recognised as the peer's current name, so registration does not rename", () => {
+  const r = new Registry();
+  const p = r.upsert({ key: "cli:e", name: "Worker One", kind: "cli" });
+  assert.equal(r.freeName("Worker One", "cli:e"), p.name);
+  assert.equal(r.freeName(p.name, "cli:e"), p.name);
+  assert.notEqual(r.freeName("other", "cli:e"), p.name);
+});
+
+test("upsert records whether the stream is the desktop app's; a re-attach updates it", () => {
+  const r = new Registry();
+  assert.equal(r.upsert({ key: "cli:a", name: "a", kind: "cli", app: true }).app, true);
+  assert.equal(r.upsert({ key: "cli:b", name: "b", kind: "cli" }).app, false);
+  assert.equal(r.upsert({ key: "cli:a", kind: "cli", app: false }).app, false);
+  assert.equal(r.upsert({ key: "cli:a", kind: "cli" }).app, false); // not said: kept
+  assert.equal(r.upsert({ key: "cli:a", kind: "cli", app: true }).app, true);
+});

@@ -29,13 +29,13 @@ function setup({ registry = new Registry() } = {}) {
   const childPush = [];
   const childControl = [];
   const parentPeer = {
-    key: "cli:parent", name: "mama", kind: "cli",
+    key: "cli:parent", name: "mama", kind: "cli", app: true,
     push: (m) => (parentPush.push(m), true),
     control: (...a) => parentControl.push(a),
   };
   registry.upsert(parentPeer);
   registry.upsert({
-    key: "cli:child", name: "badacz", kind: "cli",
+    key: "cli:child", name: "badacz", kind: "cli", app: true,
     push: (m) => (childPush.push(m), true),
     control: (...a) => childControl.push(a),
   });
@@ -132,7 +132,7 @@ test("the created notice does not wake and is not persisted", () => {
   d.outcome("cli:parent", { requestId: "r", kind: "created", name: "badacz", text: "Session created: badacz" });
   assert.equal(parentPush[0].wake, false);
   assert.equal(parentPush[0].from, "relay");
-  assert.equal(parentPush[0].prompt, "[from relay]\nSession created: badacz");
+  assert.match(parentPush[0].prompt, /^\[from relay\]\nSession created: badacz\n\nYour children \(1\)/);
   assert.equal(store.pending("cli:parent").length, 0);
 });
 
@@ -528,7 +528,7 @@ function closedChild(opts) {
   s.registry.remove("cli:child");
   s.reopens = () => s.parentControl.filter(([ev]) => ev === "reopen_request").map(([, p]) => p);
   s.reopenChild = () =>
-    s.registry.upsert({ key: "cli:child", name: "badacz", kind: "cli", push: (m) => (s.childPush.push(m), true), control: (...a) => s.childControl.push(a) });
+    s.registry.upsert({ key: "cli:child", name: "badacz", kind: "cli", app: true, push: (m) => (s.childPush.push(m), true), control: (...a) => s.childControl.push(a) });
   return s;
 }
 
@@ -737,4 +737,76 @@ test("a deleted parent is not offered for reopen: No session", () => {
   assert.match(s.registry.send("cli:child", name, "hi"), /^No session/);
   assert.equal(s.childControl.filter(([ev]) => ev === "reopen_request").length, 0);
   assert.equal(s.store.reopensFrom("cli:child").length, 0);
+});
+
+// ---- final-review fixes ----
+
+test("a sender whose stream is not the app's gets the no-app-connection copy and nothing is queued", () => {
+  const { registry, store, parentControl } = closedChild();
+  registry.get("cli:parent").app = false; // a Terminal (extension) peer: it has a control stream but no app
+  assert.equal(registry.send("cli:parent", KID, "hello"), NO_APP(KID));
+  assert.equal(parentControl.filter(([ev]) => ev === "reopen_request").length, 0);
+  assert.equal(store.reopensFrom("cli:parent").length, 0);
+  assert.equal(Object.keys(store.data.outbox).length, 0);
+});
+
+test("a pending reopen is not re-asked on a re-registration without the app mark", () => {
+  const { registry, d, reopens, parentPeer } = closedChild();
+  registry.send("cli:parent", KID, "hello");
+  registry.disconnect("cli:parent");
+  clearTimeout(registry.get("cli:parent").offlineTimer);
+  registry.upsert({ ...parentPeer, app: false });
+  d.attached("cli:parent");
+  assert.equal(reopens().length, 1);
+});
+
+test("a rename updates the stored link name, so a closed child is shown under its new name", () => {
+  const { registry, store, d } = setup();
+  const renamed = registry.rename("cli:child", "nowy");
+  assert.equal(store.nameOf("cli:child"), renamed);
+  registry.remove("cli:child");
+  assert.equal(d.snapshot().find((l) => l.key === "cli:child").name, renamed);
+  assert.match(d.familyBlock("cli:parent"), new RegExp(`"${renamed}" — closed`));
+});
+
+test("a child whose parent was deleted cannot report, and its death enqueues nothing", () => {
+  const { d, store } = setup();
+  d.forget("cli:parent");
+  assert.match(d.report("cli:child", "wynik"), /parent session was deleted/);
+  assert.equal(store.isReported("cli:child"), false);
+  d.died("cli:child");
+  assert.equal(Object.keys(store.data.outbox).length, 0);
+});
+
+test("forgetting a target tells every other sender waiting on a reopen of it", () => {
+  const s = closedChild();
+  const gkPush = [];
+  s.registry.upsert({ key: "cli:gk", name: "wnuk", kind: "cli", app: true, push: (m) => (gkPush.push(m), true), control: () => {} });
+  s.d.link("cli:gk", "cli:child");
+  assert.equal(s.registry.send("cli:gk", KID, "from below"), CLOSED(KID));
+  s.d.forget("cli:child");
+  assert.equal(gkPush.at(-1).text, REJECTED(KID));
+  assert.equal(s.store.pending("cli:gk").length, 1);
+  assert.equal(s.store.reopensFrom("cli:gk").length, 0);
+});
+
+test("a missing answer tells the asker once and the other senders of the same target", () => {
+  const s = closedChild();
+  const gkPush = [];
+  s.registry.upsert({ key: "cli:gk", name: "wnuk", kind: "cli", app: true, push: (m) => (gkPush.push(m), true), control: () => {} });
+  s.d.link("cli:gk", "cli:child");
+  s.registry.send("cli:parent", KID, "from above");
+  s.registry.send("cli:gk", KID, "from below");
+  const [{ requestId }] = s.reopens();
+  const before = s.parentPush.length;
+  assert.equal(s.d.answerReopen("cli:parent", requestId, false, "missing"), true);
+  assert.deepEqual(s.parentPush.slice(before).map((m) => m.text), [REJECTED(KID)]);
+  assert.deepEqual(gkPush.map((m) => m.text), [REJECTED(KID)]);
+  assert.equal(Object.values(s.store.data.outbox).filter((i) => i.awaiting).length, 0);
+});
+
+test("a task that starts with a newline shows its first non-empty line", () => {
+  const { d } = setup();
+  d.setTask("cli:child", "\r\nWrite the docs\r\nthen stop");
+  assert.match(d.familyBlock("cli:parent"), /task: Write the docs$/m);
 });

@@ -96,17 +96,31 @@ function introPrompt(meta) {
   );
 }
 
-async function createAcpSession({ name, role = "", cwd, model }) {
+/** `stableKey`: the key comes from the name alone (startupSessions), so the session keeps its name across broker restarts. */
+async function createAcpSession({ name, role = "", cwd, model }, { stableKey = false } = {}) {
+  if (!name) throw new HttpError(400, "A name is required.");
   const wanted = sanitizeName(name);
-  if (!name || registry.getByName(wanted)) throw new HttpError(409, `Name "${wanted}" is missing or taken.`);
   if (isReservedName(wanted)) throw new HttpError(409, `Name "${wanted}" is reserved.`);
   const dir = cwd ? path.resolve(DEFAULT_CWD, cwd) : DEFAULT_CWD;
   if (!(await stat(dir).catch(() => null))?.isDirectory()) throw new HttpError(400, `Not a directory: ${dir}`);
 
-  const key = `acp:${wanted}:${Date.now().toString(36)}`;
-  const agent = new AcpAgent({
+  // POST /api/sessions may start several sessions with one name: each gets its own key (and so its own name suffix)
+  const key = stableKey ? `acp:${wanted}` : `acp:${wanted}:${Date.now().toString(36)}`;
+  if (registry.get(key)) throw new HttpError(409, `Session "${registry.get(key).name}" is already running.`);
+  let agent = null;
+  registry.upsert({
+    key,
     name: wanted,
-    role: introPrompt({ name: wanted, role }),
+    kind: "acp",
+    cwd: dir,
+    role,
+    model: model ?? "",
+    push: (m) => (agent ? agent.enqueue(m.prompt) : false),
+  });
+  const own = registry.get(key).name; // upsert made it unique: <wanted>-<suffix>
+  agent = new AcpAgent({
+    name: own,
+    role: introPrompt({ name: own, role }),
     cwd: dir,
     args: model ? ["--model", model] : [],
     // the copilot-relay extension (if installed) sees this and stays passive → no duplicate peer/tools
@@ -115,22 +129,13 @@ async function createAcpSession({ name, role = "", cwd, model }) {
       { type: "http", name: "relay", url: `http://${HOST}:${PORT}/mcp?peer=${encodeURIComponent(key)}`, headers: [] },
     ],
   });
-  registry.upsert({
-    key,
-    name: wanted,
-    kind: "acp",
-    cwd: dir,
-    role,
-    model: model ?? "",
-    push: (m) => agent.enqueue(m.prompt),
-  });
   acpAgents.set(key, agent);
   wireAcp(key, agent);
   try {
     await agent.start();
   } catch (e) {
     closeAcpSession(key);
-    throw new HttpError(502, `Failed to start ${wanted}: ${e.message}`);
+    throw new HttpError(502, `Failed to start ${own}: ${e.message}`);
   }
   return registry.describe(registry.get(key));
 }
@@ -303,6 +308,8 @@ const server = http.createServer(async (req, res) => {
         const key = q.get("key");
         if (!key) return json(res, 400, { error: "key required" });
         if (q.get("alias")) registry.setAlias(q.get("alias"), key);
+        // only the desktop app registers with an app:<uuid> alias; it alone can show reopen cards
+        const app = /^app:/.test(q.get("alias") ?? "");
         sse(res);
         const write = (event, data) => !res.destroyed && res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
         // unlike `write`, `control` must throw on a dead stream: Delegation treats only a throw as "not delivered"
@@ -323,14 +330,16 @@ const server = http.createServer(async (req, res) => {
           push: (m) => write("message", m),
           parentKey: parent || delegationStore.parentOf(key) || null,
           control,
+          app,
         });
-        // explicit name (COPILOT_RELAY_NAME) on a fresh start wins even if the peer is still known
+        // explicit name (COPILOT_RELAY_NAME) on a fresh start wins even if the peer is still known; compared in its
+        // final <base>-<suffix> form, so a peer already carrying it is not renamed on every registration
         const explicit = q.get("name");
-        if (explicit && peer.name !== sanitizeName(explicit)) {
+        if (explicit && peer.name !== registry.freeName(explicit, key)) {
           try {
             registry.rename(key, explicit);
           } catch {
-            /* taken by an online session → keep the current name */
+            /* a reserved name → keep the current name */
           }
         }
         persist(peer);
@@ -399,7 +408,7 @@ server.on("error", (e) => {
 server.listen(PORT, HOST, () => {
   console.log(`copilot-relay broker: http://${HOST}:${PORT}  (MCP: /mcp, default cwd: ${DEFAULT_CWD})`);
   for (const s of config.startupSessions ?? []) {
-    createAcpSession(s).then(
+    createAcpSession(s, { stableKey: true }).then(
       () => console.log(`  ✓ ${s.name}`),
       (e) => console.error(`  ✗ ${s.name}: ${e.message}`),
     );

@@ -12,6 +12,11 @@ export class Delegation {
     this.store = store;
     this.newId = newId;
     this.nameOf = nameOf;
+    // a renamed child keeps its new name in the link, so it is shown under it once it is closed
+    registry.on("peer_renamed", (ev) => {
+      const link = ev?.key && ev.name ? this.store.linkOf(ev.key) : null;
+      if (link && link.name !== ev.name) this.store.link(ev.key, link.parent, ev.name);
+    });
     for (const ev of ["peer_added", "peer_updated", "peer_removed", "peer_renamed"]) registry.on(ev, () => this.#changed());
   }
 
@@ -45,8 +50,27 @@ export class Delegation {
 
   /** The session is gone for good: drop everything stored about it. */
   forget(key) {
-    this.store.forget(key);
+    this.#forget(key);
     this.#changed();
+  }
+
+  /** store.forget, and every other sender whose reopen request of `key` it drops is told its message was not delivered. */
+  #forget(key) {
+    const name = this.#nameOf(key);
+    for (const r of this.store.forget(key)) this.#notDelivered(r.fromKey, name);
+  }
+
+  #notDelivered(toKey, targetName) {
+    const text = `The user did not reopen "${targetName}"; your message was not delivered.`;
+    const item = { id: this.newId(), toKey, from: "relay", text, prompt: `[from relay]\n${text}` };
+    this.store.enqueue(item);
+    this.#deliver(item);
+  }
+
+  /** The parent key to deliver to, or null when there is none or it was deleted. */
+  #liveParent(childKey) {
+    const link = this.store.linkOf(childKey);
+    return link?.parent && !link.parentDeleted ? link.parent : null;
   }
 
   setBusy(key, busy) {
@@ -89,7 +113,7 @@ export class Delegation {
         const open = !!peer?.online;
         const state = [open ? (peer.busy === true ? "open, working" : "open, idle") : "closed"];
         if (this.store.isReported(k)) state.push("reported");
-        const first = (this.store.taskOf(k) || "").split("\n")[0];
+        const first = (this.store.taskOf(k) || "").trim().split(/\r?\n/)[0];
         const task = !first ? "(task not recorded)" : first.length > 120 ? `${first.slice(0, 120)}…` : first;
         const n = this.store.childrenOf(k).length;
         lines.push(`- "${this.#nameOf(k)}" — ${state.join(", ")} — task: ${task}${n ? ` [has ${n} children]` : ""}`);
@@ -123,7 +147,8 @@ export class Delegation {
 
   report(callerKey, text) {
     const child = this.registry.get(callerKey);
-    const parentKey = this.store.parentOf(callerKey);
+    if (child && this.store.linkOf(callerKey)?.parentDeleted) return "Your parent session was deleted, so there is no one to report to.";
+    const parentKey = this.#liveParent(callerKey);
     if (!child || !parentKey) return "You are not a delegated session, so there is no one to report to.";
     if (this.store.isReported(callerKey)) return "You have already reported. Use send_message for further exchanges.";
     const item = {
@@ -151,7 +176,7 @@ export class Delegation {
   outcome(parentKey, { kind, text }) {
     const item = { id: this.newId(), toKey: parentKey, from: "relay", text, prompt: `[from relay]\n${text}` };
     if (kind === "created") {
-      this.registry.pushTo(parentKey, { from: "relay", human: false, text, prompt: item.prompt, wake: false });
+      this.registry.pushTo(parentKey, { from: "relay", human: false, text, prompt: this.decorate(parentKey, item.prompt), wake: false });
       return;
     }
     this.store.enqueue(item);
@@ -174,7 +199,7 @@ export class Delegation {
     if (!targetKey) return null;
     const targetName = this.#nameOf(targetKey);
     const noApp = `Session "${targetName}" is closed and you have no app connection to ask the user to reopen it.`;
-    if (!from.control) return noApp;
+    if (!from.control || !from.app) return noApp; // a Terminal (extension) stream cannot show the card
     const [parentKey, childKey] = targetKey === parent ? [targetKey, fromKey] : [fromKey, targetKey];
     if (!this.registry.chargePair(parentKey, childKey)) return BUDGET_EXHAUSTED;
     const existing = this.store.reopenFor(fromKey, targetKey);
@@ -214,11 +239,9 @@ export class Delegation {
       for (const item of items) this.#deliver(item);
     } else {
       this.store.dropAwaiting(requestId);
-      if (reason === "missing") this.store.forget(reopen.targetKey);
-      const text = `The user did not reopen "${targetName}"; your message was not delivered.`;
-      const item = { id: this.newId(), toKey: fromKey, from: "relay", text, prompt: `[from relay]\n${text}` };
-      this.store.enqueue(item);
-      this.#deliver(item);
+      this.store.removeReopen(requestId); // before a forget, which tells the other senders of the same target
+      if (reason === "missing") this.#forget(reopen.targetKey);
+      this.#notDelivered(fromKey, targetName);
     }
     this.store.removeReopen(requestId);
     this.#changed();
@@ -228,7 +251,7 @@ export class Delegation {
   /** Emit the reopen card for `reopen` on its sender's control stream; false when that is not possible. */
   #askReopen({ requestId, fromKey, targetKey }) {
     const from = this.registry.get(fromKey);
-    if (!from?.control) return false;
+    if (!from?.control || !from.app) return false;
     const previews = this.store.awaitingFor(requestId).map((i) => (i.text.length > 200 ? `${i.text.slice(0, 200)}…` : i.text));
     try {
       from.control("reopen_request", { requestId, targetKey, targetName: this.#nameOf(targetKey), fromName: from.name, previews });
@@ -265,7 +288,7 @@ export class Delegation {
   }
 
   #endedNotice(childKey) {
-    const parentKey = this.store.parentOf(childKey);
+    const parentKey = this.#liveParent(childKey); // nothing is queued for a deleted parent
     if (!parentKey || !this.store.markEndedNotice(childKey)) return;
     const name = this.#nameOf(childKey);
     const text = `Session "${name}" ended without reporting a result. You can ask the user to reopen it.`;

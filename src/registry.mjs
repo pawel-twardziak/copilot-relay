@@ -96,9 +96,10 @@ export class Registry extends EventEmitter {
 
   /**
    * Add or re-attach a peer. Re-attaching (same key) keeps the name and flushes the inbox.
+   * `app`: the control stream is the desktop app's (it can show reopen cards); a re-attach that leaves it out keeps it.
    * @returns peer
    */
-  upsert({ key, name, kind, cwd = "", role = "", model = "", push = null, parentKey = null, control = null }) {
+  upsert({ key, name, kind, cwd = "", role = "", model = "", push = null, parentKey = null, control = null, app }) {
     let peer = this.byKey.get(key);
     if (peer) {
       clearTimeout(peer.offlineTimer);
@@ -106,13 +107,14 @@ export class Registry extends EventEmitter {
       peer.push = push ?? peer.push;
       peer.parentKey = parentKey ?? peer.parentKey;
       peer.control = control ?? peer.control;
+      peer.app = app ?? peer.app;
       Object.assign(peer, { cwd: cwd || peer.cwd });
       this.emit("peer_updated", this.describe(peer));
       this.#flush(peer);
       return peer;
     }
     if (name && !NAME_RE.test(name)) name = sanitizeName(name);
-    peer = { key, name: this.freeName(name, key), kind, cwd, role, model, push, parentKey, control, inbox: [], waiters: [], online: true };
+    peer = { key, name: this.freeName(name, key), kind, cwd, role, model, push, parentKey, control, app: app === true, inbox: [], waiters: [], online: true };
     this.byKey.set(key, peer);
     this.byName.set(peer.name, peer);
     this.emit("peer_added", this.describe(peer));
