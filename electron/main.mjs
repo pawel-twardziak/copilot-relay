@@ -16,6 +16,7 @@ import { JobScheduler } from "./scheduler.mjs";
 import { scheduleInfo } from "./jobs.mjs";
 import { PendingRequests, childPrompt, findModelOption, reloadWarning, resolveConfig, unreportedChildren, withDeadline } from "./delegation.mjs";
 import { readLinksCache, writeLinksCache } from "./links-cache.mjs";
+import { listAllPages } from "./session-list.mjs";
 import { createTierStore, effectiveTier, normalizeTier, switchTier, tierArgs, withContextOption } from "./context-tier.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -25,6 +26,9 @@ let lister = null; // one long-lived connection used for session/list
 const open = new Map(); // sessionId -> { conn, cwd, permissions: Map<reqId, rpcId>, relay, configOptions, parentSessionId?, reported? }
 let permSeq = 0;
 const pendingRequests = new PendingRequests(); // delegated-session requests waiting for the user's answer
+// reopen cards shown and not answered yet (requestId -> the reopen:request payload): the broker asks again only when
+// the sender registers anew, so after a window reload main shows them again (see sessions:open)
+const reopenCards = new Map();
 
 // relay-client.mjs is copied from ../extension by `npm start` / `npm run dist`; without it the relay is off
 const { RelayClient } = await import("./relay-client.mjs").catch(() => ({}));
@@ -143,6 +147,7 @@ function relayStart(sessionId, cwd, { cfg, alias }, { name, parentKey } = {}) {
       if (entry?.relay === client) {
         entry.parentSessionId = payload?.parentKey?.replace(/^cli:/, "");
         entry.reported = Boolean(payload?.reported);
+        client.state(Boolean(entry.prompting)); // a restarted broker knows nothing of a turn in progress
       }
       status();
       markRegistered();
@@ -185,8 +190,12 @@ async function loadLinks() {
   const links = client ? await client.fetchLinks() : await brokerGetLinks(cfg.url);
   if (!Array.isArray(links)) throw new Error("the broker answered without a links array");
   if (seq !== linksSeq) return;
-  writeLinksCache(linksCacheFile(), links);
   send("links:update", links);
+  try {
+    writeLinksCache(linksCacheFile(), links); // only the start-up view uses it: a failed write must not block the update
+  } catch (e) {
+    console.warn(`[links] cache: ${e.message}`);
+  }
 }
 
 async function brokerGetLinks(url) {
@@ -307,6 +316,7 @@ function attach(sessionId, conn, cwd, relay, link) {
     entry.relay?.died(); // before stop(): the broker notifies the parent of an unreported child
     entry.relay?.stop();
     open.delete(sessionId);
+    dropReopenCards(sessionId);
     usage.forget(sessionId);
     pendingRequests.dropForParent(sessionId);
     send("acp:exit", { sessionId, code, signal, stderr: stderr?.trim().slice(-800) });
@@ -342,16 +352,11 @@ let purging = Promise.resolve(); // leftovers of failed deletes are removed befo
 async function listSessions() {
   await Promise.race([purging, new Promise((r) => setTimeout(r, 1000))]);
   const conn = await getLister();
-  const all = [];
-  let cursor;
-  for (let page = 0; page < 50; page++) {
-    const res = await conn.request("session/list", cursor ? { cursor } : {});
-    all.push(...(res.sessions ?? []));
-    for (const x of res.sessions ?? []) if (x.cwd) knownFolders.add(x.cwd);
-    cursor = res.nextCursor;
-    if (!cursor) break;
-  }
-  return { sessions: all, complete: !cursor };
+  return listAllPages((method, params) => conn.request(method, params), {
+    onPage: (list) => {
+      for (const x of list) if (x.cwd) knownFolders.add(x.cwd);
+    },
+  });
 }
 handle("sessions:list", async () => (await listSessions()).sessions);
 // the sidebar's refresh: only a complete list may prune the sub-session tree
@@ -400,7 +405,11 @@ const historyBusy = new Set(); // a truncate is closing the session and rewritin
 const lingering = new Map(); // id -> connection whose Copilot would not exit: may still write the session's files
 
 handle("sessions:open", async (sessionId, cwd) => {
-  if (open.has(sessionId)) return { sessionId, cwd, configOptions: null, alreadyOpen: true };
+  if (open.has(sessionId)) {
+    // after a window reload the view is new: show the reopen cards it had again (a live view ignores known ids)
+    for (const card of reopenCards.values()) if (card.sessionId === sessionId) send("reopen:request", card);
+    return { sessionId, cwd, configOptions: null, alreadyOpen: true };
+  }
   refuseWhileDeleting(sessionId);
   // a truncate closed it and is rewriting events.jsonl: a resume now would load (and write) a half-done history
   if (historyBusy.has(sessionId)) throw new Error("Wait until the delete of a message has finished.");
@@ -428,6 +437,7 @@ async function openSession(sessionId, cwd) {
   } catch (e) {
     entry.relay?.stop();
     open.delete(sessionId);
+    dropReopenCards(sessionId);
     usage.forget(sessionId);
     conn.kill();
     throw e;
@@ -696,6 +706,7 @@ async function closeEntry(sessionId) {
   open.delete(sessionId);
   usage.forget(sessionId);
   pendingRequests.dropForParent(sessionId);
+  dropReopenCards(sessionId);
   e.relay?.stop();
   await Promise.race([e.conn.request("session/close", { sessionId }).catch(() => {}), new Promise((r) => setTimeout(r, 2000))]);
   e.conn.kill();
@@ -727,15 +738,30 @@ function sessionRequested(parentSessionId, { requestId, name, task, agent, model
 
 /** The broker asks the user (through the sender's view) to reopen a closed relative that a message is waiting for. */
 function reopenRequested(sessionId, { requestId, targetKey, targetName, fromName, previews }) {
-  notifyIfUnfocused("A session wants to reopen another one", fromName);
-  send("reopen:request", { sessionId, requestId, targetSessionId: String(targetKey ?? "").replace(/^cli:/, ""), targetName, fromName, previews });
+  if (!reopenCards.has(requestId)) notifyIfUnfocused("A session wants to reopen another one", fromName);
+  const card = { sessionId, requestId, targetSessionId: String(targetKey ?? "").replace(/^cli:/, ""), targetName, fromName, previews };
+  reopenCards.set(requestId, card); // a re-ask (another queued message) replaces it with the longer preview list
+  send("reopen:request", card);
+}
+
+/** The session's relay connection is gone: the broker asks again when it registers anew. */
+function dropReopenCards(sessionId) {
+  for (const [id, card] of reopenCards) if (card.sessionId === sessionId) reopenCards.delete(id);
 }
 
 // reachable only from the window, like delegation:answer. `reason` "missing": the target no longer exists.
 handle("reopen:answer", async (sessionId, requestId, approved, reason) => {
   const relay = open.get(sessionId)?.relay;
   if (!relay) throw new Error("The session that asked is no longer connected to copilot-relay.");
-  await relay.answerReopen(String(requestId), approved === true, reason == null ? undefined : String(reason));
+  // false: the broker has no such pending request (answered elsewhere, or its target was forgotten)
+  try {
+    await relay.answerReopen(String(requestId), approved === true, reason == null ? undefined : String(reason));
+  } catch (e) {
+    if (e.status !== 404) throw e; // not answered: the card stays answerable
+    reopenCards.delete(requestId);
+    return false;
+  }
+  reopenCards.delete(requestId);
   return true;
 });
 
@@ -768,6 +794,8 @@ async function createChild(req) {
     if (!child) return;
     await closeEntry(child.sessionId).catch(() => {});
     if (announced) send("delegation:closed", { sessionId: child.sessionId });
+    // its link was made on registration: a child that never came to be must not stay in the tree (best effort)
+    await brokerPost("/api/links/forget", { keys: [`cli:${child.sessionId}`] }).then(refreshLinks, (e) => console.warn(`[links] forget: ${e.message}`));
   };
   try {
     const tier = sessionTier(parentSessionId); // the child works on the parent's context window
@@ -1343,13 +1371,15 @@ function confirmLeavingChildren() {
 }
 
 // After a reload the views are gone but main keeps every process: a child's permission card would be lost for good
-// and Stop all children would not reach it. So its work is stopped first, with the user's consent.
+// and Close all sub-sessions would not reach it. So its work is stopped first, with the user's consent. Reopen cards
+// of sessions that stay open come back when their view is opened again (sessions:open).
 async function confirmedReload(reload) {
   const parent = win && !win.isDestroyed() ? win : null;
   if (!parent) return;
   const children = [...open].filter(([, e]) => e.parentSessionId).map(([id]) => id);
   if (children.length || pendingRequests.size) {
-    const choice = dialog.showMessageBoxSync(parent, { type: "warning", buttons: ["Reload", "Cancel"], defaultId: 1, cancelId: 1, ...reloadWarning(children.length, pendingRequests.size) });
+    const reopens = [...reopenCards.values()].filter((c) => children.includes(c.sessionId)).length;
+    const choice = dialog.showMessageBoxSync(parent, { type: "warning", buttons: ["Reload", "Cancel"], defaultId: 1, cancelId: 1, ...reloadWarning(children.length, pendingRequests.size, reopens) });
     if (choice !== 0) return;
     await Promise.all(children.map((id) => closeEntry(id).catch(() => {})));
     pendingRequests.clear();

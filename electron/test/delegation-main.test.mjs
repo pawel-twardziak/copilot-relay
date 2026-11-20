@@ -116,6 +116,13 @@ test("the reload warning names what it stops and discards", () => {
   assert.equal(reloadWarning(0, 2).message, "Reloading discards 2 waiting requests for a new session.");
 });
 
+test("the reload warning mentions open reopen cards of the stopped sessions", () => {
+  const base = "A reloaded window cannot show their cards. Stopped sessions stay in the list and can be resumed.";
+  assert.equal(reloadWarning(1, 0).detail, base);
+  assert.equal(reloadWarning(1, 0, 1).detail, `${base} 1 open reopen request of theirs is asked again when they are resumed.`);
+  assert.equal(reloadWarning(2, 0, 3).detail, `${base} 3 open reopen requests of theirs are asked again when they are resumed.`);
+});
+
 test("PendingRequests reports its size and can be emptied", () => {
   const p = new PendingRequests();
   p.add({ requestId: "a", parentSessionId: "x" });

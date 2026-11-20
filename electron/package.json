@@ -38,6 +38,7 @@
       "file-access.mjs",
       "delegation.mjs",
       "links-cache.mjs",
+      "session-list.mjs",
       "context-tier.mjs",
       "jobs.mjs",
       "job-runner.mjs",
