@@ -6,10 +6,12 @@ import { BUDGET_EXHAUSTED, relayPrompt } from "./registry.mjs";
 export class Delegation {
   #listeners = [];
 
-  constructor({ registry, store, newId = randomUUID }) {
+  /** `nameOf`: last known name of a session that has no stored link name (e.g. a root parent), or undefined. */
+  constructor({ registry, store, newId = randomUUID, nameOf = () => undefined }) {
     this.registry = registry;
     this.store = store;
     this.newId = newId;
+    this.nameOf = nameOf;
     for (const ev of ["peer_added", "peer_updated", "peer_removed"]) registry.on(ev, () => this.#changed());
   }
 
@@ -84,13 +86,13 @@ export class Delegation {
         const first = (this.store.taskOf(k) || "").split("\n")[0];
         const task = !first ? "(task not recorded)" : first.length > 120 ? `${first.slice(0, 120)}…` : first;
         const n = this.store.childrenOf(k).length;
-        lines.push(`- "${peer?.name || this.store.nameOf(k) || "session"}" — ${state.join(", ")} — task: ${task}${n ? ` [has ${n} children]` : ""}`);
+        lines.push(`- "${this.#nameOf(k)}" — ${state.join(", ")} — task: ${task}${n ? ` [has ${n} children]` : ""}`);
       }
     }
     if (link?.parent) {
       const parent = this.registry.get(link.parent);
       const state = link.parentDeleted ? "deleted" : parent?.online ? "open" : "closed";
-      lines.push(`Your parent: "${parent?.name || this.store.nameOf(link.parent) || "session"}" — ${state}`);
+      lines.push(`Your parent: "${this.#nameOf(link.parent)}" — ${state}`);
     }
     return lines.join("\n");
   }
@@ -160,7 +162,7 @@ export class Delegation {
     const wanted = String(name).trim().toLowerCase();
     const parent = this.store.parentOf(fromKey);
     const targetKey = [...(parent ? [parent] : []), ...this.store.childrenOf(fromKey)].find(
-      (k) => !this.registry.get(k)?.online && [this.registry.get(k)?.name, this.store.nameOf(k)].some((n) => n && n.toLowerCase() === wanted),
+      (k) => !this.registry.get(k)?.online && [this.registry.get(k)?.name, this.store.nameOf(k), this.nameOf(k)].some((n) => n && n.toLowerCase() === wanted),
     );
     if (!targetKey) return null;
     const targetName = this.#nameOf(targetKey);
@@ -230,7 +232,7 @@ export class Delegation {
   }
 
   #nameOf(key) {
-    return this.registry.get(key)?.name || this.store.nameOf(key) || "session";
+    return this.registry.get(key)?.name || this.store.nameOf(key) || this.nameOf(key) || "session";
   }
 
   /** A peer registered: redeliver its unacknowledged items, restore its link, re-ask its pending reopen requests. */

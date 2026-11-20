@@ -708,3 +708,20 @@ test("onChange fires on a new reopen request and on its answer", () => {
   d.answerReopen("cli:parent", reopens()[0].requestId, true);
   assert.equal(n, 2);
 });
+
+test("a child messaging its closed root parent gets the card via the nameOf fallback", () => {
+  const s = setup();
+  const name = nm(s.registry, "cli:parent");
+  s.registry.remove("cli:parent"); // a root parent has no stored link name
+  assert.equal(s.store.nameOf("cli:parent"), "");
+  assert.match(s.registry.send("cli:child", name, "hi"), /^No session/); // no hook wired yet
+  const d2 = new Delegation({ registry: s.registry, store: s.store, newId: () => "rq", nameOf: (k) => (k === "cli:parent" ? name : undefined) });
+  s.registry.offlineRelative = (f, n, t) => d2.messageClosed(f, n, t);
+  assert.equal(s.registry.send("cli:child", name.toUpperCase(), "hi"), CLOSED(name));
+  const [ev, card] = s.childControl.at(-1);
+  assert.equal(ev, "reopen_request");
+  assert.equal(card.requestId, "rq");
+  assert.equal(card.targetKey, "cli:parent");
+  assert.equal(card.targetName, name);
+  assert.equal(d2.familyBlock("cli:child"), `Your parent: "${name}" — closed`);
+});

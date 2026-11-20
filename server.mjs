@@ -26,7 +26,8 @@ const registry = new Registry({
 });
 // An unreadable delegation store throws here and stops the broker: never run on (and later overwrite) data we could not read.
 const delegationStore = new DelegationStore();
-const delegation = new Delegation({ registry, store: delegationStore });
+// `names` is created below; the lazy arrow only runs once requests arrive
+const delegation = new Delegation({ registry, store: delegationStore, nameOf: (k) => names.get(k)?.name });
 registry.offlineRelative = (f, n, t) => delegation.messageClosed(f, n, t);
 registry.decorate = (k, p) => delegation.decorate(k, p);
 const handleMcp = createMcpHandler(registry, delegation);
