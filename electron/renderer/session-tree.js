@@ -89,14 +89,16 @@ function relation(idx, id) {
 }
 
 /** cli: keys missing from a successful list: linked sessions, and parents that still have (non-orphaned) children.
+ *  Never a key whose link is online (a child being created is connected before Copilot lists it).
  *  exclude: bare ids never reported (open, being deleted, deleted — a new session may not be listed yet). */
 function pruneCandidates(links, sessions, { listOk, exclude = new Set() } = {}) {
   if (!listOk) return [];
   const have = new Set(sessions.map((s) => s.sessionId));
+  const online = new Set(links.filter((l) => l.online === true).map((l) => l.key));
   const out = new Set();
   const consider = (key) => {
     const id = strip(key);
-    if (id !== null && !have.has(id) && !exclude.has(id)) out.add(key);
+    if (id !== null && !have.has(id) && !exclude.has(id) && !online.has(key)) out.add(key);
   };
   for (const l of links) {
     consider(l.key);

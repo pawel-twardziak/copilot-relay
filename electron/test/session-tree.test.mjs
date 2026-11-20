@@ -95,3 +95,8 @@ test("pruneCandidates includes a missing parent once, but not the parent of an o
   assert.deepEqual(pruneCandidates(links, [S("a"), S("b"), S("o")], { listOk: true }), ["cli:p"]);
   assert.deepEqual(pruneCandidates(links, [S("a"), S("b"), S("o")], { listOk: true, exclude: new Set(["p"]) }), []);
 });
+
+test("pruneCandidates never reports an online link, also not as a parent", () => {
+  const links = [L("c", null, 1, { online: true }), L("g", "m", 2), L("m", null, 3, { online: true })];
+  assert.deepEqual(pruneCandidates(links, [S("g")], { listOk: true }), []);
+});
