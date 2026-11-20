@@ -474,9 +474,8 @@ test("a report delivered to a parent carries the children block; the stored prom
 test("list_sessions shows the family block even when nobody else is online", () => {
   const { d, registry } = setup();
   registry.remove("cli:child");
-  registry.upsert({ key: "cli:child", name: "badacz", kind: "cli" });
-  registry.get("cli:child").online = false;
   const out = formatList(registry, "cli:parent", d);
+  assert.match(out, /\(no other sessions online\)/);
   assert.match(out, /Your children \(1\)/);
   const lone = new Registry();
   lone.upsert({ key: "cli:x", name: "x", kind: "cli" });
