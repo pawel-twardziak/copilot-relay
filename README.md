@@ -38,7 +38,7 @@ does not even launch them, and an unapproved extension is denied:
 2. Start a **new** `copilot` session and **approve** the `copilot-relay` extension when prompted (`/extensions` manages it later).
    In `-p` (prompt) mode nobody can approve it, so it is denied (`Extension "user:copilot-relay" was denied permission access`).
 
-The session then shows `copilot-relay: connected as "<dir-name>"`, `/env` lists the extension, and the GUI at
+The session then shows `copilot-relay: connected as "<name>-<6 hex>"`, `/env` lists the extension, and the GUI at
 http://127.0.0.1:7777 shows the session. If not, run `grep -i extension ~/.copilot/logs/process-*.log | tail`.
 
 - `npm run install-extension -- --no-autostart` installs without broker autostart.
@@ -47,9 +47,12 @@ http://127.0.0.1:7777 shows the session. If not, run `grep -i extension ~/.copil
 
 ### Session names
 
-The name `user` is reserved for messages typed by a person in the GUI. Each terminal session gets a random name (e.g. `swift-otter`) the first time it connects. The broker stores
-the name per Copilot session ID in `names.json` (paths in the table below), so it survives broker restarts
-and `copilot --resume`. To change it:
+The names `user` and `relay` are reserved (messages typed by a person in the GUI, and the broker's own notices). Every
+name ends in a permanent suffix of 6 hex characters derived from the session (8 on a rare collision), so an old name
+never points to another session: a terminal session gets a random base the first time it connects (e.g.
+`swift-otter-3fa9c1`), and a requested name keeps its base (`backend` becomes `backend-<6 hex>`; names are at most 32
+characters). The broker stores the name per Copilot session ID in `names.json` (paths in the table below), so it
+survives broker restarts and `copilot --resume`. To change it:
 
 - type `/relay-name new-name` in the session (`/relay-name new-name | role text` also sets a role, and `/relay-name` alone shows the current name);
 - click the session name in the GUI;
@@ -142,7 +145,8 @@ Setting a name at startup:
 | Windows PowerShell | `$env:COPILOT_RELAY_NAME="backend"; copilot` (stays set for that PowerShell window) |
 | Windows cmd | `set COPILOT_RELAY_NAME=backend && copilot` |
 
-You can also just use `/relay-name backend` inside the session.
+You can also just use `/relay-name backend` inside the session. Either way the session is then called
+`backend-<6 hex>` (the suffix is fixed per session).
 
 ### 5. Where things live
 
@@ -226,6 +230,13 @@ default 12), refilled by a human prompt in either of the two. `report_result` an
 | `POST /api/peer/send` / `rename` / `human`, `GET /api/peer/list` | extension calls |
 | `POST /api/peer/ack` `{ key, id }` | a stored report or notice has been taken: remove it from disk |
 | `POST /api/peer/delegation-outcome` `{ key, requestId, kind, name, text }` | desktop app: what became of a session request |
+| `GET /api/links` | the sub-session tree: every link with name, task, reported/online/busy state |
+| `POST /api/links/forget` `{ keys }` | desktop app: drop these `cli:` sessions from the tree (deleted in the app) |
+| `POST /api/links/missing` `{ keys }` | desktop app: these `cli:` sessions are gone from disk (logged by the broker) |
+| `POST /api/peer/task` `{ key, task }` | a delegated session's task, set once |
+| `POST /api/peer/state` `{ key, busy }` | whether the session is working |
+| `POST /api/peer/died` `{ key }` | the session's process died while open: notifies an unreported child's parent |
+| `POST /api/peer/reopen-answer` `{ key, requestId, approved, reason? }` | desktop app: the user's answer to a reopen card (404 when it is not pending) |
 | `/mcp` | MCP endpoint (stateful; `?peer=<key>` is used internally for ACP sessions) |
 
 ## Config (`relay.config.json`, all optional)

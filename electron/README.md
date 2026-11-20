@@ -139,11 +139,15 @@ an ordinary session: it appears in the list, you can open it, read what it did, 
   `<base>-<6 hex>`, the suffix derived from the session, so an old name never points to another session.
 - **Closing.** Closing a session closes its open children with it, at every depth; **Close all sub-sessions** in the
   header closes only the children. They all stay resumable and nothing closes by itself. Reopening a parent does not
-  reopen its children. A child that ends without reporting (closed, stopped, or the app crashed) sends the parent one
-  "ended without reporting" notice, which wakes it.
+  reopen its children. Only a child whose Copilot process dies while it is open (a crash or kill, not a close, a
+  reload or quitting the app) and that has not reported sends the parent one "ended without reporting" notice, which
+  wakes it. A deliberately closed child sends nothing; the tree shows it closed, and a session whose process died is
+  shown with a red ring.
 - **Messages to a closed relative.** A `send_message` from a parent to a closed child, or from a child to its closed
   parent, shows a reopen card in the sender's view. **Approve** resumes the session and delivers every queued message;
-  **Reject** drops them and tells the sender. The sender is told at once that the message waits.
+  **Reject** drops them and tells the sender. The sender is told at once that the message waits. An unanswered card
+  comes back after a window reload, a restart or a broker restart; a card whose answer did not reach the broker keeps
+  its buttons.
 - **Deleting.** A session with sub-sessions is deleted through a dialog that lists them as a tree, each with its own
   **Delete too** box (unchecked by default). The ones you keep are closed and stay resumable; one whose parent was
   deleted shows "parent deleted". Sessions that disappear from disk outside the app (terminal, Copilot's cleanup)
