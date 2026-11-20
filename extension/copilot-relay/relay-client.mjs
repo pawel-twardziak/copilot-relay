@@ -35,6 +35,8 @@ export class RelayClient {
    * @param {(m:{from:string,text:string,prompt:string})=>void} o.onMessage
    * @param {string} [o.parentKey] key of the session that delegated this one (sent on the first connection only)
    * @param {(req:object)=>void} [o.onSessionRequest] the broker forwards a session_request from this peer
+   * @param {(req:object)=>void} [o.onReopenRequest] the user must approve reopening a closed relative
+   * @param {()=>void} [o.onLinksChanged] the broker's link tree changed (refetch with fetchLinks)
    * @param {()=>void} [o.onReported] this delegated session's report was stored
    * @param {(name:string, payload?:{parentKey:?string,reported:boolean})=>void} [o.onRegistered]
    * @param {(name:string)=>void} [o.onRenamed]   renamed elsewhere (GUI)
@@ -92,6 +94,37 @@ export class RelayClient {
   /** Tell the broker what became of a session request: { requestId, kind, name, text }. */
   async outcome(o) {
     await this.#post("/api/peer/delegation-outcome", { key: this.key, ...o }).catch(() => {});
+  }
+
+  /** This (delegated) session's task text; false when it has no link. */
+  async setTask(task) {
+    try {
+      return (await (await this.#post("/api/peer/task", { key: this.key, task })).json()).ok === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Report whether the session is working (true) or idle (false). */
+  async state(busy) {
+    await this.#post("/api/peer/state", { key: this.key, busy }).catch(() => {});
+  }
+
+  /** The session ended for good; the broker notifies the parent unless it reported. */
+  async died() {
+    await this.#post("/api/peer/died", { key: this.key }).catch(() => {});
+  }
+
+  /** The user's answer to a reopen_request. */
+  async answerReopen(requestId, approved, reason) {
+    await this.#post("/api/peer/reopen-answer", { key: this.key, requestId, approved, reason }).catch(() => {});
+  }
+
+  /** The broker's link tree (array of links). Throws on a non-2xx answer. */
+  async fetchLinks() {
+    const r = await this.#fetch("/api/links");
+    if (!r.ok) throw new Error(`broker answered ${r.status}`);
+    return (await r.json()).links;
   }
 
   #fetch(p, init) {
@@ -173,6 +206,10 @@ export class RelayClient {
           if (changed && !this.selfRenaming) this.onRenamed?.(payload.name);
         } else if (event === "session_request") {
           this.onSessionRequest?.(payload);
+        } else if (event === "reopen_request") {
+          this.onReopenRequest?.(payload);
+        } else if (event === "links_changed") {
+          this.onLinksChanged?.();
         } else if (event === "reported") {
           this.onReported?.();
         } else if (event === "message") {

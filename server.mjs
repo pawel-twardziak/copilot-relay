@@ -8,6 +8,7 @@ import { isReservedName, Registry, sanitizeName } from "./src/registry.mjs";
 import { createMcpHandler } from "./src/mcp.mjs";
 import { Delegation } from "./src/delegation.mjs";
 import { DelegationStore } from "./src/delegation-store.mjs";
+import { linksRoutes } from "./src/links-api.mjs";
 import { NameStore, randomName } from "./src/name-store.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -26,13 +27,30 @@ const registry = new Registry({
 });
 // An unreadable delegation store throws here and stops the broker: never run on (and later overwrite) data we could not read.
 const delegationStore = new DelegationStore();
-// `names` is created below; the lazy arrow only runs once requests arrive
+const names = new NameStore(process.env.COPILOT_RELAY_NAMES_FILE || undefined, {
+  keep: (k) => delegationStore.parentOf(k) != null || delegationStore.childrenOf(k).length > 0,
+});
 const delegation = new Delegation({ registry, store: delegationStore, nameOf: (k) => names.get(k)?.name });
 registry.offlineRelative = (f, n, t) => delegation.messageClosed(f, n, t);
 registry.decorate = (k, p) => delegation.decorate(k, p);
 const handleMcp = createMcpHandler(registry, delegation);
-const names = new NameStore(process.env.COPILOT_RELAY_NAMES_FILE || undefined, {
-  keep: (k) => delegationStore.parentOf(k) != null || delegationStore.childrenOf(k).length > 0,
+const linkRoutes = linksRoutes({ delegation });
+
+// Tell every app connection the tree changed; peer_updated also fires on inbox enqueue, so bursts collapse to one event.
+let linksTimer = null;
+delegation.onChange(() => {
+  if (linksTimer) return;
+  linksTimer = setTimeout(() => {
+    linksTimer = null;
+    for (const p of registry.list()) {
+      try {
+        registry.get(p.key)?.control?.("links_changed", {});
+      } catch {
+        /* a dead stream must not stop the others */
+      }
+    }
+  }, 200);
+  linksTimer.unref();
 });
 
 // Persist names/roles of terminal sessions (key = Copilot sessionId, stable across --resume).
@@ -212,6 +230,13 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === "/mcp") {
       const body = req.method === "POST" ? await readBody(req) : undefined;
       return await handleMcp(req, res, body);
+    }
+
+    const route = linkRoutes[`${req.method} ${url.pathname}`];
+    if (route) {
+      const out = route(req.method === "POST" ? ((await readBody(req)) ?? {}) : {});
+      if (out.json === undefined) return res.writeHead(out.status).end();
+      return json(res, out.status, out.json);
     }
 
     switch (`${req.method} ${url.pathname}`) {

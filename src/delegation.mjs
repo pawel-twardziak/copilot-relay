@@ -12,7 +12,7 @@ export class Delegation {
     this.store = store;
     this.newId = newId;
     this.nameOf = nameOf;
-    for (const ev of ["peer_added", "peer_updated", "peer_removed"]) registry.on(ev, () => this.#changed());
+    for (const ev of ["peer_added", "peer_updated", "peer_removed", "peer_renamed"]) registry.on(ev, () => this.#changed());
   }
 
   /** Register a listener called after any link/state change (throws are swallowed). */
@@ -41,6 +41,12 @@ export class Delegation {
     const ok = this.store.setTask(childKey, task);
     if (ok) this.#changed();
     return ok;
+  }
+
+  /** The session is gone for good: drop everything stored about it. */
+  forget(key) {
+    this.store.forget(key);
+    this.#changed();
   }
 
   setBusy(key, busy) {

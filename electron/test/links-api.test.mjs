@@ -1,0 +1,141 @@
+// Tests for the links HTTP API route logic (src/links-api.mjs) and the relay client's new calls/events.
+import assert from "node:assert/strict";
+import http from "node:http";
+import { mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, test } from "node:test";
+import { Delegation } from "../../src/delegation.mjs";
+import { DelegationStore } from "../../src/delegation-store.mjs";
+import { linksRoutes } from "../../src/links-api.mjs";
+import { Registry } from "../../src/registry.mjs";
+import { RelayClient } from "../../extension/copilot-relay/relay-client.mjs";
+
+const dirs = [];
+afterEach(() => {
+  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+});
+
+function setup() {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "links-"));
+  dirs.push(dir);
+  const registry = new Registry();
+  const store = new DelegationStore(path.join(dir, "d.json"));
+  let n = 0;
+  const delegation = new Delegation({ registry, store, newId: () => `id${++n}` });
+  const controls = [];
+  for (const [key, name] of [["cli:parent", "mama"], ["cli:child", "badacz"]])
+    registry.upsert({ key, name, kind: "cli", push: () => true, control: (...a) => controls.push([key, ...a]) });
+  delegation.link("cli:child", "cli:parent");
+  return { registry, store, delegation, routes: linksRoutes({ delegation }), controls };
+}
+
+test("GET /api/links returns the snapshot", () => {
+  const { routes } = setup();
+  const r = routes["GET /api/links"]();
+  assert.equal(r.status, 200);
+  assert.equal(r.json.links.length, 1);
+  assert.equal(r.json.links[0].key, "cli:child");
+});
+
+test("forget removes cli: links, ignores non-cli keys, fires onChange", () => {
+  const { routes, store, delegation } = setup();
+  let changes = 0;
+  delegation.onChange(() => changes++);
+  assert.equal(routes["POST /api/links/forget"]({ keys: ["acp:x", "cli:child"] }).status, 204);
+  assert.equal(store.linkOf("cli:child") ?? null, null);
+  assert.ok(changes >= 1);
+  assert.equal(routes["POST /api/links/missing"]({ keys: ["cli:child"] }).status, 204);
+});
+
+test("keys must be an array of strings", () => {
+  const { routes } = setup();
+  assert.equal(routes["POST /api/links/forget"]({ keys: "cli:child" }).status, 400);
+  assert.equal(routes["POST /api/links/forget"]({ keys: [1] }).status, 400);
+  assert.equal(routes["POST /api/links/missing"]({}).status, 400);
+});
+
+test("task stores the task, reports unknown children as ok:false", () => {
+  const { routes, store } = setup();
+  assert.deepEqual(routes["POST /api/peer/task"]({ key: "cli:child", task: "do it" }), { status: 200, json: { ok: true } });
+  assert.equal(store.taskOf("cli:child"), "do it");
+  assert.equal(routes["POST /api/peer/task"]({ key: "cli:none", task: "x" }).json.ok, false);
+  assert.equal(routes["POST /api/peer/task"]({ key: 5, task: "x" }).status, 400);
+});
+
+test("state sets busy; invalid key is 400", () => {
+  const { routes, registry } = setup();
+  assert.equal(routes["POST /api/peer/state"]({ key: "cli:child", busy: true }).status, 204);
+  assert.equal(registry.get("cli:child").busy, true);
+  assert.equal(routes["POST /api/peer/state"]({ busy: true }).status, 400);
+});
+
+test("died notifies the parent once", () => {
+  const { routes, store } = setup();
+  assert.equal(routes["POST /api/peer/died"]({ key: "cli:child" }).status, 204);
+  assert.ok(store.pending("cli:parent").length >= 1);
+  assert.equal(routes["POST /api/peer/died"]({}).status, 400);
+});
+
+test("reopen-answer approve releases the queue", () => {
+  const { routes, store, registry, delegation, controls } = setup();
+  registry.get("cli:child").online = false;
+  delegation.messageClosed("cli:parent", registry.get("cli:child").name, "hello");
+  const ask = controls.find((c) => c[1] === "reopen_request");
+  assert.ok(ask, "a reopen request was emitted");
+  const { requestId } = ask[2];
+  assert.equal(store.awaitingFor(requestId).length, 1);
+  assert.equal(routes["POST /api/peer/reopen-answer"]({ key: "cli:parent", requestId, approved: true }).status, 204);
+  assert.equal(store.awaitingFor(requestId).length, 0);
+  assert.equal(routes["POST /api/peer/reopen-answer"]({ key: "cli:parent", approved: true }).status, 400);
+});
+
+test("the client calls onReopenRequest and onLinksChanged for their events, and fetchLinks/posts work", async () => {
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    if (req.url.startsWith("/api/peer/stream")) {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write('event: reopen_request\ndata: {"requestId":"r1"}\n\n');
+      res.write("event: links_changed\ndata: {}\n\n");
+      return res.end();
+    }
+    if (req.url === "/api/links") {
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ links: [{ key: "cli:a" }] }));
+    }
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      seen.push([req.url, body]);
+      res.writeHead(200, { "content-type": "application/json" }).end('{"ok":true}');
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const url = `http://127.0.0.1:${server.address().port}`;
+  const events = [];
+  const client = new RelayClient({
+    url, key: "cli:me", cwd: "/", onMessage() {},
+    onReopenRequest: (p) => events.push(["reopen", p.requestId]),
+    onLinksChanged: () => events.push(["links"]),
+  });
+  client.start();
+  const until = Date.now() + 3000;
+  while (events.length < 2 && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
+  client.stop();
+  assert.deepEqual(events, [["reopen", "r1"], ["links"]]);
+  assert.deepEqual(await client.fetchLinks(), [{ key: "cli:a" }]);
+  assert.equal(await client.setTask("t"), true);
+  await client.state(true);
+  await client.died();
+  await client.answerReopen("r1", true, undefined);
+  assert.deepEqual(seen.map((s) => s[0]), ["/api/peer/task", "/api/peer/state", "/api/peer/died", "/api/peer/reopen-answer"]);
+  await new Promise((r) => server.close(r));
+});
+
+test("a runtime rename fires onChange", () => {
+  const { registry, delegation } = setup();
+  let changes = 0;
+  delegation.onChange(() => changes++);
+  registry.emit("peer_renamed", registry.get("cli:child"));
+  assert.equal(changes, 1);
+});
