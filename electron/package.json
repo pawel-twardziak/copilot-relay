@@ -37,6 +37,7 @@
       "paths.mjs",
       "file-access.mjs",
       "delegation.mjs",
+      "context-tier.mjs",
       "jobs.mjs",
       "job-runner.mjs",
       "scheduler.mjs",
