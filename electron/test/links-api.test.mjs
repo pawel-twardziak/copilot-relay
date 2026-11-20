@@ -42,10 +42,13 @@ test("forget removes cli: links, ignores non-cli keys, fires onChange", () => {
   const { routes, store, delegation } = setup();
   let changes = 0;
   delegation.onChange(() => changes++);
+  delegation.link("acp:x", "cli:parent");
   assert.equal(routes["POST /api/links/forget"]({ keys: ["acp:x", "cli:child"] }).status, 204);
   assert.equal(store.linkOf("cli:child") ?? null, null);
+  assert.equal(store.parentOf("acp:x"), "cli:parent", "non-cli link survives forget");
   assert.ok(changes >= 1);
-  assert.equal(routes["POST /api/links/missing"]({ keys: ["cli:child"] }).status, 204);
+  assert.equal(routes["POST /api/links/missing"]({ keys: ["acp:x"] }).status, 204);
+  assert.equal(store.parentOf("acp:x"), "cli:parent", "non-cli link survives missing");
 });
 
 test("keys must be an array of strings", () => {
