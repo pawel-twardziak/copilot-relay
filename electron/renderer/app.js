@@ -1268,6 +1268,32 @@ class SessionView {
     for (const card of [...this.openCards]) card._dismiss?.();
   }
 
+  /** A new context window needs a new Copilot process: main closes the session, the reopen replays it. */
+  async switchContext(sel, previous) {
+    if (this.busy || this.dead || this.deleting) {
+      sel.value = previous;
+      if (this.busy && !this.dead && !this.deleting) this.error("Wait until Copilot finishes this turn.");
+      return;
+    }
+    this.setBusy(true);
+    this.statusEl.textContent = "Restarting Copilot with the new context window…";
+    let failure = null;
+    try {
+      const res = await api.setContextTier(this.sessionId, sel.value);
+      if (res?.refused) {
+        // nothing was changed or closed: the session stays as it is
+        sel.value = previous;
+        this.setBusy(false);
+        this.error(`Could not change the context window: ${res.refused}`);
+        return;
+      }
+    } catch (e) {
+      failure = e;
+      await api.closeSession(this.sessionId).catch(() => {}); // closed for sure: the reopen replays it unchanged
+    }
+    await reopenView(this, failure && `Could not change the context window: ${failure.message}`);
+  }
+
   setConfig(configOptions) {
     if (!Array.isArray(configOptions)) return;
     this.setAgent(configOptions.find((c) => c.id === "agent"));
@@ -1288,6 +1314,7 @@ class SessionView {
             }),
           );
           sel.addEventListener("change", async () => {
+            if (c.id === "context_tier") return this.switchContext(sel, c.currentValue);
             try {
               const updated = await api.setConfig(this.sessionId, c.id, sel.value);
               if (updated) this.setConfig(updated);
@@ -2063,6 +2090,7 @@ async function openSettings() {
     `Find it with: ${s.platform === "win32" ? "where copilot" : "which copilot"}`;
   renderStorage();
   $("#set-relay").checked = s.relay;
+  $("#set-context").value = s.contextTier;
   $("#set-relay").disabled = !s.relayAvailable;
   $("#set-relay-hint").textContent = s.relayAvailable
     ? `Open sessions can message each other and terminal sessions through the broker at ${s.relayUrl}. Applies to sessions opened after saving.`
@@ -2101,7 +2129,7 @@ $("#store-clear").addEventListener("click", async (e) => {
 
 $("#settings").addEventListener("close", async () => {
   if ($("#settings").returnValue !== "save") return;
-  await api.setSettings({ copilotCommand: $("#set-command").value, relay: $("#set-relay").checked });
+  await api.setSettings({ copilotCommand: $("#set-command").value, relay: $("#set-relay").checked, contextTier: $("#set-context").value });
   refresh();
 });
 

@@ -10,10 +10,11 @@ export class AcpConnection extends EventEmitter {
    * @param {string} o.command  Copilot executable ("copilot" or an absolute path)
    * @param {string} o.cwd      working directory of the process
    * @param {object} [o.env]
+   * @param {string[]} [o.args]  extra arguments after `--acp --stdio` (e.g. the context tier flag)
    */
-  constructor({ command, cwd, env = process.env }) {
+  constructor({ command, cwd, env = process.env, args = [] }) {
     super();
-    Object.assign(this, { command, cwd, env });
+    Object.assign(this, { command, cwd, env, args });
     this.nextId = 0;
     this.pending = new Map();
     this.exited = false;
@@ -24,7 +25,7 @@ export class AcpConnection extends EventEmitter {
   async start() {
     // npm installs `copilot.cmd` on Windows, which only starts through a shell; quote paths with spaces
     const cmd = isWin && /\s/.test(this.command) && !this.command.startsWith('"') ? `"${this.command}"` : this.command;
-    this.proc = spawn(cmd, ["--acp", "--stdio"], {
+    this.proc = spawn(cmd, ["--acp", "--stdio", ...this.args], {
       cwd: this.cwd,
       env: this.env,
       stdio: ["pipe", "pipe", "pipe"],

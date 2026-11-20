@@ -46,6 +46,11 @@
           <span><input id="set-relay" type="checkbox" /> Connect sessions to copilot-relay</span>
         </label>
         <p class="hint" id="set-relay-hint"></p>
+        <label>
+          Default context window
+          <select id="set-context"><option value="default">200k</option><option value="long_context">1M</option></select>
+        </label>
+        <p class="hint">Used by new sessions and by sessions whose Context is "Default", the next time their Copilot starts. Open sessions keep theirs. 1M needs a model with a long-context tier (e.g. Claude Sonnet 5.5) and may cost more.</p>
         <h3>Files</h3>
         <div class="store">
           <div class="store-label">Pasted images</div>
