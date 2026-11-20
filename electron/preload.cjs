@@ -32,6 +32,8 @@ contextBridge.exposeInMainWorld("api", {
   // removes the whole session from disk (closes it first)
   deleteSession: (sessionId) => call("sessions:delete", sessionId),
   setConfig: (sessionId, configId, value) => call("sessions:setConfig", sessionId, configId, value),
+  // closes the session for a restart with the new context window; the caller reopens it
+  setContextTier: (sessionId, value) => call("sessions:setContextTier", sessionId, value),
   answerPermission: (sessionId, reqId, optionId) => call("permission:answer", sessionId, reqId, optionId),
   // a delivered report or notice has started its prompt: the broker may forget it
   relayAck: (sessionId, id) => call("relay:ack", sessionId, id),

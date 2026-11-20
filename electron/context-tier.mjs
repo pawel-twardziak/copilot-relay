@@ -15,6 +15,11 @@ export function normalizeTier(value) {
   return TIERS.includes(value) ? value : null;
 }
 
+/** A value the Context select can send: a tier, or INHERIT. */
+export function isContextChoice(value) {
+  return value === INHERIT || normalizeTier(value) !== null;
+}
+
 export function effectiveTier(override, globalDefault) {
   return normalizeTier(override) ?? normalizeTier(globalDefault) ?? "default";
 }

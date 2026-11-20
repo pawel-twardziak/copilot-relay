@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
-import { contextOption, createTierStore, effectiveTier, tierArgs, withContextOption } from "../context-tier.mjs";
+import { contextOption, createTierStore, effectiveTier, isContextChoice, tierArgs, withContextOption } from "../context-tier.mjs";
 
 let dir;
 let file;
@@ -93,4 +93,9 @@ test("store: a missing, empty or corrupt file reads as no overrides", () => {
   assert.equal(s.get("0"), null);
   s.set("x", "long_context");
   assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { x: "long_context" });
+});
+
+test("isContextChoice accepts the select's values only", () => {
+  for (const v of ["inherit", "default", "long_context"]) assert.equal(isContextChoice(v), true);
+  for (const v of ["", "1M", null, undefined, 1, "Default"]) assert.equal(isContextChoice(v), false);
 });

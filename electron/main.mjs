@@ -15,7 +15,7 @@ import { createUsagePusher } from "./usage.mjs";
 import { JobScheduler } from "./scheduler.mjs";
 import { scheduleInfo } from "./jobs.mjs";
 import { PendingRequests, childPrompt, findModelOption, limitError, reloadWarning, resolveConfig, unreportedChildren, withDeadline } from "./delegation.mjs";
-import { createTierStore, effectiveTier, normalizeTier, tierArgs, withContextOption } from "./context-tier.mjs";
+import { INHERIT, createTierStore, effectiveTier, isContextChoice, normalizeTier, tierArgs, withContextOption } from "./context-tier.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 let win = null;
@@ -882,6 +882,25 @@ handle("sessions:delete", async (sessionId) => {
 handle("sessions:setConfig", async (sessionId, configId, value) => {
   const updated = await setConfigOption(sessionId, getOpen(sessionId), configId, value);
   return updated && viewConfig(sessionId, updated);
+});
+
+// a new context window takes a new Copilot process: the session is closed here and the renderer reopens it
+// (sessions:open starts Copilot with the new flag and replays the history)
+handle("sessions:setContextTier", async (sessionId, value) => {
+  if (!isSessionId(sessionId)) throw new Error(`Invalid session id: ${sessionId}`);
+  if (!isContextChoice(value)) throw new Error(`Unknown context window: ${value}`);
+  refuseWhilePrompting(sessionId);
+  return historyOp(sessionId, async () => {
+    const prev = tiers.get(sessionId);
+    tiers.set(sessionId, value);
+    try {
+      await closeAndWait(sessionId);
+    } catch (e) {
+      tiers.set(sessionId, prev ?? INHERIT);
+      throw e;
+    }
+    return { reopen: true };
+  });
 });
 
 handle("permission:answer", async (sessionId, reqId, optionId) => {
