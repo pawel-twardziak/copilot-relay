@@ -192,3 +192,7 @@ test("headerText: subagent title, tools, last line and the permission wait", () 
 test("MARKS", () => {
   assert.deepEqual(Activity.MARKS, { running: "●", completed: "✓", failed: "✗", interrupted: "⊘", quiet: "○" });
 });
+
+test("headerText: a waiting work group shows the permission mark in place of the running tool", () => {
+  assert.equal(Activity.headerText({ kind: "work", tools: 2, thoughts: 0, runningTitle: "ls", waiting: true }), "2 tools · ⏸ permission");
+});

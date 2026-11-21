@@ -1320,7 +1320,7 @@ class SessionView {
     const body = h("div", { class: "group-body" });
     const el = h("details", { class: `group ${kind}` }, h("summary", {}, mark, name), body);
     // (the kind is in _info: el._kind is the turn mark's "user"/"reply")
-    el._info = { kind, title, prompt, status: "running", tools: 0, thoughts: 0, running: new Map(), failed: new Set(), unfinished: false, waiting: false, lastLine: "" }; // running: toolCallId -> title
+    el._info = { kind, title, prompt, status: "running", tools: 0, thoughts: 0, running: new Map(), failed: new Set(), leftover: new Set(), waiting: false, lastLine: "" }; // running: toolCallId -> title
     Object.assign(el, { _body: body, _runs: StreamRuns.create(), _anchored: anchored });
     el._md = () => {
       const i = el._info;
@@ -1332,7 +1332,7 @@ class SessionView {
     el._renderHeader = () => {
       const i = el._info;
       // work: ● while a tool runs, then ✗ if one failed, ○ if one never ended, else ✓
-      const status = kind === "work" ? (i.running.size ? "running" : i.failed.size ? "failed" : i.unfinished ? "quiet" : "completed") : i.status;
+      const status = kind === "work" ? (i.running.size ? "running" : i.failed.size ? "failed" : i.leftover.size ? "quiet" : "completed") : i.status;
       mark.className = `mark ${status}`;
       mark.textContent = Activity.MARKS[status] ?? Activity.MARKS.running;
       const runningTitle = [...i.running.values()].pop();
@@ -1384,8 +1384,8 @@ class SessionView {
     this.applyChanges(this.activity.settle());
     for (const g of this.log.querySelectorAll(":scope > .group.work")) {
       if (!g._info.running.size) continue;
+      for (const id of g._info.running.keys()) g._info.leftover.add(id); // ○ until they end
       g._info.running.clear();
-      g._info.unfinished = true;
       g._renderHeader();
     }
     this.refreshBg();
@@ -1445,6 +1445,7 @@ class SessionView {
     into._info.thoughts += from._info.thoughts;
     for (const [id, title] of from._info.running) into._info.running.set(id, title);
     for (const id of from._info.failed) into._info.failed.add(id);
+    for (const id of from._info.leftover) into._info.leftover.add(id);
     for (const t of this.tools.values()) if (t.group === from) t.group = into;
     from.remove();
     into._renderHeader();
@@ -1469,6 +1470,7 @@ class SessionView {
     const error = d.status === "failed" ? d.rawOutput?.message : null;
     if (error) {
       el._error ??= h("div", { class: "msg error" });
+      el._error._md = () => `Error: ${el._error.textContent}`;
       el._error.textContent = error;
       if (!el._error.isConnected) this.groupAppend(el, el._error);
     } else el._error?.remove();
@@ -1570,6 +1572,7 @@ class SessionView {
     const { running } = t.group._info;
     if (status === "pending" || status === "in_progress") running.set(u.toolCallId, d.title ?? "tool");
     else running.delete(u.toolCallId);
+    if (status !== "pending" && status !== "in_progress") t.group._info.leftover.delete(u.toolCallId);
     if (status === "failed") t.group._info.failed.add(u.toolCallId);
     else t.group._info.failed.delete(u.toolCallId);
     t.group._renderHeader();

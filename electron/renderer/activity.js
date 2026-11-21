@@ -168,7 +168,7 @@ const MARKS = { running: "●", completed: "✓", failed: "✗", interrupted: "�
 /** The one-line header of a group: `3 tools · 1 thought · <running tool>`, or `subagent · <title> · N tools · <last line>`. */
 function headerText({ kind, title = "", tools = 0, thoughts = 0, runningTitle = "", lastLine = "", waiting = false }) {
   const plural = (n, w) => (n ? `${n} ${w}${n === 1 ? "" : "s"}` : "");
-  if (kind === "work") return [plural(tools, "tool"), plural(thoughts, "thought"), runningTitle].filter(Boolean).join(" · ");
+  if (kind === "work") return [plural(tools, "tool"), plural(thoughts, "thought"), waiting ? "⏸ permission" : runningTitle].filter(Boolean).join(" · ");
   const tail = waiting ? "⏸ permission" : lastLine;
   return ["subagent", title === "subagent" ? "" : title, plural(tools, "tool"), tail].filter(Boolean).join(" · ");
 }
