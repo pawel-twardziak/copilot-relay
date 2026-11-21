@@ -46,6 +46,10 @@
           <span><input id="set-relay" type="checkbox" /> Connect sessions to copilot-relay</span>
         </label>
         <p class="hint" id="set-relay-hint"></p>
+        <label class="check">
+          <span><input id="set-queue" type="checkbox" /> Deliver queued messages during a turn</span>
+        </label>
+        <p class="hint">Messages for a working session are delivered after its current tool step. Off: they wait until the turn ends.</p>
         <label>
           Default context window
           <select id="set-context"><option value="default">200k</option><option value="long_context">1M</option></select>

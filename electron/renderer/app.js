@@ -231,6 +231,8 @@ let links = []; // the broker's sub-session links (api.getLinks / api.onLinks), 
 let tree = SessionTree.index(links); // parent/child index over `links` (bare session ids)
 const views = new Map(); // sessionId -> SessionView
 let activeId = null;
+let queueMidTurn = false; // setting: deliver queued messages while a turn runs
+api.getSettings().then((s) => (queueMidTurn = s.queueMidTurn === true)).catch(() => {});
 
 // ---------------------------------------------------------------------------
 // session view
@@ -932,6 +934,11 @@ class SessionView {
   error(text) {
     this.flush();
     return this.append(h("div", { class: "msg error" }, text));
+  }
+
+  /** A setting changed: re-apply the busy state so the Send button and status line follow it. */
+  settingChanged() {
+    this.setBusy(this.busy);
   }
 
   setBusy(b) {
@@ -2365,6 +2372,7 @@ async function openSettings() {
     `Find it with: ${s.platform === "win32" ? "where copilot" : "which copilot"}`;
   renderStorage();
   $("#set-relay").checked = s.relay;
+  $("#set-queue").checked = s.queueMidTurn;
   $("#set-context").value = s.contextTier;
   $("#set-relay").disabled = !s.relayAvailable;
   $("#set-relay-hint").textContent = s.relayAvailable
@@ -2404,7 +2412,9 @@ $("#store-clear").addEventListener("click", async (e) => {
 
 $("#settings").addEventListener("close", async () => {
   if ($("#settings").returnValue !== "save") return;
-  await api.setSettings({ copilotCommand: $("#set-command").value, relay: $("#set-relay").checked, contextTier: $("#set-context").value });
+  await api.setSettings({ copilotCommand: $("#set-command").value, relay: $("#set-relay").checked, contextTier: $("#set-context").value, queueMidTurn: $("#set-queue").checked });
+  queueMidTurn = $("#set-queue").checked;
+  for (const v of views.values()) v.settingChanged();
   refresh();
 });
 

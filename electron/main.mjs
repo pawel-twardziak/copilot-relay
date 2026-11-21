@@ -17,6 +17,7 @@ import { scheduleInfo } from "./jobs.mjs";
 import { PendingRequests, childPrompt, findModelOption, reloadWarning, resolveConfig, unreportedChildren, withDeadline } from "./delegation.mjs";
 import { readLinksCache, writeLinksCache } from "./links-cache.mjs";
 import { listAllPages } from "./session-list.mjs";
+import { beginPrompt, endPrompt } from "./prompt-count.mjs";
 import { createTierStore, effectiveTier, normalizeTier, switchTier, tierArgs, withContextOption } from "./context-tier.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -651,15 +652,15 @@ handle("sessions:prompt", async (sessionId, text, source = "relay") => {
   });
   for (const note of notes) send("acp:notice", { sessionId, text: note });
   // fork/truncate refuse while a turn is running: the agent is still writing the history
-  entry.prompting = true;
-  entry.relay?.state(true);
+  if (beginPrompt(entry)) entry.relay?.state(true);
   try {
     const res = await conn.request("session/prompt", { sessionId, prompt: blocks });
     return res?.stopReason ?? "end_turn";
   } finally {
-    entry.prompting = false;
-    entry.relay?.state(false);
-    if (open.get(sessionId) === entry) usage.refresh(sessionId); // not after a close/truncate mid-turn
+    if (endPrompt(entry)) {
+      entry.relay?.state(false);
+      if (open.get(sessionId) === entry) usage.refresh(sessionId); // not after a close/truncate mid-turn
+    }
   }
 });
 
@@ -679,13 +680,13 @@ handle("sessions:rename", async (sessionId, name) => {
 });
 
 async function slashRename(sessionId, entry, name) {
-  entry.prompting = entry.renaming = true;
-  entry.relay?.state(true);
+  entry.renaming = true;
+  if (beginPrompt(entry)) entry.relay?.state(true);
   try {
     await entry.conn.request("session/prompt", { sessionId, prompt: [{ type: "text", text: `/rename ${name}` }] });
   } finally {
-    entry.prompting = entry.renaming = false;
-    entry.relay?.state(false);
+    entry.renaming = false;
+    if (endPrompt(entry)) entry.relay?.state(false);
   }
 }
 
@@ -1032,9 +1033,10 @@ handle("settings:get", async () => ({
   relayAvailable: Boolean(RelayClient),
   relayUrl: relayConfig().url,
   contextTier: normalizeTier(loadSettings().contextTier) ?? "default",
+  queueMidTurn: loadSettings().queueMidTurn === true,
 }));
 handle("settings:set", async (s) => {
-  saveSettings({ ...loadSettings(), copilotCommand: String(s.copilotCommand ?? "").trim(), relay: s.relay !== false, contextTier: normalizeTier(s.contextTier) ?? "default" });
+  saveSettings({ ...loadSettings(), copilotCommand: String(s.copilotCommand ?? "").trim(), relay: s.relay !== false, contextTier: normalizeTier(s.contextTier) ?? "default", queueMidTurn: s.queueMidTurn === true });
   lister?.kill();
   lister = null;
   return true;
