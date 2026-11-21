@@ -7,7 +7,12 @@
 "use strict";
 
 const MARKER = "[queued message, delivered during your work]";
-const END = "[End of the queued message. Handle it now. Then go back to the task you were doing and finish it, unless this message changes or cancels that task.]";
+const END =
+  "[End of the queued message. If it asks you something, answer it now in a short visible reply to the user (your thinking is not shown to them), " +
+  "then go back to the task you were doing and finish it, unless this message changes or cancels that task. " +
+  "Repeat the answer in your final message if the task goes on after it.]";
+// endings of earlier app versions: messages already recorded in a session's history still unwrap on replay
+const OLD_ENDS = ["[End of the queued message. Handle it now. Then go back to the task you were doing and finish it, unless this message changes or cancels that task.]"];
 const ABORT_TEXT = "Info: Operation cancelled by user";
 
 const wrap = (text) => `${MARKER}\n${text}\n\n${END}`;
@@ -15,9 +20,11 @@ const wrap = (text) => `${MARKER}\n${text}\n\n${END}`;
 /** The inner text of a wrapped message, or null when `text` is not one. */
 function unwrap(text) {
   const head = `${MARKER}\n`;
-  const tail = `\n\n${END}`;
-  if (text.length < head.length + tail.length || !text.startsWith(head) || !text.endsWith(tail)) return null;
-  return text.slice(head.length, text.length - tail.length);
+  for (const end of [END, ...OLD_ENDS]) {
+    const tail = `\n\n${end}`;
+    if (text.length >= head.length + tail.length && text.startsWith(head) && text.endsWith(tail)) return text.slice(head.length, text.length - tail.length);
+  }
+  return null;
 }
 
 const isAbortChunk = (text) => text === ABORT_TEXT;

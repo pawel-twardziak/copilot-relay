@@ -120,8 +120,13 @@ The model receives (`_matchText` returns what was sent, as for `pendingNotes`):
 [queued message, delivered during your work]
 <message>
 
-[End of the queued message. Handle it now. Then go back to the task you were doing and finish it, unless this message changes or cancels that task.]
+[End of the queued message. If it asks you something, answer it now in a short visible reply to the user (your thinking is not shown to them), then go back to the task you were doing and finish it, unless this message changes or cancels that task. Repeat the answer in your final message if the task goes on after it.]
 ```
+
+The first ending ("Handle it now. Then go back …") was replaced after a real session (Claude Opus 5.5 via
+Copilot): asked "co robisz?" and "długo Ci zajmie?" mid-turn, the model wrote its answers only in its reasoning
+(`reasoningText`), left the visible reply empty, called the next tool, and never answered in its final message.
+`unwrap` still accepts the first ending, so messages recorded with it replay correctly.
 
 `<message>` is the text exactly as it would have been sent at the end of a turn: an own prompt as typed, a
 relay message as the prompt the broker built (`m.prompt`, starting with its `[from …]` line, folder and reply

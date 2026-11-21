@@ -318,3 +318,13 @@ test("takeBack: null when nothing of yours is queued", () => {
   assert.equal(takeBack([], "x"), null);
   assert.equal(takeBack([{ kind: "relay", text: "hi", from: "b" }], ""), null);
 });
+
+test("the wrapper asks for a visible answer to a question, and repeating it at the end", () => {
+  assert.match(END, /answer it now in a short visible reply to the user \(your thinking is not shown to them\)/);
+  assert.match(END, /Repeat the answer in your final message/);
+});
+
+test("unwrap still recognises messages recorded with the first wrapper ending", () => {
+  const old = MARKER + "\nco robisz?\n\n[End of the queued message. Handle it now. Then go back to the task you were doing and finish it, unless this message changes or cancels that task.]";
+  assert.equal(unwrap(old), "co robisz?");
+});
