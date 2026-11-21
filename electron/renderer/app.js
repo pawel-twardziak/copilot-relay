@@ -1372,8 +1372,11 @@ class SessionView {
     const container = r.to === "work" ? this.workGroup() : this.groupEls.get(r.groupId);
     if (!container) return;
     if (type === "agent" && container._info.kind === "subagent") {
-      const line = text.split("\n").map((l) => l.trim()).filter(Boolean).pop();
-      if (line) container._info.lastLine = line.length > 60 ? line.slice(0, 59) + "…" : line;
+      const line = (this.activity.group(r.groupId)?.lastText ?? "").split("\n").map((l) => l.trim()).filter(Boolean).pop();
+      if (line) {
+        container._info.lastLine = line.length > 60 ? line.slice(0, 59) + "…" : line;
+        container._renderHeader();
+      }
     }
     this.stream(type, text, u.messageId, container);
   }

@@ -111,12 +111,26 @@ const bgTaskLinked = (a, id, agentId) => {
   a.route(update(id, { status: "completed", content: [{ type: "content", content: { type: "text", text: `Agent started in background with agent_id: ${agentId}.` } }] }));
 };
 
-test("sync: the task's status is the group's; interrupted, then late updates run again and complete", () => {
+test("sync: the task's status is the group's; interrupted stays interrupted for late updates until the task completes", () => {
   const a = Activity.create();
   a.route(syncTask("t1"));
   assert.deepEqual(statuses(a.route(chunk("agent_message_chunk", "s1", "x", A))), []);
   assert.deepEqual(statuses(a.route(update("t1", { status: "interrupted" }))), [["g1", "interrupted"]]);
-  assert.deepEqual(statuses(a.route(chunk("agent_message_chunk", "s1", "y", A))), [["g1", "running"]]);
+  assert.deepEqual(statuses(a.route(chunk("agent_message_chunk", "s1", "y", A))), []);
+  assert.deepEqual(statuses(a.route(update("t1", { status: "completed" }))), [["g1", "completed"]]);
+});
+
+test("settle: a sync group still running (stopped, no task update) becomes interrupted and stays so", () => {
+  const a = Activity.create();
+  a.route(syncTask("t1"));
+  a.route(chunk("agent_message_chunk", "s1", "x", A));
+  assert.deepEqual(a.running(), ["g1"]);
+  assert.deepEqual(a.settle(), [{ type: "status", groupId: "g1", status: "interrupted" }]);
+  assert.deepEqual(a.running(), []);
+  const late = a.route(chunk("agent_message_chunk", "s1", "y", A));
+  assert.equal(late.to, "group");
+  assert.deepEqual(statuses(late), []);
+  assert.deepEqual(a.running(), []);
   assert.deepEqual(statuses(a.route(update("t1", { status: "completed" }))), [["g1", "completed"]]);
 });
 

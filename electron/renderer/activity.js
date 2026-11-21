@@ -58,7 +58,7 @@ function createActivity() {
     const failed = u.sessionUpdate === "agent_message_chunk" && !u.messageId && /^Error:/.test(u.content?.text ?? "");
     if (failed) return setStatus(group, "failed", changes);
     if (u.sessionUpdate === "agent_message_chunk") addText(group, u);
-    if (group.mode === "sync" ? group.status === "interrupted" : group.status !== "running" && !replaying) setStatus(group, "running", changes);
+    if (group.mode !== "sync" && group.status !== "running" && !replaying) setStatus(group, "running", changes);
   }
 
   function readAgentResult(u, changes) {
@@ -151,7 +151,10 @@ function createActivity() {
     },
     settle() {
       const changes = [];
-      for (const g of groups.values()) if (g.mode !== "sync" && !g.mergedInto && g.status === "running") setStatus(g, "quiet", changes);
+      for (const g of groups.values()) {
+        if (g.mergedInto || g.status !== "running") continue;
+        setStatus(g, g.mode === "sync" ? "interrupted" : "quiet", changes); // a sync task that never ended was stopped
+      }
       return changes;
     },
     running() {
