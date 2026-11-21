@@ -405,7 +405,18 @@ const deleting = new Set();
 const historyBusy = new Set(); // a truncate is closing the session and rewriting its files
 const lingering = new Map(); // id -> connection whose Copilot would not exit: may still write the session's files
 
-handle("sessions:open", async (sessionId, cwd) => {
+// replayId: the window's id for this open. Every open ends with acp:replayed for it, sent the way the updates are, so
+// it cannot overtake a replayed update (the invoke answer can): the window ends the replay on both, also after a
+// failed load.
+handle("sessions:open", async (sessionId, cwd, replayId) => {
+  try {
+    return await resumeSession(sessionId, cwd);
+  } finally {
+    send("acp:replayed", { replayId });
+  }
+});
+
+async function resumeSession(sessionId, cwd) {
   if (open.has(sessionId)) {
     // after a window reload the view is new: show the reopen cards it had again (a live view ignores known ids)
     for (const card of reopenCards.values()) if (card.sessionId === sessionId) send("reopen:request", card);
@@ -422,7 +433,7 @@ handle("sessions:open", async (sessionId, cwd) => {
     if (n > 0) opening.set(sessionId, n);
     else opening.delete(sessionId);
   }
-});
+}
 
 async function openSession(sessionId, cwd) {
   requireDir(cwd);
@@ -434,9 +445,6 @@ async function openSession(sessionId, cwd) {
     const res = await conn.request("session/load", { sessionId, cwd, mcpServers: relay.mcpServers });
     entry.configOptions = res?.configOptions ?? entry.configOptions;
     if (open.get(sessionId) === entry) usage.refresh(sessionId);
-    // the invoke answer can reach the window before the last replayed updates; this marker, sent the way the updates
-    // are, cannot: the window ends the replay on both
-    send("acp:replayed", { sessionId });
     return { sessionId, cwd, configOptions: viewConfig(sessionId, res?.configOptions) };
   } catch (e) {
     entry.relay?.stop();

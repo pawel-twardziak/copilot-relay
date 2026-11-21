@@ -2216,7 +2216,8 @@ function activate(id, { keepSchedules = false } = {}) {
   if (v && !v.dead) v.input.focus();
 }
 
-const replayEnds = new Map(); // sessionId -> resolves openSession's wait for main's end-of-replay marker (acp:replayed)
+let replaySeq = 0;
+const replayEnds = new Map(); // id of an open -> resolves its wait for main's acp:replayed (sent after its last update)
 
 /** activate false: resumed in the background (a reopen the user approved in another session's view). */
 async function openSession(s, { activate: show = true } = {}) {
@@ -2240,10 +2241,11 @@ async function openSession(s, { activate: show = true } = {}) {
   if (show) activate(s.sessionId);
   v.statusEl.textContent = "Resuming session…";
   v.resuming = true;
-  const replayed = new Promise((resolve) => replayEnds.set(s.sessionId, resolve));
+  const replayId = ++replaySeq;
+  const replayed = new Promise((resolve) => replayEnds.set(replayId, resolve));
   try {
-    const res = await api.openSession(s.sessionId, s.cwd);
-    if (!res.alreadyOpen) await replayed; // main's marker after the last replayed update (the answer may overtake them)
+    const res = await api.openSession(s.sessionId, s.cwd, replayId);
+    await replayed; // the answer may overtake the last replayed updates, the marker cannot
     v.resuming = false;
     v.flush();
     v.settleGroups();
@@ -2252,13 +2254,14 @@ async function openSession(s, { activate: show = true } = {}) {
     v.setBusy(false);
     if (!v.log.childElementCount) v.system("No messages yet.");
   } catch (e) {
+    await replayed; // a failed load may have replayed too
     v.resuming = false;
     v.dead = true;
     v.settleGroups(); // what was replayed before the failure keeps no ●
     v.error(`Could not resume this session: ${e.message}`);
     v.setBusy(false);
   } finally {
-    replayEnds.delete(s.sessionId);
+    replayEnds.delete(replayId);
   }
 }
 
@@ -2984,7 +2987,7 @@ api.onUpdate(({ sessionId, update }) => {
   if (update?.sessionUpdate === "available_commands_update") lastCommands.set(sessionId, update.availableCommands ?? []);
   views.get(sessionId)?.onUpdate(update);
 });
-api.onReplayed(({ sessionId }) => replayEnds.get(sessionId)?.());
+api.onReplayed(({ replayId }) => replayEnds.get(replayId)?.());
 api.onPermission((p) => views.get(p.sessionId)?.permission(p));
 api.onExit((e) => views.get(e.sessionId)?.markDead(e));
 api.onNotice((n) => views.get(n.sessionId)?.system(n.text));
