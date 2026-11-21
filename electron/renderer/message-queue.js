@@ -150,6 +150,18 @@ function statusText({ busy, dead, deleting, queued = 0, paused }) {
   return "";
 }
 
-const MessageQueue = { MARKER, END, ABORT_TEXT, wrap, unwrap, isAbortChunk, createToolTracker, createChain, canDeliverMidTurn, canDeliverIdle, pauseOnStop, statusText };
+/**
+ * Up in the first line of the message box takes your queued messages back (as Claude Code does): their texts go in
+ * front of the draft, one per line, and leave the queue; relay items stay. `caret` is the end of the taken text.
+ * Null when nothing of yours is queued.
+ */
+function takeBack(queue, draft) {
+  const own = queue.filter((item) => item.kind === "app");
+  if (!own.length) return null;
+  const taken = own.map((item) => item.text).join("\n");
+  return { text: draft.trim() ? `${taken}\n${draft}` : taken, caret: taken.length, rest: queue.filter((item) => item.kind !== "app") };
+}
+
+const MessageQueue = { MARKER, END, ABORT_TEXT, wrap, unwrap, isAbortChunk, createToolTracker, createChain, canDeliverMidTurn, canDeliverIdle, pauseOnStop, statusText, takeBack };
 globalThis.MessageQueue = MessageQueue;
 if (typeof module !== "undefined") module.exports = MessageQueue;

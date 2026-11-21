@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { test } from "node:test";
 
 const MQ = createRequire(import.meta.url)("../renderer/message-queue.js");
-const { MARKER, END, ABORT_TEXT, wrap, unwrap, isAbortChunk, createToolTracker, canDeliverMidTurn, canDeliverIdle, pauseOnStop, statusText } = MQ;
+const { MARKER, END, ABORT_TEXT, wrap, unwrap, isAbortChunk, createToolTracker, canDeliverMidTurn, canDeliverIdle, pauseOnStop, statusText, takeBack } = MQ;
 
 test("wrap/unwrap round trip", () => {
   assert.equal(unwrap(wrap("hi")), "hi");
@@ -295,4 +295,26 @@ test("chain: finishing a record twice changes nothing", () => {
   assert.equal(c.failed(a).ended, false);
   assert.equal(c.active(), true);
   assert.equal(c.returned(b, "end_turn").ended, true);
+});
+
+test("takeBack: your queued messages go in front of the draft, one per line; relay items stay", () => {
+  const a = { kind: "app", text: "check X" };
+  const r = { kind: "relay", text: "[from b] hi", from: "b" };
+  const b = { kind: "app", text: "and Y\ntoo" };
+  const res = takeBack([a, r, b], "draft text");
+  assert.equal(res.text, "check X\nand Y\ntoo\ndraft text");
+  assert.equal(res.caret, "check X\nand Y\ntoo".length);
+  assert.deepEqual(res.rest, [r]);
+});
+
+test("takeBack: an empty or blank draft adds nothing after the taken messages", () => {
+  const res = takeBack([{ kind: "app", text: "one" }, { kind: "app", text: "two" }], "  ");
+  assert.equal(res.text, "one\ntwo");
+  assert.equal(res.caret, "one\ntwo".length);
+  assert.deepEqual(res.rest, []);
+});
+
+test("takeBack: null when nothing of yours is queued", () => {
+  assert.equal(takeBack([], "x"), null);
+  assert.equal(takeBack([{ kind: "relay", text: "hi", from: "b" }], ""), null);
 });
