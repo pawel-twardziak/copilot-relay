@@ -13,6 +13,18 @@ function merge(prev, u) {
   return next;
 }
 
-const ToolCalls = { merge };
+/** The subagent that owns an ACP update or tool call (Copilot's _meta), null for the main agent. */
+function agentOf(u) {
+  return u?._meta?.["github.com/copilot"]?.agentId ?? null;
+}
+
+/** At the end of the main turn, whether a permission card stays open: a subagent's question (a background subagent
+ *  runs on, and main still holds the request), unless the turn ended with your Stop, which answers every open
+ *  question as cancelled. */
+function keepCardAtTurnEnd({ agentId, stopped }) {
+  return !!agentId && !stopped;
+}
+
+const ToolCalls = { merge, agentOf, keepCardAtTurnEnd };
 globalThis.ToolCalls = ToolCalls;
 if (typeof module !== "undefined") module.exports = ToolCalls;

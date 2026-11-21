@@ -1207,9 +1207,10 @@ class SessionView {
     const dropped = new Set(ids);
     for (const toolCallId of dropped) this.toolCall({ toolCallId, status: "interrupted" });
     // its permission question is gone with it (a card without a tool id was asked before the switch too); main still
-    // holds the request open, so it is answered as cancelled
+    // holds the request open, so it is answered as cancelled. A subagent's question is not: the interruption is the
+    // main agent's, the subagent may still be waiting for the answer.
     for (const card of [...this.openCards]) {
-      if (!card._dismiss || (card._toolCallId != null && !dropped.has(card._toolCallId))) continue;
+      if (!card._dismiss || card._agentId || (card._toolCallId != null && !dropped.has(card._toolCallId))) continue;
       api.answerPermission(this.sessionId, card._reqId, null).catch(() => {});
       card._dismiss("→ interrupted");
     }
@@ -1410,6 +1411,8 @@ class SessionView {
       this.closeCard(card);
     };
     card._toolCallId = toolCall?.toolCallId ?? null; // a mid-turn switch dismisses the cards of the tools it killed
+    // a subagent's question (a background subagent runs on after the turn): see dismissPermissions
+    card._agentId = ToolCalls.agentOf(toolCall) ?? ToolCalls.agentOf(this.tools.get(card._toolCallId)?.data);
     card._reqId = reqId; // ...and answers their requests
     const opts = h(
       "div",
@@ -1564,9 +1567,13 @@ class SessionView {
     if (this.openCards.delete(card)) renderList();
   }
 
-  /** The turn is over: main no longer waits for its permission questions. Delegation cards are not tied to a turn. */
-  dismissPermissions() {
-    for (const card of [...this.openCards]) card._dismiss?.();
+  /** The turn is over (all: the process is gone): main no longer waits for its permission questions, except a
+   *  subagent's after a turn that was not stopped (ToolCalls.keepCardAtTurnEnd). Delegation cards are not tied to a turn. */
+  dismissPermissions({ all = true, stopped = false } = {}) {
+    for (const card of [...this.openCards]) {
+      if (!all && ToolCalls.keepCardAtTurnEnd({ agentId: card._agentId, stopped })) continue;
+      card._dismiss?.();
+    }
   }
 
   /** A new context window needs a new Copilot process: main closes the session, the reopen replays it. */
@@ -1870,7 +1877,7 @@ class SessionView {
   async chainEnded(before, bubble, dropped, stopped, failed = false) {
     this.delivery = null;
     for (const toolCallId of dropped) this.toolCall({ toolCallId, status: "interrupted" });
-    this.dismissPermissions();
+    this.dismissPermissions({ all: false, stopped });
     // the view was closed or its session deleted meanwhile: nothing to update (a refresh would also replace the
     // delete's warning in the status line)
     if (views.get(this.sessionId) !== this) return;
