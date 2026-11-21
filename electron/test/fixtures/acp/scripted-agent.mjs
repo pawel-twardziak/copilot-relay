@@ -6,14 +6,15 @@
 //   { wait: ms }         a pause
 //   { end: stopReason }  the prompt's answer; the steps after it are played after the answer
 // Every prompt (as a user_message_chunk, as Copilot replays it) and every update sent is recorded in
-// <cwd>/.scripted-agent.json; session/load sends them again, in order, before its answer. Unknown arguments
-// (--acp --stdio, the context tier…) are ignored.
+// <cwd>/.scripted-agent.json; session/load sends them again, in order, before its answer. The scenario's optional
+// load: { delay: ms, error: message } holds that answer back for delay ms, and makes it that error (after the replay).
+// Unknown arguments (--acp --stdio, the context tier…) are ignored.
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 
-const { prompts = [] } = process.env.SCRIPTED_SCENARIO ? (await import(pathToFileURL(process.env.SCRIPTED_SCENARIO).href)).default : {};
+const { prompts = [], load = {} } = process.env.SCRIPTED_SCENARIO ? (await import(pathToFileURL(process.env.SCRIPTED_SCENARIO).href)).default : {};
 
 const send = (msg) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...msg }) + "\n");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -75,9 +76,11 @@ const handlers = {
     open(cwd, true);
     return { sessionId: session.id, configOptions: [] };
   },
-  "session/load": ({ cwd = process.cwd() } = {}) => {
+  "session/load": async ({ cwd = process.cwd() } = {}) => {
     open(cwd, false);
     for (const u of session.updates) update(u, false);
+    if (load.delay) await sleep(load.delay);
+    if (load.error) throw new Error(load.error);
     return { configOptions: [] };
   },
 };
@@ -94,10 +97,11 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     save();
     play(msg.id, prompts[n] ?? []);
   } else if (msg.id != null) {
-    try {
-      send({ id: msg.id, result: handlers[msg.method]?.(msg.params) ?? null });
-    } catch (e) {
-      send({ id: msg.id, error: { code: -32603, message: String(e?.message ?? e) } });
-    }
+    Promise.resolve()
+      .then(() => handlers[msg.method]?.(msg.params))
+      .then(
+        (result) => send({ id: msg.id, result: result ?? null }),
+        (e) => send({ id: msg.id, error: { code: -32603, message: String(e?.message ?? e) } }),
+      );
   }
 });

@@ -40,12 +40,13 @@ async function until(fn, what, ms = TIMEOUT_MS) {
 /** A CDP connection to the app's page. */
 async function attach(port) {
   const page = await until(async () => {
-    const targets = await (await fetch(`http://127.0.0.1:${port}/json`)).json();
+    const targets = await (await fetch(`http://127.0.0.1:${port}/json`, { signal: AbortSignal.timeout(2000) })).json();
     return targets.find((t) => t.type === "page" && !t.url.startsWith("devtools"));
   }, "the app's page");
   const ws = new WebSocket(page.webSocketDebuggerUrl);
   await new Promise((resolve, reject) => {
-    ws.addEventListener("open", resolve, { once: true });
+    const timer = setTimeout(() => reject(new Error(`timed out after ${TIMEOUT_MS / 1000} s attaching to the page`)), TIMEOUT_MS);
+    ws.addEventListener("open", () => resolve(clearTimeout(timer)), { once: true });
     ws.addEventListener("error", () => reject(new Error("could not attach to the page")), { once: true });
   });
   let id = 0;
@@ -57,10 +58,19 @@ async function attach(port) {
       pending.delete(m.id);
     }
   });
-  const cdp = (method, params = {}) =>
+  /** A CDP call; what names it in the error when no answer comes within TIMEOUT_MS. */
+  const cdp = (method, params = {}, what = method) =>
     new Promise((resolve, reject) => {
       const i = ++id;
-      pending.set(i, (m) => (m.error ? reject(new Error(`${method}: ${m.error.message}`)) : resolve(m.result)));
+      const timer = setTimeout(() => {
+        pending.delete(i);
+        reject(new Error(`timed out after ${TIMEOUT_MS / 1000} s: ${what}`));
+      }, TIMEOUT_MS);
+      pending.set(i, (m) => {
+        clearTimeout(timer);
+        if (m.error) reject(new Error(`${what}: ${m.error.message}`));
+        else resolve(m.result);
+      });
       ws.send(JSON.stringify({ id: i, method, params }));
     });
   return { ws, cdp };
@@ -82,10 +92,12 @@ export async function launch({ scenario, settings = {}, width = 1280, height = 8
     JSON.stringify({ copilotCommand: AGENT, relay: false, ...settings }, null, 2),
   );
   const port = await freePort();
-  // its own process group: close() stops xvfb, Electron and the agents it started together
-  const proc = spawn("xvfb-run", ["-a", ELECTRON, "electron", `--remote-debugging-port=${port}`], {
+  // X11 only, so the window is on Xvfb's display even from a Wayland session (Electron would pick Wayland).
+  // Its own process group: close() stops xvfb, Electron and the agents it started together.
+  const { WAYLAND_DISPLAY, ...env } = process.env;
+  const proc = spawn("xvfb-run", ["-a", ELECTRON, "electron", "--ozone-platform=x11", `--remote-debugging-port=${port}`], {
     cwd: ROOT,
-    env: { ...process.env, XDG_CONFIG_HOME: config, COPILOT_HOME: path.join(tmp, "copilot-home"), SCRIPTED_SCENARIO: path.resolve(scenario) },
+    env: { ...env, XDG_SESSION_TYPE: "x11", XDG_CONFIG_HOME: config, COPILOT_HOME: path.join(tmp, "copilot-home"), SCRIPTED_SCENARIO: path.resolve(scenario) },
     detached: true,
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -114,16 +126,17 @@ export async function launch({ scenario, settings = {}, width = 1280, height = 8
     ws = page.ws;
     const { cdp } = page;
 
-    /** Evaluates an expression in the page (promises awaited); returns its value, throws its exception. */
-    async function ev(expr) {
-      const r = await cdp("Runtime.evaluate", { expression: expr, awaitPromise: true, returnByValue: true });
+    /** Evaluates an expression in the page (promises awaited); returns its value, throws its exception, or throws
+     *  after TIMEOUT_MS naming what (by default the expression). */
+    async function ev(expr, what = `evaluating ${expr.replace(/\s+/g, " ").slice(0, 120)}`) {
+      const r = await cdp("Runtime.evaluate", { expression: expr, awaitPromise: true, returnByValue: true }, what);
       if (r.exceptionDetails) throw new Error(`in the page: ${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text}`);
       return r.result.value;
     }
     const check = (expr, what) => until(() => ev(expr), what);
 
     async function resize(w, h) {
-      await cdp("Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: 1, mobile: false });
+      await cdp("Emulation.setDeviceMetricsOverride", { width: w, height: h, deviceScaleFactor: 1, mobile: false }, `resizing to ${w}×${h}`);
     }
 
     let sessionId = null;
@@ -158,13 +171,13 @@ export async function launch({ scenario, settings = {}, width = 1280, height = 8
       /** Waits until no prompt runs and no update came for 300 ms, then for two frames (queued renders). */
       async idle() {
         await check(`(() => { const v = ${view()}; return v && !v.busy && !v.resuming && Date.now() - (v.lastUpdate ?? 0) > 300; })()`, "the session to be idle");
-        await ev("new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))");
+        await ev("new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))", "two animation frames (is the window on Xvfb?)");
       },
       /** Closes the view and opens the session again (a replay through session/load). */
       async reload() {
         await ev(`closeView(${JSON.stringify(sessionId)})`);
         await check(`!views.has(${JSON.stringify(sessionId)})`, "the view to close");
-        await ev(`openSession({ sessionId: ${JSON.stringify(sessionId)}, cwd: ${JSON.stringify(work)} })`);
+        await ev(`openSession({ sessionId: ${JSON.stringify(sessionId)}, cwd: ${JSON.stringify(work)} })`, "the session to reopen");
         await this.idle();
       },
       /** Sets "Tool and subagent details" in the Settings dialog and saves. Without that select only "off" exists. */

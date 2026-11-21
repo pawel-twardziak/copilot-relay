@@ -22,6 +22,8 @@ const tmp = mkdtempSync(path.join(os.tmpdir(), "scripted-agent-"));
 after(() => rmSync(tmp, { recursive: true, force: true }));
 const scenario = path.join(tmp, "scenario.mjs");
 writeFileSync(scenario, `export default { prompts: ${JSON.stringify(PROMPTS)} };\n`);
+const failingLoad = path.join(tmp, "failing-load.mjs");
+writeFileSync(failingLoad, `export default { prompts: ${JSON.stringify(PROMPTS)}, load: { delay: 150, error: "no luck" } };\n`);
 let dirs = 0;
 const freshCwd = () => {
   const dir = path.join(tmp, `work-${++dirs}`);
@@ -30,10 +32,10 @@ const freshCwd = () => {
 };
 
 /** The agent as the app starts it (with flags it must ignore), and a client that keeps every message it sent. */
-function start(cwd) {
+function start(cwd, scenarioFile = scenario) {
   const proc = spawn(process.execPath, [AGENT, "--acp", "--stdio", "--context", "long_context"], {
     cwd,
-    env: { ...process.env, SCRIPTED_SCENARIO: scenario },
+    env: { ...process.env, SCRIPTED_SCENARIO: scenarioFile },
     stdio: ["pipe", "pipe", "inherit"],
   });
   const seen = [];
@@ -142,4 +144,22 @@ test("session/load in a new process replays the prompts and updates in order bef
     b.updates(from, loaded),
     [user("first"), text("m1", "one"), text("m1", " two"), text("m2", "after the answer"), user("second"), call, done].map((update) => ({ sessionId: a.sessionId, update })),
   );
+});
+
+test("a scenario's load option holds the load's answer back and makes it an error, after the replay", async () => {
+  const cwd = freshCwd();
+  const a = await newSession(cwd);
+  await prompt(a, "first");
+  await a.waitFor((m) => m.params?.update?.messageId === "m2");
+  a.stop();
+
+  const b = start(cwd, failingLoad);
+  await b.request("initialize", { protocolVersion: 1 });
+  const from = b.seen.length;
+  const started = Date.now();
+  const loaded = await b.request("session/load", { sessionId: a.sessionId, cwd, mcpServers: [] });
+  b.stop();
+  assert.ok(Date.now() - started >= 150);
+  assert.equal(b.seen[loaded].error?.message, "no luck");
+  assert.equal(b.updates(from, loaded).length, 4); // the prompt and its three updates
 });
