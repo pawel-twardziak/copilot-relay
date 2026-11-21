@@ -104,11 +104,6 @@ function deliveryAck(id, seen, ack) {
   };
 }
 
-/** Whether a delegated child has been idle long enough (15 minutes by default) to close its process. */
-function shouldCloseIdle({ parentSessionId, busy, inboxLength, pendingPermissions, active, lastActivity }, now, ms = 900_000) {
-  return Boolean(parentSessionId) && !busy && !inboxLength && !pendingPermissions && !active && now - lastActivity >= ms;
-}
-
-const UiState = { listModel, CHAT_SCALE, stepScale, imageMentions, VIEWER_ZOOM, fitScale, zoomAt, acceptDelivery, deliveryAck, shouldCloseIdle };
+const UiState = { listModel, CHAT_SCALE, stepScale, imageMentions, VIEWER_ZOOM, fitScale, zoomAt, acceptDelivery, deliveryAck };
 globalThis.UiState = UiState;
 if (typeof module !== "undefined") module.exports = UiState;

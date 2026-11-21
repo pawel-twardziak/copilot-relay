@@ -18,7 +18,13 @@ export function delegationToolsAllowed(peerParam) {
   return typeof peerParam === "string" && peerParam.startsWith("app:");
 }
 
-export function formatList(registry, selfKey) {
+export function formatList(registry, selfKey, delegation = null) {
+  const family = delegation?.familyBlock(selfKey) ?? "";
+  const online = formatOnline(registry, selfKey);
+  return family ? `${online}\n\n${family}` : online;
+}
+
+function formatOnline(registry, selfKey) {
   const all = registry.list();
   const selfParent = all.find((p) => p.key === selfKey)?.parentKey;
   const others = all.filter((p) => p.key !== selfKey);
@@ -45,7 +51,7 @@ function buildServer(registry, getKey, { mailbox, delegation = null, fixedKey = 
         "send_message delivers asynchronously — never wait for a reply in the same turn unless using wait_for_message." +
         (delegation && delegationToolsAllowed(fixedKey)
           ? " create_session asks the user to approve a new delegated session (you cannot approve it yourself); " +
-            "a delegated session ends its work with report_result."
+            "a delegated session ends its work with report_result. list_sessions also shows your children and your parent."
           : ""),
     },
   );
@@ -53,7 +59,7 @@ function buildServer(registry, getKey, { mailbox, delegation = null, fixedKey = 
   server.registerTool(
     "list_sessions",
     { description: "List the other Copilot sessions connected to the relay (name, kind, role, cwd).", inputSchema: {} },
-    async () => text(formatList(registry, getKey())),
+    async () => text(formatList(registry, getKey(), delegation)),
   );
 
   server.registerTool(
@@ -77,7 +83,7 @@ function buildServer(registry, getKey, { mailbox, delegation = null, fixedKey = 
         description:
           "Ask the user to approve a new delegated Copilot session that works on a task and reports back to you. " +
           "The user must approve; the outcome arrives later as a message from relay. Do not wait for it. " +
-          "A delegated session cannot create further sessions.",
+          "Delegated sessions may delegate further.",
         inputSchema: {
           name: z.string().describe("Name for the new session"),
           task: z.string().describe("The task the new session should work on"),

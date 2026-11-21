@@ -2,19 +2,6 @@
 
 const isChild = (e) => Boolean(e?.parentSessionId);
 
-export function limitError(entries, parentId, { perParent = 3, total = 5 } = {}, creating = []) {
-  const kids = [...entries].filter(isChild);
-  const live = kids.length + creating.length;
-  const own = kids.filter((e) => e.parentSessionId === parentId).length + creating.filter((id) => id === parentId).length;
-  if (own >= perParent) {
-    return `This session already has ${own} delegated sessions running; the limit is ${perParent} per session. A slot frees up when a delegated session of yours is closed, not when it reports.`;
-  }
-  if (live >= total) {
-    return `The app already has ${live} delegated sessions running; the limit is ${total} in total. A slot frees up when a delegated session is closed, not when it reports.`;
-  }
-  return null;
-}
-
 export function findModelOption(options) {
   return (options ?? []).find((o) => o?.id === "model");
 }
@@ -70,13 +57,17 @@ export function withDeadline(promise, deadline, message) {
   return Promise.race([promise, expired]).finally(() => clearTimeout(timer));
 }
 
-/** The question asked before a reload: { message, detail } (see the View menu in main.mjs). */
-export function reloadWarning(children, requests) {
+/** The question asked before a reload: { message, detail } (see the View menu in main.mjs). `reopens`: open reopen
+ *  cards of the sessions it stops (the broker asks again when they register anew). */
+export function reloadWarning(children, requests, reopens = 0) {
   const stopped = children ? `stops ${children} delegated ${children === 1 ? "session" : "sessions"}` : "";
   const dropped = requests ? `discards ${requests} waiting ${requests === 1 ? "request" : "requests"} for a new session` : "";
+  const asked = reopens
+    ? ` ${reopens} open reopen ${reopens === 1 ? "request of theirs is" : "requests of theirs are"} asked again when they are resumed.`
+    : "";
   return {
     message: `Reloading ${[stopped, dropped].filter(Boolean).join(" and ")}.`,
-    detail: "A reloaded window cannot show their cards. Stopped sessions stay in the list and can be resumed.",
+    detail: `A reloaded window cannot show their cards. Stopped sessions stay in the list and can be resumed.${asked}`,
   };
 }
 

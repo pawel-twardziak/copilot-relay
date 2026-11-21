@@ -227,6 +227,8 @@ function ago(iso) {
 // state
 
 let sessions = []; // from session/list: { sessionId, cwd, title, updatedAt }
+let links = []; // the broker's sub-session links (api.getLinks / api.onLinks), keys "cli:<sessionId>"
+let tree = SessionTree.index(links); // parent/child index over `links` (bare session ids)
 const views = new Map(); // sessionId -> SessionView
 let activeId = null;
 
@@ -243,11 +245,14 @@ function isEditableBubble(el) {
 class SessionView {
   constructor({ sessionId, cwd, title, parentSessionId, seenDeliveries, pendingNotes, holdInbox }) {
     Object.assign(this, { sessionId, cwd, title: title ?? "" });
-    this.parentSessionId = parentSessionId ?? null; // set for a session created by another one (delegated child)
+    // set for a session created by another one (from relay:status); the sidebar and the relation bar use `tree`
+    this.parentSessionId = parentSessionId ?? null;
     this.seenDeliveries = seenDeliveries ?? new Set(); // report ids already taken (the broker redelivers until acked)
     this.pendingNotes = pendingNotes ?? []; // non-waking notices, passed to the model with the next prompt
-    this.openCards = new Set(); // permission and delegation cards still waiting for an answer
-    this.lastActivity = Date.now(); // for the idle close of delegated children
+    this.openCards = new Set(); // permission, delegation and reopen cards still waiting for an answer
+    // requestId -> previews element of its reopen card while it is open, null once answered (the broker re-emits a
+    // request, with every queued message, until it is answered)
+    this.reopenRequests = new Map();
     this.busy = false;
     this.dead = false;
     this.run = null; // current streamed block { type, el, text }
@@ -283,11 +288,12 @@ class SessionView {
     this.sendBtn = h("button", { class: "primary", onclick: () => this.send() }, "Send");
     this.stopBtn = h("button", { onclick: () => this.cancel(), disabled: true }, "Stop");
     this.statusEl = h("div", { class: "status-line" });
-    this.stopChildrenBtn = h(
+    this.closeChildrenBtn = h(
       "button",
-      { class: "danger", hidden: true, title: "Close every session this one has created (they stay resumable)", onclick: () => api.stopChildren(this.sessionId).catch((e) => this.error(e.message)) },
-      "Stop all children",
+      { class: "danger", hidden: true, title: "Close every sub-session of this one (they stay resumable)", onclick: () => closeViews(openDescendants(this.sessionId)) },
+      "Close all sub-sessions",
     );
+    this.relationsEl = h("div", { class: "relations", hidden: true });
     this.agentOption = undefined; // latest ACP "agent" config option
     this.agentPicker = h("select", { class: "agent-picker", hidden: true });
     this.agentPicker.addEventListener("change", () => this.chooseAgent(this.agentPicker.value));
@@ -310,12 +316,13 @@ class SessionView {
         this.relayChip,
         this.usageChip,
         this.selects,
-        this.stopChildrenBtn,
+        this.closeChildrenBtn,
         this.filesBtn,
         h("button", { title: "Copy the whole conversation as Markdown", onclick: (e) => this.copyThread(e.currentTarget) }, "Copy thread"),
         h("button", { class: "danger", title: "Close this session in the app (it stays resumable)", onclick: () => closeView(this.sessionId) }, "Close"),
         h("button", { class: "danger", title: "Delete this whole session from disk", onclick: () => deleteSessionFlow({ sessionId: this.sessionId, cwd: this.cwd, title: this.title }) }, "Delete"),
       ),
+      this.relationsEl,
       this.log,
       this.editBar,
       h("div", { class: "composer" }, this.cmdPopup, this.input, this.agentPicker, h("div", { class: "btns" }, this.sendBtn, this.stopBtn)),
@@ -929,7 +936,6 @@ class SessionView {
 
   setBusy(b) {
     this.busy = b;
-    this.lastActivity = Date.now();
     const off = b || this.dead || this.deleting; // this.deleting: the whole session is being deleted
     this.el.classList.toggle("busy", off); // disables the fork/delete actions
     this.sendBtn.disabled = off;
@@ -1082,7 +1088,6 @@ class SessionView {
 
   // --- ACP session/update
   onUpdate(u) {
-    this.lastActivity = Date.now();
     this.lastUpdate = Date.now();
     this.delivery?.update(u);
     const text = u.content?.type === "text" ? u.content.text : "";
@@ -1248,6 +1253,89 @@ class SessionView {
     );
     this.append(card);
     this.openCard(card);
+  }
+
+  /** A relative of this session sent a message to a closed one: the user decides whether it is reopened. The names
+   *  and previews are model-written: plain text only. */
+  reopenCard({ requestId, targetSessionId, targetName, fromName, previews }) {
+    const previewEls = (list) => (list ?? []).map((p) => h("div", { class: "task" }, p));
+    if (this.reopenRequests.has(requestId)) {
+      // another message to the same closed target: the open card shows every queued one; an answered id stays ignored
+      this.reopenRequests.get(requestId)?.replaceChildren(...previewEls(previews));
+      return;
+    }
+    const previewsEl = h("div", { class: "previews" }, previewEls(previews));
+    this.reopenRequests.set(requestId, previewsEl);
+    this.flush();
+    const NOT_PENDING = "This request is no longer pending.";
+    const answer = async (approved) => {
+      this.reopenRequests.set(requestId, null);
+      this.closeCard(card);
+      opts.replaceChildren(h("span", {}, approved ? "Reopening…" : "Rejecting…"));
+      // each answer is false when the broker no longer has the request; a thrown one did not arrive
+      const say = async (ok, reason, text) => ((await api.answerReopen(this.sessionId, requestId, ok, reason)) ? text : NOT_PENDING);
+      let result;
+      try {
+        if (!approved) {
+          result = await say(false, undefined, "→ Rejected");
+        } else if (deleting.has(targetSessionId)) {
+          result = await say(false, undefined, "This session is being deleted.");
+        } else {
+          const tv = views.get(targetSessionId); // open (or a dead view): never "missing", that would forget its link
+          let target = tv ? { sessionId: targetSessionId, cwd: tv.cwd, title: tv.title } : sessions.find((s) => s.sessionId === targetSessionId);
+          let complete = true;
+          if (!target) {
+            const listed = await api.listSessionsChecked();
+            target = listed.sessions.find((s) => s.sessionId === targetSessionId);
+            complete = listed.complete;
+          }
+          if (target) {
+            result = await say(true, undefined, "→ Approved");
+            // the queued message is delivered when it registers (no-op if open)
+            if (result !== NOT_PENDING) openSession(target, { activate: false });
+          } else if (!complete) {
+            // a partial list proves nothing: approve without forgetting; the message waits until it is opened
+            result = await say(true, undefined, "→ Approved. It was not found in the session list; open it to deliver the message.");
+          } else {
+            result = await say(false, "missing", "This session no longer exists.");
+          }
+        }
+      } catch (e) {
+        // not answered: the buttons come back, so the user can try again
+        this.reopenRequests.set(requestId, previewsEl);
+        opts.replaceChildren(h("span", { class: "err" }, `Could not answer: ${e.message}`), ...buttons());
+        this.openCard(card);
+        return;
+      }
+      card.classList.add("done");
+      opts.replaceChildren(h("span", {}, result));
+    };
+    const buttons = () => [h("button", { class: "primary", onclick: () => answer(true) }, "Approve"), h("button", { onclick: () => answer(false) }, "Reject")];
+    const opts = h("div", { class: "opts" }, buttons());
+    const card = h(
+      "div",
+      { class: "perm reopen" },
+      h("div", { class: "q" }, h("b", {}, fromName), ` wants to message the closed session `, h("b", {}, targetName), ". Reopen it?"),
+      previewsEl,
+      opts,
+    );
+    this.append(card);
+    this.openCard(card);
+  }
+
+  /** The bar under the header: this session's parent and sub-sessions from the link tree. */
+  renderRelations() {
+    const rel = SessionTree.relation(tree, this.sessionId);
+    const parent = rel.parent === this.sessionId ? null : rel.parent;
+    const parts = [];
+    if (parent) parts.push(h("span", { class: "rel" }, h("span", { class: "rel-label" }, "Parent:"), relationChip(parent)));
+    else if (rel.parentDeleted) parts.push(h("span", { class: "rel" }, h("span", { class: "rel-label" }, "Parent:"), h("span", { class: "rel-gone" }, "deleted")));
+    if (rel.children.length) {
+      parts.push(h("span", { class: "rel" }, h("span", { class: "rel-label" }, "Sub-sessions:"), rel.children.map((c) => relationChip(c.id, { child: true, grandchildren: c.grandchildren }))));
+    }
+    this.relationsEl.replaceChildren(...parts);
+    this.relationsEl.hidden = !parts.length;
+    this.closeChildrenBtn.hidden = !openDescendants(this.sessionId).length;
   }
 
   get needsAttention() {
@@ -1505,7 +1593,6 @@ class SessionView {
     }
     this.append(bubble);
     this.toBottom();
-    this.lastActivity = Date.now();
     this.setBusy(true);
     this.prompting = true;
     const before = isCmd ? await api.userMessages(this.sessionId).catch(() => null) : null;
@@ -1599,9 +1686,10 @@ function activate(id, { keepSchedules = false } = {}) {
   if (v && !v.dead) v.input.focus();
 }
 
-async function openSession(s) {
+/** activate false: resumed in the background (a reopen the user approved in another session's view). */
+async function openSession(s, { activate: show = true } = {}) {
   const existing = views.get(s.sessionId);
-  if (existing && !existing.dead) return activate(s.sessionId);
+  if (existing && !existing.dead) return show ? activate(s.sessionId) : undefined;
   if (existing) {
     existing.el.remove();
     views.delete(s.sessionId);
@@ -1610,7 +1698,7 @@ async function openSession(s) {
   views.set(s.sessionId, v);
   v.setBusy(true); // before flushEarly: an early relay message must wait until the session is open
   flushEarly(v);
-  activate(s.sessionId);
+  if (show) activate(s.sessionId);
   v.statusEl.textContent = "Resuming session…";
   v.resuming = true;
   try {
@@ -1683,13 +1771,30 @@ async function reopenView(old, error, { holdInbox = false, typed } = {}) {
   return v;
 }
 
+/** Open sub-sessions of id (all generations), deepest first; one being deleted is left to its delete. */
+const openDescendants = (id) => SessionTree.closeOrder(tree, id, (c) => views.has(c) && !views.get(c).deleting && !deleting.has(c));
+
+/** Close these views in this order after one question for the busy ones; nothing is closed if you cancel.
+ *  question: the text for a single busy session instead of the count. */
+async function closeViews(ids, question) {
+  const busy = ids.filter((id) => views.get(id)?.busy && !views.get(id).dead).length;
+  question ??= busy === 1 ? "1 session is still working. Stop it and close?" : `${busy} sessions are still working. Stop them and close?`;
+  if (busy && !confirm(question)) return;
+  for (const id of ids) {
+    const v = views.get(id);
+    if (!v || v.deleting || deleting.has(id)) continue; // a running delete closes it, or restores it if the delete fails
+    dropView(id);
+    await api.closeSession(id).catch(() => {});
+  }
+  renderList();
+}
+
+/** Close a session's view and every open sub-session below it (they all stay resumable). */
 async function closeView(id) {
   const v = views.get(id);
   if (!v || v.deleting) return; // a running delete closes it, or restores it if the delete fails
-  if (v.busy && !v.dead && !confirm("Copilot is still working in this session. Stop it and close?")) return;
-  dropView(id);
-  await api.closeSession(id).catch(() => {});
-  renderList();
+  const ids = openDescendants(id);
+  await closeViews([...ids, id], ids.length ? undefined : "Copilot is still working in this session. Stop it and close?");
 }
 
 // ---------------------------------------------------------------------------
@@ -1702,9 +1807,13 @@ function setStatus(text, isError = false) {
 }
 
 async function refresh() {
+  const known = links; // only links that existed before the list was asked for are checked against it
+  let listed = [];
+  let complete = false;
   try {
+    ({ sessions: listed, complete } = await api.listSessionsChecked());
     // a list fetched while a delete was running may still contain that session
-    sessions = (await api.listSessions()).filter((s) => !deleting.has(s.sessionId) && !deletedIds.has(s.sessionId));
+    sessions = listed.filter((s) => !deleting.has(s.sessionId) && !deletedIds.has(s.sessionId));
     for (const s of sessions) {
       const v = views.get(s.sessionId);
       if (v && s.title && !v.title) v.setTitle(s.title);
@@ -1714,6 +1823,16 @@ async function refresh() {
     setStatus(e.message, true);
   }
   renderList();
+  pruneMissing(known, listed, complete);
+}
+
+/** Tell the broker which linked sessions are gone from disk (deleted in a terminal, by Copilot's cleanup…). Only
+ *  after a successful, complete list; never an open session or one being deleted here (a new session may not be
+ *  listed yet, a delete forgets its own links). */
+function pruneMissing(known, listed, listOk) {
+  const exclude = new Set([...views.keys(), ...deleting, ...deletedIds]);
+  const keys = SessionTree.pruneCandidates(known, listed, { listOk, exclude });
+  if (keys.length) api.reportMissing(keys).catch((e) => console.warn(`links: ${e.message}`));
 }
 
 let refreshTimer;
@@ -1729,19 +1848,49 @@ function togglePin(id) {
   renderList();
 }
 
-/** The name of a child's parent in the sidebar: its title, else its relay name, else the start of its id. */
+/** The name of a related session (a child's parent in the sidebar, the relation bar): its title, else its relay name
+ *  (from its view or its link), else the start of its id. */
 function parentLabel(id) {
   const p = views.get(id);
   const title = p?.title || sessions.find((s) => s.sessionId === id)?.title;
-  return title ? shortTitle(title) : (p?.relayName ?? id.slice(0, 8));
+  return title ? shortTitle(title) : (p?.relayName ?? tree.link.get(id)?.name ?? id.slice(0, 8));
 }
 
-/** showProject: the session is listed outside its project (pinned), so its folder goes into the meta line. */
-function item(s, v, { showProject = false } = {}) {
+/** A relation bar entry: dot as in the sidebar (hollow when closed); for a child ✓ once it reported, +N sub-sessions. */
+function relationChip(id, { child = false, grandchildren = 0 } = {}) {
+  const v = views.get(id);
+  const open = v && !v.dead;
+  const reported = child && tree.link.get(id)?.reported;
+  const state = v?.dead ? "Its Copilot process ended" : open ? "Open" : "Closed";
+  return h(
+    "button",
+    { class: "rel-chip", title: `${state}${reported ? ", reported its result" : ""}\n${id}`, onclick: () => openRelative(id) },
+    h("span", { class: "dot" + (v?.dead ? " dead" : !open ? " off" : v.busy ? " busy" : "") }),
+    h("span", { class: "name" }, parentLabel(id)),
+    reported && h("span", { class: "rel-done" }, "✓"),
+    grandchildren > 0 && h("span", { class: "count", title: `${grandchildren} sub-session(s)` }, `+${grandchildren}`),
+  );
+}
+
+/** A relation bar click: show it if open, else resume it as from the sidebar (the click is the approval). */
+function openRelative(id) {
+  const v = views.get(id);
+  if (v && !v.dead) return activate(id);
+  if (deleting.has(id)) return setStatus("This session is being deleted.", true);
+  const s = sessions.find((x) => x.sessionId === id) ?? (v && { sessionId: id, cwd: v.cwd, title: v.title });
+  if (!s) return setStatus("This session is not in Copilot's session list.", true);
+  openSession(s);
+}
+
+/** showProject: the session is listed outside its project (pinned), so its folder goes into the meta line.
+ *  depth: its level under a parent shown in the same group (0 = top level, with "child of X" when it has a parent). */
+function item(s, v, { showProject = false, depth = 0 } = {}) {
   const pinned = ui.pinned.has(s.sessionId);
+  const parent = tree.parentOf.get(s.sessionId);
+  const relation = depth > 0 ? null : parent && parent !== s.sessionId ? `child of ${parentLabel(parent)}` : tree.link.get(s.sessionId)?.parentDeleted ? "parent deleted" : null;
   return h(
     "div",
-    { class: "item-row" },
+    { class: "item-row", style: depth > 0 ? `--depth: ${depth}` : null },
     h(
       "button",
       {
@@ -1753,11 +1902,12 @@ function item(s, v, { showProject = false } = {}) {
       h(
         "div",
         { class: "t" },
-        v && !v.dead && h("span", { class: "dot" + (v.busy ? " busy" : "") }),
+        depth > 0 && h("span", { class: "branch", "aria-hidden": "true" }, "└"),
+        v && h("span", v.dead ? { class: "dot dead", title: "Its Copilot process ended" } : { class: "dot" + (v.busy ? " busy" : "") }),
         h("b", {}, shortTitle(v?.title || s.title)),
         v?.needsAttention && h("span", { class: "attention", title: "Waiting for your answer" }, "!"),
       ),
-      h("div", { class: "m" }, [v?.parentSessionId && `child of ${parentLabel(v.parentSessionId)}`, showProject && baseName(s.cwd), s.updatedAt ? ago(s.updatedAt) : "", s.sessionId.slice(0, 8)].filter(Boolean).join(" · ")),
+      h("div", { class: "m" }, [relation, showProject && baseName(s.cwd), s.updatedAt ? ago(s.updatedAt) : "", s.sessionId.slice(0, 8)].filter(Boolean).join(" · ")),
     ),
     h(
       "div",
@@ -1770,23 +1920,93 @@ function item(s, v, { showProject = false } = {}) {
 
 const deleting = new Set(); // sessions whose delete is running
 const deletedIds = new Set(); // deleted in this run of the app
-/** Delete a whole session from disk after asking; closes its view first. */
+const DELETE_WARNING =
+  "Its whole history is removed from disk and cannot be restored. Files changed by the agent are not reverted. " +
+  "Don't use this while the session is open in a terminal Copilot CLI.";
+const sessionName = (s) => shortTitle(s.title) || s.sessionId.slice(0, 8);
+/** A session to delete by id: its list entry, else what its view knows. */
+const sessionById = (id) => {
+  const v = views.get(id);
+  return sessions.find((x) => x.sessionId === id) ?? { sessionId: id, cwd: v?.cwd, title: v?.title || tree.link.get(id)?.name };
+};
+
+/** Delete a whole session from disk after asking; closes its view first. A session with sub-sessions asks in
+ *  #delete-tree which of them go too. */
 async function deleteSessionFlow(s) {
   if (deleting.has(s.sessionId)) return;
+  const refusal = deleteRefusal(s.sessionId);
+  if (refusal) return setStatus(refusal, true);
   const v = views.get(s.sessionId);
-  // refused before asking: main would refuse a session that is still resuming, and a Fork/Delete of a message
-  // reopens the session when it is done
-  if (v?.resuming) return setStatus("This session is still opening. Delete it when it has loaded.", true);
-  if (v?.historyOp) return setStatus("Wait until the fork or delete of a message has finished.", true);
-  const name = shortTitle(s.title) || s.sessionId.slice(0, 8);
-  const ok = confirm(
-    `Delete the session "${name}"?\n\n` +
-      `${s.cwd ?? ""}\n${s.sessionId}\n\n` +
-      (v?.prompting && !v.dead ? "Copilot is still working in it and will be stopped.\n\n" : "") +
-      "Its whole history is removed from disk and cannot be restored. Files changed by the agent are not reverted. " +
-      "Don't use this while the session is open in a terminal Copilot CLI.",
-  );
-  if (!ok) return;
+  const idx = tree; // the tree as asked about: forgetting the deleted keys changes `tree` meanwhile
+  const below = SessionTree.descendants(idx, s.sessionId);
+  if (!below.length) {
+    const ok = confirm(
+      `Delete the session "${sessionName(s)}"?\n\n` +
+        `${s.cwd ?? ""}\n${s.sessionId}\n\n` +
+        (v?.prompting && !v.dead ? "Copilot is still working in it and will be stopped.\n\n" : "") +
+        DELETE_WARNING,
+    );
+    if (!ok) return;
+    const r = await deleteOne(s);
+    const forgot = r.deleted ? await forgetDeleted(idx, [s.sessionId]) : null;
+    setStatus(forgot ? `${r.text}; ${forgot}` : r.text, r.isError || !!forgot);
+    if (r.deleted && r.clean && !forgot) scheduleRefresh(); // a refresh would replace a warning with the session count
+    return;
+  }
+  const checked = await askDeleteTree(s, idx, below);
+  if (!checked) return;
+  // the chosen session first, then the checked sub-sessions deepest first; the first one not deleted stops the rest
+  const order = [s, ...SessionTree.closeOrder(idx, s.sessionId, (c) => checked.has(c)).map(sessionById)];
+  const deleted = [];
+  const warnings = [];
+  let failed = null;
+  for (const t of order) {
+    const r = await deleteOne(t);
+    if (!r.deleted) {
+      failed = { t, r };
+      break;
+    }
+    deleted.push(t.sessionId);
+    if (r.isError) warnings.push(`"${sessionName(t)}": ${r.text}`); // deleted, with a problem
+  }
+  const parts = [];
+  if (deleted.length) {
+    const forgot = await forgetDeleted(idx, deleted);
+    if (forgot) warnings.push(forgot);
+    // kept sub-sessions close with their deleted parent (they stay resumable)
+    await closeViews(SessionTree.closeOrder(idx, s.sessionId, (c) => !checked.has(c) && views.has(c) && !views.get(c).deleting && !deleting.has(c)));
+    const subs = deleted.length - 1;
+    parts.push(`Session "${sessionName(s)}"${subs ? ` and ${subs} sub-session(s)` : ""} deleted`);
+  }
+  if (failed) {
+    const left = order.length - deleted.length - 1;
+    parts.push(
+      (failed.t === s ? failed.r.text : `"${sessionName(failed.t)}": ${failed.r.text}`) +
+        (left ? ` (${left} more checked sub-session(s) were not deleted)` : ""),
+    );
+  }
+  parts.push(...warnings);
+  setStatus(parts.join("; "), !!failed || warnings.length > 0);
+  if (!failed && !warnings.length) scheduleRefresh();
+}
+
+/** Why a session can't be deleted right now, or null. Main would refuse a session that is still resuming, and a
+ *  Fork/Delete of a message reopens the session when it is done. */
+function deleteRefusal(id) {
+  const v = views.get(id);
+  if (deleting.has(id)) return "This session is being deleted.";
+  if (v?.resuming) return "This session is still opening. Delete it when it has loaded.";
+  if (v?.historyOp) return "Wait until the fork or delete of a message has finished.";
+  return null;
+}
+
+/** Delete one session through main, closing its view; returns { deleted, clean, text, isError } for the status line
+ *  (deleted with problems: isError, not clean). */
+async function deleteOne(s) {
+  const refusal = deleteRefusal(s.sessionId);
+  if (refusal) return { deleted: false, text: refusal, isError: true };
+  const v = views.get(s.sessionId);
+  const name = sessionName(s);
   deleting.add(s.sessionId);
   setStatus("Deleting session…");
   const setDeleting = (on) => {
@@ -1796,21 +2016,18 @@ async function deleteSessionFlow(s) {
   };
   setDeleting(true);
   const listed = sessions.find((x) => x.sessionId === s.sessionId); // its list entry, put back if it isn't deleted
-  let clean = false;
   try {
     const res = await api.deleteSession(s.sessionId); // main closes the session first
     if (res.refused) {
       // nothing was touched: the session is still open (or still opening) as it was
       setDeleting(false);
-      setStatus(`Could not delete the session: ${res.refused}`, true);
-      return;
+      return { deleted: false, text: `Could not delete the session: ${res.refused}`, isError: true };
     }
     if (res.stuck) {
       // closed, but its Copilot process would not exit: main refuses to open it again until that process is gone
       const lost = v && views.get(s.sessionId) === v ? v.inbox.length : 0;
       dropView(s.sessionId);
-      setStatus(`Could not delete the session: ${res.stuck}${lost ? ` (${lost} waiting relay message(s) were discarded)` : ""}`, true);
-      return;
+      return { deleted: false, text: `Could not delete the session: ${res.stuck}${lost ? ` (${lost} waiting relay message(s) were discarded)` : ""}`, isError: true };
     }
     deletedIds.add(s.sessionId);
     if (ui.pinned.delete(s.sessionId)) saveUi();
@@ -1823,22 +2040,75 @@ async function deleteSessionFlow(s) {
       res.leftover && `some files could not be removed yet (retried on the next start): ${res.leftover}`,
       res.store?.error && `its entry in session-store.db could not be removed: ${res.store.error}`,
     ].filter(Boolean);
-    setStatus(problems.length ? `Session deleted, but ${problems.join("; ")}` : `Session "${name}" deleted`, problems.length > 0);
-    clean = !problems.length;
+    return problems.length
+      ? { deleted: true, clean: false, text: `Session deleted, but ${problems.join("; ")}`, isError: true }
+      : { deleted: true, clean: true, text: `Session "${name}" deleted`, isError: false };
   } catch (e) {
-    setStatus(`Could not delete the session: ${e.message}`, true);
     // main may have closed it before failing: reopen the view from the session's files (as after deleting messages)
     if (v && views.get(s.sessionId) === v) {
       await api.closeSession(s.sessionId).catch(() => {});
       await reopenView(v, `Could not delete the session: ${e.message}`);
     }
+    return { deleted: false, text: `Could not delete the session: ${e.message}`, isError: true };
   } finally {
     deleting.delete(s.sessionId);
     // not deleted: a refresh while it ran may have left it out of the list (see refresh)
     if (listed && !deletedIds.has(s.sessionId) && !sessions.some((x) => x.sessionId === s.sessionId)) sessions.push(listed);
     renderList();
   }
-  if (clean) scheduleRefresh(); // a refresh would replace the warning in the status line with the session count
+}
+
+/** The broker forgets deleted sessions that are in the tree (a child, or a parent: its kept children become
+ *  "parent deleted"). The sessions are already gone, so a failure is only a warning; returns its text or null. */
+async function forgetDeleted(idx, ids) {
+  const keys = ids.filter((id) => idx.link.has(id) || idx.childrenOf.has(id)).map((id) => `cli:${id}`);
+  if (!keys.length) return null;
+  try {
+    await api.forgetLinks(keys);
+    return null;
+  } catch (e) {
+    return `the sub-session tree could not be updated: ${e.message}`;
+  }
+}
+
+/** #delete-tree: the warning, then the sub-sessions indented by depth, each with its own unchecked "Delete too".
+ *  Resolves to the set of checked ids, or null when cancelled (Cancel, Escape). */
+function askDeleteTree(s, idx, below) {
+  const dlg = $("#delete-tree");
+  const v = views.get(s.sessionId);
+  $("#del-title").textContent = `Delete the session "${sessionName(s)}"?`;
+  $("#del-where").textContent = `${s.cwd ?? ""}\n${s.sessionId}`;
+  $("#del-warning").textContent = (v?.prompting && !v.dead ? "Copilot is still working in it and will be stopped.\n\n" : "") + DELETE_WARNING;
+  const depth = new Map([[s.sessionId, 0]]);
+  const boxes = below.map((id) => {
+    depth.set(id, (depth.get(idx.parentOf.get(id)) ?? 0) + 1); // descendants() lists a parent before its children
+    const cv = views.get(id);
+    const box = h("input", { type: "checkbox", disabled: deleting.has(id) });
+    const meta = [deleting.has(id) ? "being deleted" : cv && !cv.dead ? (cv.busy ? "working" : "open") : "closed", id.slice(0, 8)];
+    $("#del-list").append(
+      h(
+        "div",
+        { class: "del-row", style: `--depth: ${depth.get(id)}`, title: id },
+        h("span", { class: "branch", "aria-hidden": "true" }, "└"),
+        h("span", { class: "del-name" }, parentLabel(id)),
+        h("span", { class: "del-meta" }, meta.join(" · ")),
+        h("label", {}, box, "Delete too"),
+      ),
+    );
+    return [id, box];
+  });
+  dlg.returnValue = ""; // Escape keeps the previous value
+  dlg.showModal();
+  return new Promise((resolve) => {
+    dlg.addEventListener(
+      "close",
+      () => {
+        $("#del-list").replaceChildren();
+        resolve(dlg.returnValue === "delete" ? new Set(boxes.filter(([, b]) => b.checked).map(([id]) => id)) : null);
+      },
+      { once: true },
+    );
+  });
 }
 
 // Sidebar state kept across restarts: pinned sessions, collapsed project folders, chat text scale.
@@ -2019,7 +2289,7 @@ function toggleGroup(cwd, header, items) {
 }
 
 function groupBlock(g) {
-  const items = h("div", { class: "group-items" + (g.collapsed ? " collapsed" : "") }, h("div", {}, ...g.sessions.map((s) => item(s, views.get(s.sessionId)))));
+  const items = h("div", { class: "group-items" + (g.collapsed ? " collapsed" : "") }, h("div", {}, ...nestedItems(g.sessions)));
   items.inert = g.collapsed;
   const header = h(
     "div",
@@ -2055,22 +2325,27 @@ function groupBlock(g) {
   return [header, items];
 }
 
+/** A group's rows, children indented under a parent listed in the same group. */
+function nestedItems(list, opts = {}) {
+  return SessionTree.nest(list, tree).map(({ s, depth }) => item(s, views.get(s.sessionId), { ...opts, depth }));
+}
+
+/** Also redraws every view's relation bar: its dots and the Close all sub-sessions button follow the open views. */
 function renderList() {
   const q = $("#search").value.trim().toLowerCase();
   const out = [];
 
-  const parents = new Set([...views.values()].filter((v) => !v.dead).map((v) => v.parentSessionId));
-  for (const v of views.values()) v.stopChildrenBtn.hidden = !parents.has(v.sessionId);
+  for (const v of views.values()) v.renderRelations();
 
   const openOnes = [...views.values()].map((v) => sessions.find((s) => s.sessionId === v.sessionId) ?? { sessionId: v.sessionId, cwd: v.cwd, title: v.title });
   if (openOnes.length) {
     out.push(h("div", { class: "group-title" }, h("span", {}, "Open in app")));
-    for (const s of openOnes) out.push(item(s, views.get(s.sessionId)));
+    out.push(...nestedItems(openOnes));
   }
 
   const model = UiState.listModel(sessions, { pinned: ui.pinned, collapsed: ui.collapsed, query: q });
   if (model.pinned.length) {
-    out.unshift(h("div", { class: "group-title" }, h("span", {}, "📌 Pinned")), ...model.pinned.map((s) => item(s, views.get(s.sessionId), { showProject: true })));
+    out.unshift(h("div", { class: "group-title" }, h("span", {}, "📌 Pinned")), ...nestedItems(model.pinned, { showProject: true }));
   }
   for (const g of model.groups) out.push(...groupBlock(g));
   if (!out.length) out.push(h("div", { class: "group-title" }, h("span", {}, q ? "No matches" : "No sessions yet")));
@@ -2176,6 +2451,25 @@ api.onDelegationCreated(({ sessionId, cwd, configOptions, parentSessionId, title
   if (!v.busy) v.setBusy(false); // (an early message may already have started its turn)
   scheduleRefresh();
 });
+// a relative messaged a closed session: the card goes to the sender's view (which may not exist yet)
+api.onReopenRequest((r) => forView(r.sessionId, (v) => v.reopenCard(r)));
+
+// the sub-session tree: the cached links at once, the broker's fresh ones (and every change) through onLinks
+let freshLinks = false;
+function setLinks(next) {
+  links = Array.isArray(next) ? next : [];
+  tree = SessionTree.index(links);
+  renderList(); // redraws the relation bars too
+}
+api.onLinks((l) => {
+  freshLinks = true;
+  setLinks(l);
+});
+api
+  .getLinks()
+  .then((l) => freshLinks || setLinks(l))
+  .catch((e) => console.warn(`links: ${e.message}`));
+
 api.onDelegationClosed(({ sessionId }) => {
   dropView(sessionId); // safe for a view that was never built (a failed creation)
   renderList();
@@ -2290,13 +2584,5 @@ document.addEventListener("keydown", (e) => {
   }
 });
 setInterval(renderList, 60_000); // keep "x min ago" fresh
-// a delegated child with nothing to do closes by itself (it stays resumable from the list)
-setInterval(() => {
-  const now = Date.now();
-  for (const [id, v] of views) {
-    const state = { parentSessionId: v.parentSessionId, busy: v.busy, inboxLength: v.inbox.length, pendingPermissions: v.openCards.size, active: id === activeId, lastActivity: v.lastActivity };
-    if (UiState.shouldCloseIdle(state, now)) closeView(id);
-  }
-}, 60_000);
 setStatus("Loading sessions…");
 refresh();

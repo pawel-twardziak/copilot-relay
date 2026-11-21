@@ -72,12 +72,18 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberat
   padding: 6px 8px; border-radius: 6px;
 }
 .item:hover { background: var(--panel-2); }
+/* a sub-session under its parent in the same group (--depth set on .item-row) */
+.item { padding-left: calc(8px + var(--depth, 0) * 14px); }
+.item .t .branch { flex: none; color: var(--muted); line-height: 1; margin-right: -2px; }
 .item.active { background: #1f6feb33; border-color: #1f6feb66; }
 .item .t { display: flex; align-items: center; gap: 6px; }
 .item .t b { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 .item .m { color: var(--muted); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); flex: none; }
 .dot.busy { background: var(--warn); animation: pulse 1s infinite alternate; }
+.dot.off { background: none; box-shadow: inset 0 0 0 1px var(--muted); }
+/* its Copilot process exited while it was open (crash/kill): not the same as closed */
+.dot.dead { background: none; box-shadow: inset 0 0 0 1.5px var(--err); }
 @keyframes pulse { to { opacity: .3; } }
 .attention { flex: none; padding: 0 5px; border-radius: 8px; font-size: 11px; font-weight: 600; line-height: 15px; color: var(--bg); background: var(--warn); }
 
@@ -102,6 +108,18 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberat
 .head select { max-width: 120px; }
 .composer .agent-picker { align-self: flex-end; max-width: 150px; }
 .head button { white-space: nowrap; flex-shrink: 0; }
+/* relation bar: Parent / Sub-sessions of this session */
+.relations {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; padding: 4px 14px;
+  border-bottom: 1px solid var(--border); background: var(--panel); font-size: 12px;
+}
+.relations[hidden] { display: none; }
+.relations .rel { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; min-width: 0; }
+.relations .rel-label, .relations .rel-gone { color: var(--muted); }
+.rel-chip { display: inline-flex; align-items: center; gap: 5px; max-width: 220px; padding: 1px 8px; border-radius: 10px; font-size: 12px; }
+.rel-chip .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rel-chip .rel-done { color: var(--ok); }
+.rel-chip .count { flex: none; padding: 0 5px; border-radius: 8px; background: var(--bg); color: var(--muted); font-size: 11px; }
 .log { flex: 1; overflow-y: auto; padding: 16px 18px 24px; display: flex; flex-direction: column; gap: 10px; }
 .msg { max-width: 920px; line-height: 1.5; overflow-wrap: anywhere; }
 .msg.user { align-self: flex-end; background: var(--user); border: 1px solid #2d4466; padding: 8px 12px; border-radius: 10px; white-space: pre-wrap; }
@@ -144,10 +162,12 @@ details.thought > div { white-space: pre-wrap; padding: 4px 0 0 14px; border-lef
 .perm .q { margin-bottom: 8px; }
 .perm .q pre { white-space: pre-wrap; margin: 6px 0 0; color: var(--muted); max-height: 160px; overflow: auto; }
 .perm .opts { display: flex; gap: 6px; flex-wrap: wrap; }
+.perm .opts .err { color: var(--err); flex-basis: 100%; }
 .perm.done { border-color: var(--border); background: none; color: var(--muted); }
 .perm .fields { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin-bottom: 8px; font-size: 12.5px; }
 .perm .fields dt { color: var(--muted); }
 .perm .fields dd { margin: 0; overflow-wrap: anywhere; }
+.perm.reopen .task { max-height: 120px; }
 .perm .task { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; margin-bottom: 8px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
 .composer { position: relative; display: flex; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--border); background: var(--panel); }
 .composer textarea { flex: 1; resize: none; min-height: 40px; max-height: 240px; line-height: 1.4; }
@@ -218,6 +238,14 @@ dialog h3 { font-size: 13px; margin: 16px 0 8px; color: var(--muted); text-trans
 .store .path { user-select: text; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; overflow-wrap: anywhere; }
 .store-actions { display: flex; gap: 8px; }
 .store .hint { margin: 2px 0; }
+/* the delete dialog of a session with sub-sessions: one row per descendant, indented by depth */
+.del-warning { white-space: pre-wrap; }
+.del-list { display: flex; flex-direction: column; gap: 2px; max-height: 45vh; overflow-y: auto; margin-bottom: 14px; padding: 4px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; }
+.del-row { display: flex; align-items: center; gap: 8px; padding: 3px 6px 3px calc(6px + (var(--depth, 1) - 1) * 16px); }
+.del-row .branch { color: var(--muted); }
+.del-row .del-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.del-row .del-meta { color: var(--muted); font-size: 12px; white-space: nowrap; }
+dialog .del-row label { flex-direction: row; align-items: center; gap: 6px; font-size: 12px; white-space: nowrap; }
 
 .cmd-popup { position: absolute; left: 14px; right: 14px; bottom: 100%; max-height: 224px; overflow-y: auto; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.4); z-index: 20; }
 .cmd-popup[hidden] { display: none; }

@@ -8,6 +8,7 @@ import { isReservedName, Registry, sanitizeName } from "./src/registry.mjs";
 import { createMcpHandler } from "./src/mcp.mjs";
 import { Delegation } from "./src/delegation.mjs";
 import { DelegationStore } from "./src/delegation-store.mjs";
+import { linksRoutes } from "./src/links-api.mjs";
 import { NameStore, randomName } from "./src/name-store.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -26,25 +27,44 @@ const registry = new Registry({
 });
 // An unreadable delegation store throws here and stops the broker: never run on (and later overwrite) data we could not read.
 const delegationStore = new DelegationStore();
-const delegation = new Delegation({ registry, store: delegationStore });
+const names = new NameStore(process.env.COPILOT_RELAY_NAMES_FILE || undefined, {
+  keep: (k) => delegationStore.parentOf(k) != null || delegationStore.childrenOf(k).length > 0,
+});
+const delegation = new Delegation({ registry, store: delegationStore, nameOf: (k) => names.get(k)?.name });
+registry.offlineRelative = (f, n, t) => delegation.messageClosed(f, n, t);
+registry.decorate = (k, p) => delegation.decorate(k, p);
 const handleMcp = createMcpHandler(registry, delegation);
-const names = new NameStore(process.env.COPILOT_RELAY_NAMES_FILE || undefined);
+const linkRoutes = linksRoutes({ delegation });
+
+// Tell every app connection the tree changed; peer_updated also fires on inbox enqueue, so bursts collapse to one event.
+let linksTimer = null;
+delegation.onChange(() => {
+  if (linksTimer) return;
+  linksTimer = setTimeout(() => {
+    linksTimer = null;
+    for (const p of registry.list()) {
+      try {
+        registry.get(p.key)?.control?.("links_changed", {});
+      } catch {
+        /* a dead stream must not stop the others */
+      }
+    }
+  }, 200);
+  linksTimer.unref();
+});
 
 // Persist names/roles of terminal sessions (key = Copilot sessionId, stable across --resume).
 const persist = (p) => p.key?.startsWith("cli:") && names.set(p.key, p.name, p.role);
 registry.on("peer_renamed", persist);
 registry.on("peer_updated", persist);
-registry.on("peer_removed", (e) => delegation.childGone(e.key, e.name));
 
 function pickName(key, explicit) {
+  // the returned name is only the wanted base: Registry#upsert makes it permanent and unique (-<suffix>)
   if (explicit) return explicit;
   const stored = names.get(key)?.name;
   if (stored) return stored;
-  for (let i = 0; i < 50; i++) {
-    const n = randomName();
-    if (!registry.getByName(n) && !names.isTakenByOther(n, key)) return n;
-  }
-  return `${randomName()}-${Math.random().toString(36).slice(2, 5)}`;
+  // upsert appends the key-hash suffix, so a random name needs no collision check
+  return randomName();
 }
 
 // ---------- SSE to GUI ----------
@@ -76,17 +96,31 @@ function introPrompt(meta) {
   );
 }
 
-async function createAcpSession({ name, role = "", cwd, model }) {
+/** `stableKey`: the key comes from the name alone (startupSessions), so the session keeps its name across broker restarts. */
+async function createAcpSession({ name, role = "", cwd, model }, { stableKey = false } = {}) {
+  if (!name) throw new HttpError(400, "A name is required.");
   const wanted = sanitizeName(name);
-  if (!name || registry.getByName(wanted)) throw new HttpError(409, `Name "${wanted}" is missing or taken.`);
   if (isReservedName(wanted)) throw new HttpError(409, `Name "${wanted}" is reserved.`);
   const dir = cwd ? path.resolve(DEFAULT_CWD, cwd) : DEFAULT_CWD;
   if (!(await stat(dir).catch(() => null))?.isDirectory()) throw new HttpError(400, `Not a directory: ${dir}`);
 
-  const key = `acp:${wanted}:${Date.now().toString(36)}`;
-  const agent = new AcpAgent({
+  // POST /api/sessions may start several sessions with one name: each gets its own key (and so its own name suffix)
+  const key = stableKey ? `acp:${wanted}` : `acp:${wanted}:${Date.now().toString(36)}`;
+  if (registry.get(key)) throw new HttpError(409, `Session "${registry.get(key).name}" is already running.`);
+  let agent = null;
+  registry.upsert({
+    key,
     name: wanted,
-    role: introPrompt({ name: wanted, role }),
+    kind: "acp",
+    cwd: dir,
+    role,
+    model: model ?? "",
+    push: (m) => (agent ? agent.enqueue(m.prompt) : false),
+  });
+  const own = registry.get(key).name; // upsert made it unique: <wanted>-<suffix>
+  agent = new AcpAgent({
+    name: own,
+    role: introPrompt({ name: own, role }),
     cwd: dir,
     args: model ? ["--model", model] : [],
     // the copilot-relay extension (if installed) sees this and stays passive → no duplicate peer/tools
@@ -95,22 +129,13 @@ async function createAcpSession({ name, role = "", cwd, model }) {
       { type: "http", name: "relay", url: `http://${HOST}:${PORT}/mcp?peer=${encodeURIComponent(key)}`, headers: [] },
     ],
   });
-  registry.upsert({
-    key,
-    name: wanted,
-    kind: "acp",
-    cwd: dir,
-    role,
-    model: model ?? "",
-    push: (m) => agent.enqueue(m.prompt),
-  });
   acpAgents.set(key, agent);
   wireAcp(key, agent);
   try {
     await agent.start();
   } catch (e) {
     closeAcpSession(key);
-    throw new HttpError(502, `Failed to start ${wanted}: ${e.message}`);
+    throw new HttpError(502, `Failed to start ${own}: ${e.message}`);
   }
   return registry.describe(registry.get(key));
 }
@@ -212,6 +237,13 @@ const server = http.createServer(async (req, res) => {
       return await handleMcp(req, res, body);
     }
 
+    const route = linkRoutes[`${req.method} ${url.pathname}`];
+    if (route) {
+      const out = route(req.method === "POST" ? ((await readBody(req)) ?? {}) : {});
+      if (out.json === undefined) return res.writeHead(out.status).end();
+      return json(res, out.status, out.json);
+    }
+
     switch (`${req.method} ${url.pathname}`) {
       case "GET /":
         res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
@@ -276,6 +308,8 @@ const server = http.createServer(async (req, res) => {
         const key = q.get("key");
         if (!key) return json(res, 400, { error: "key required" });
         if (q.get("alias")) registry.setAlias(q.get("alias"), key);
+        // only the desktop app registers with an app:<uuid> alias; it alone can show reopen cards
+        const app = /^app:/.test(q.get("alias") ?? "");
         sse(res);
         const write = (event, data) => !res.destroyed && res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
         // unlike `write`, `control` must throw on a dead stream: Delegation treats only a throw as "not delivered"
@@ -296,14 +330,16 @@ const server = http.createServer(async (req, res) => {
           push: (m) => write("message", m),
           parentKey: parent || delegationStore.parentOf(key) || null,
           control,
+          app,
         });
-        // explicit name (COPILOT_RELAY_NAME) on a fresh start wins even if the peer is still known
+        // explicit name (COPILOT_RELAY_NAME) on a fresh start wins even if the peer is still known; compared in its
+        // final <base>-<suffix> form, so a peer already carrying it is not renamed on every registration
         const explicit = q.get("name");
-        if (explicit && peer.name !== sanitizeName(explicit)) {
+        if (explicit && peer.name !== registry.freeName(explicit, key)) {
           try {
             registry.rename(key, explicit);
           } catch {
-            /* taken by an online session → keep the current name */
+            /* a reserved name → keep the current name */
           }
         }
         persist(peer);
@@ -372,7 +408,7 @@ server.on("error", (e) => {
 server.listen(PORT, HOST, () => {
   console.log(`copilot-relay broker: http://${HOST}:${PORT}  (MCP: /mcp, default cwd: ${DEFAULT_CWD})`);
   for (const s of config.startupSessions ?? []) {
-    createAcpSession(s).then(
+    createAcpSession(s, { stableKey: true }).then(
       () => console.log(`  ✓ ${s.name}`),
       (e) => console.error(`  ✗ ${s.name}: ${e.message}`),
     );

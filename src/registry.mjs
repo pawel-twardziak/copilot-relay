@@ -5,6 +5,7 @@
 //   kind "cli" – a terminal/app session running the copilot-relay extension, delivery = push over SSE
 //                (the extension injects it with session.send)
 //   kind "mcp" – any MCP client (VS Code, other tools); delivery = mailbox (read_inbox / wait_for_message)
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 
 const NAME_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
@@ -17,6 +18,15 @@ const OFFLINE_GRACE_MS = Number(process.env.COPILOT_RELAY_OFFLINE_GRACE_MS ?? 30
 /** First lines of a relay prompt: the sender, and the sender's folder when it has one (relative paths resolve against it). */
 export const relayPrefix = (name, cwd) => `[from ${name}]\n` + (cwd ? `[folder ${JSON.stringify(cwd)}]\n` : "");
 
+/** The prompt a session gets for `text` sent by another session (`name`, folder `cwd`). */
+export const relayPrompt = (name, cwd, text) =>
+  `${relayPrefix(name, cwd)}${text}\n\n` +
+  `(Relay note: ${name} cannot see your chat output — only your user can. ` +
+  `If this message asks you something or expects an answer, reply with the relay send_message tool ` +
+  `(relay_send_message), to: "${name}"; a summary in your chat does not reach them.)`;
+
+export const BUDGET_EXHAUSTED = "Not delivered: the relay message budget is exhausted. Finish your work and report to the user.";
+
 export function sanitizeName(s) {
   const n = String(s ?? "")
     .toLowerCase()
@@ -24,6 +34,29 @@ export function sanitizeName(s) {
     .replace(/^[-_]+|-+$/g, "")
     .slice(0, 32);
   return n || "session";
+}
+
+/** First `len` hex chars of SHA-256 of the peer key: the permanent part of a session's name. */
+export const nameSuffix = (key, len = 6) => createHash("sha256").update(key).digest("hex").slice(0, len);
+
+/**
+ * Final name `<base>-<suffix>` for `key`: sanitised, an own suffix already present is stripped,
+ * reserved bases get "-session", the base is cut so the whole name fits 32 chars.
+ * The suffix is 6 hex chars, 8 when `taken(fullName)` reports a collision.
+ */
+export function uniqueName(wanted, key, taken) {
+  let base = sanitizeName(wanted);
+  for (const len of [8, 6]) {
+    const tail = `-${nameSuffix(key, len)}`;
+    if (base.endsWith(tail) && base.length > tail.length) {
+      base = base.slice(0, -tail.length);
+      break;
+    }
+  }
+  if (RESERVED.has(base)) base = `${base}-session`;
+  const build = (len) => `${base.slice(0, 32 - 1 - len).replace(/[-_]+$/, "") || "session"}-${nameSuffix(key, len)}`;
+  const six = build(6);
+  return taken(six) ? build(8) : six;
 }
 
 export class Registry extends EventEmitter {
@@ -36,6 +69,10 @@ export class Registry extends EventEmitter {
     this.budget = maxAgentMessages;
     this.maxPairMessages = maxPairMessages;
     this.pairBudgets = new Map(); // `${parentKey}|${childKey}` -> remaining messages for a linked pair
+    /** Hook (fromKey, name, text) => string | null: answer for a message to a relative that is not online. */
+    this.offlineRelative = null;
+    /** Hook (toKey, prompt) => string: decorates prompts sent to a linked recipient. */
+    this.decorate = null;
   }
 
   /** True when one of the two peers is the parent of the other. */
@@ -43,24 +80,26 @@ export class Registry extends EventEmitter {
     return this.byKey.get(aKey)?.parentKey === bKey || this.byKey.get(bKey)?.parentKey === aKey;
   }
 
-  #pairKey(aKey, bKey) {
-    return this.byKey.get(aKey)?.parentKey === bKey ? `${bKey}|${aKey}` : `${aKey}|${bKey}`;
+  /** Take one message from the linked pair's budget; false (nothing taken) when it is exhausted. */
+  chargePair(parentKey, childKey) {
+    const pairKey = `${parentKey}|${childKey}`;
+    const remaining = this.pairBudgets.get(pairKey) ?? this.maxPairMessages;
+    if (remaining <= 0) return false;
+    this.pairBudgets.set(pairKey, remaining - 1);
+    return true;
   }
 
-  /** Pick a free name based on `wanted` (adds -2, -3… on collision). */
+  /** Permanent unique name for `key` based on `wanted`: `<base>-<6 hex of the key hash>` (see uniqueName). */
   freeName(wanted, key) {
-    let base = sanitizeName(wanted);
-    if (RESERVED.has(base)) base = `${base}-session`;
-    let name = base;
-    for (let i = 2; this.byName.has(name) && this.byName.get(name).key !== key; i++) name = `${base.slice(0, 28)}-${i}`;
-    return name;
+    return uniqueName(wanted, key, (n) => this.byName.has(n) && this.byName.get(n).key !== key);
   }
 
   /**
    * Add or re-attach a peer. Re-attaching (same key) keeps the name and flushes the inbox.
+   * `app`: the control stream is the desktop app's (it can show reopen cards); a re-attach that leaves it out keeps it.
    * @returns peer
    */
-  upsert({ key, name, kind, cwd = "", role = "", model = "", push = null, parentKey = null, control = null }) {
+  upsert({ key, name, kind, cwd = "", role = "", model = "", push = null, parentKey = null, control = null, app }) {
     let peer = this.byKey.get(key);
     if (peer) {
       clearTimeout(peer.offlineTimer);
@@ -68,13 +107,14 @@ export class Registry extends EventEmitter {
       peer.push = push ?? peer.push;
       peer.parentKey = parentKey ?? peer.parentKey;
       peer.control = control ?? peer.control;
+      peer.app = app ?? peer.app;
       Object.assign(peer, { cwd: cwd || peer.cwd });
       this.emit("peer_updated", this.describe(peer));
       this.#flush(peer);
       return peer;
     }
     if (name && !NAME_RE.test(name)) name = sanitizeName(name);
-    peer = { key, name: this.freeName(name, key), kind, cwd, role, model, push, parentKey, control, inbox: [], waiters: [], online: true };
+    peer = { key, name: this.freeName(name, key), kind, cwd, role, model, push, parentKey, control, app: app === true, inbox: [], waiters: [], online: true };
     this.byKey.set(key, peer);
     this.byName.set(peer.name, peer);
     this.emit("peer_added", this.describe(peer));
@@ -86,11 +126,9 @@ export class Registry extends EventEmitter {
     if (!peer) throw new Error("unknown peer");
     const wantedClean = sanitizeName(wanted);
     if (RESERVED.has(wantedClean)) throw new Error(`Name "${wantedClean}" is reserved.`);
-    if (this.byName.has(wantedClean) && this.byName.get(wantedClean) !== peer)
-      throw new Error(`Name "${wantedClean}" is taken.`);
     const old = peer.name;
     this.byName.delete(old);
-    peer.name = wantedClean;
+    peer.name = this.freeName(wantedClean, key);
     this.byName.set(peer.name, peer);
     this.emit("peer_renamed", { old, ...this.describe(peer) });
     return peer.name;
@@ -173,28 +211,29 @@ export class Registry extends EventEmitter {
     const from = this.byKey.get(fromKey);
     if (!from) return "You are not registered with the relay broker.";
     const to = this.byName.get(String(toName).trim().toLowerCase());
-    if (!to) return `No session "${toName}". Call list_sessions to see who is online.`;
+    if (!to?.online) {
+      // a closed parent/child is queued for the user's reopen approval; others keep today's answers
+      const answer = this.offlineRelative?.(fromKey, toName, text);
+      if (answer != null) return answer;
+      if (!to) return `No session "${toName}". Call list_sessions to see who is online.`;
+    }
     if (to === from) return "You cannot message yourself.";
     const linked = this.isLinked(from.key, to.key);
-    const pairKey = linked ? this.#pairKey(from.key, to.key) : null;
-    const remaining = linked ? (this.pairBudgets.get(pairKey) ?? this.maxPairMessages) : this.budget;
-    if (remaining <= 0) {
+    const [parentKey, childKey] = from.parentKey === to.key ? [to.key, from.key] : [from.key, to.key];
+    if (linked ? !this.chargePair(parentKey, childKey) : this.budget <= 0) {
       this.emit("system", { text: `Blocked ${from.name} → ${to.name}: message budget exhausted (waiting for a human prompt).` });
-      return "Not delivered: the relay message budget is exhausted. Finish your work and report to the user.";
+      return BUDGET_EXHAUSTED;
     }
-    if (linked) this.pairBudgets.set(pairKey, remaining - 1);
-    else this.budget--;
-    this.emit("message", { from: from.name, to: to.name, fromKey: from.key, toKey: to.key, text, budget: linked ? remaining - 1 : this.budget });
+    if (!linked) this.budget--;
+    const budget = linked ? this.pairBudgets.get(`${parentKey}|${childKey}`) : this.budget;
+    this.emit("message", { from: from.name, to: to.name, fromKey: from.key, toKey: to.key, text, budget });
+    const prompt = relayPrompt(from.name, from.cwd, text);
     this.#deliver(to, {
       from: from.name,
       ...(from.cwd ? { fromCwd: from.cwd } : {}),
       human: false,
       text,
-      prompt:
-        `${relayPrefix(from.name, from.cwd)}${text}\n\n` +
-        `(Relay note: ${from.name} cannot see your chat output — only your user can. ` +
-        `If this message asks you something or expects an answer, reply with the relay send_message tool ` +
-        `(relay_send_message), to: "${from.name}"; a summary in your chat does not reach them.)`,
+      prompt: linked && this.decorate ? this.decorate(to.key, prompt) : prompt,
     });
     const how = to.kind === "mcp" ? "placed in their inbox" : to.online ? "delivered" : "queued (recipient briefly offline)";
     return `Message to ${to.name} ${how}. Their reply will arrive as a new message — do not wait for it.`;
