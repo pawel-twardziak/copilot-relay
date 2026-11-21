@@ -367,6 +367,16 @@ class SessionView {
       e.preventDefault();
       e.stopImmediatePropagation();
     });
+    // Up in the first line takes your queued messages back into the box (relay messages stay queued)
+    this.input.addEventListener("keydown", (e) => {
+      if (e.key !== "ArrowUp" || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey || e.isComposing || this.edit) return;
+      const { selectionStart: s, selectionEnd: end, value } = this.input;
+      if (s !== end || value.slice(0, s).includes("\n")) return; // a selection, or not the first line: the caret moves
+      if (this.takeBackQueued()) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      }
+    });
     this.input.addEventListener("keyup", (e) => {
       if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) this.updatePopup();
     });
@@ -1033,6 +1043,21 @@ class SessionView {
     this.updatePopup();
     this.input.focus();
     this.renderQueue();
+  }
+
+  /** Your queued messages back into the box, in front of what is typed there; false when none is queued. */
+  takeBackQueued() {
+    const res = MessageQueue.takeBack(this.queue, this.input.value);
+    if (!res) return false;
+    this.queue.splice(0, this.queue.length, ...res.rest);
+    if (!this.queue.length) this.paused = false;
+    if (this.recallEl) this.setRecalled(null); // the recalled text is now part of the draft
+    this.input.value = res.text;
+    this.input.setSelectionRange(res.caret, res.caret);
+    this.autosize();
+    this.updatePopup();
+    this.renderQueue();
+    return true;
   }
 
   resumeQueue() {
