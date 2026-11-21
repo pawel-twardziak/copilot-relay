@@ -231,6 +231,17 @@ let links = []; // the broker's sub-session links (api.getLinks / api.onLinks), 
 let tree = SessionTree.index(links); // parent/child index over `links` (bare session ids)
 const views = new Map(); // sessionId -> SessionView
 let activeId = null;
+let queueMidTurn = false; // setting: deliver queued messages while a turn runs
+/** Text of a replayed user message as the user sees it: a mid-turn delivery comes back wrapped. */
+const shownUserText = (raw) => MessageQueue.unwrap(raw) ?? raw;
+let queueItemSeq = 0; // ids of queued items (MessageQueue item shape)
+api
+  .getSettings()
+  .then((s) => {
+    queueMidTurn = s.queueMidTurn === true;
+    for (const v of views.values()) v.settingChanged(); // views opened before the settings arrived
+  })
+  .catch(() => {});
 
 // ---------------------------------------------------------------------------
 // session view
@@ -258,7 +269,11 @@ class SessionView {
     this.run = null; // current streamed block { type, el, text }
     this.tools = new Map();
     this.renderQueued = false;
-    this.inbox = []; // relay messages waiting for the session to be idle
+    this.queue = []; // MessageQueue items (relay messages, your prompts sent while busy) waiting for delivery
+    this.paused = false; // Stop with items queued: nothing is delivered automatically until resumed
+    // prompts of this view pending: a mid-turn delivery overlaps the running one, one turn for the app (its tools,
+    // switch point, interrupted prompts and your Stop: MessageQueue.createChain)
+    this.chain = MessageQueue.createChain();
     this.relayName = null;
     this.turn = 0; // user/relay messages so far = the turn ordinal of the latest one (see append)
     this.turnText = null; // getter for the latest user message's text
@@ -304,6 +319,7 @@ class SessionView {
     this.filesBtn = h("button", { title: "Files opened from this conversation", hidden: true, onclick: () => filePreview.show(this) });
     this.cmdPopup = h("div", { class: "cmd-popup", role: "listbox", hidden: true, onmousedown: (e) => e.preventDefault() });
     this.editText = h("span");
+    this.queueEl = h("div", { class: "queue-strip", hidden: true });
     this.editBar = h("div", { class: "edit-bar", hidden: true }, this.editText, h("button", { onclick: () => this.cancelEdit() }, "Cancel"));
 
     this.el = h(
@@ -325,6 +341,7 @@ class SessionView {
       this.relationsEl,
       this.log,
       this.editBar,
+      this.queueEl,
       h("div", { class: "composer" }, this.cmdPopup, this.input, this.agentPicker, h("div", { class: "btns" }, this.sendBtn, this.stopBtn)),
       this.statusEl,
     );
@@ -934,25 +951,114 @@ class SessionView {
     return this.append(h("div", { class: "msg error" }, text));
   }
 
+  /** A setting changed: re-apply the busy state so the Send button and status line follow it. */
+  settingChanged() {
+    this.setBusy(this.busy);
+  }
+
+  /** A prompt of this view is pending (the user_message_chunk of a live prompt is not shown again). */
+  get prompting() {
+    return this.chain.active();
+  }
+
   setBusy(b) {
     this.busy = b;
     const off = b || this.dead || this.deleting; // this.deleting: the whole session is being deleted
     this.el.classList.toggle("busy", off); // disables the fork/delete actions
-    this.sendBtn.disabled = off;
+    this.sendBtn.disabled = this.dead || this.deleting || (b && !queueMidTurn); // with the queue on, Send queues while busy
     this.stopBtn.disabled = !b || this.dead || this.deleting;
     this.input.disabled = this.dead || this.deleting;
     this.agentPicker.disabled = off;
-    this.statusEl.textContent = this.deleting
-      ? "Deleting session…"
-      : b
-        ? "Working…"
-        : this.dead
-          ? "Copilot process ended"
-          : this.inbox.length
-            ? `${this.inbox.length} relay message(s) waiting`
-            : "";
+    this.showQueueStatus();
     renderList();
     if (!b) queueMicrotask(() => this.pump());
+  }
+
+  showQueueStatus() {
+    const { busy, dead, deleting, paused } = this;
+    this.statusEl.textContent = MessageQueue.statusText({ busy, dead, deleting, queued: this.queue.length, paused });
+  }
+
+  /** Draws the queue strip above the input; called after every change of the queue. */
+  renderQueue() {
+    const q = this.queue;
+    this.queueEl.hidden = q.length === 0;
+    this.queueEl.replaceChildren();
+    if (q.length) {
+      const head = h("div", { class: "queue-head" }, h("span", {}, `Queue (${q.length})`));
+      if (this.paused) {
+        head.append(h("span", { class: "queue-paused" }, "Paused"), h("button", { title: "Resume delivering the queued messages", onclick: () => this.resumeQueue() }, "▶ resume"));
+      }
+      this.queueEl.append(head);
+      for (const item of q) {
+        const text = h("span", { class: "queue-text", title: item.text }, item.text);
+        if (item.kind === "app") {
+          text.classList.add("editable");
+          text.onclick = () => this.editQueued(item);
+        }
+        this.queueEl.append(
+          h("div", { class: "queue-row" }, h("span", { class: "queue-from" }, item.kind === "app" ? "you:" : `from ${item.from}:`), text, h("button", { title: "Remove from the queue", onclick: () => this.removeQueued(item) }, "✕")),
+        );
+      }
+    }
+    this.showQueueStatus();
+  }
+
+  removeQueued(item) {
+    const i = this.queue.indexOf(item);
+    if (i < 0) return;
+    this.queue.splice(i, 1);
+    if (!this.queue.length) this.paused = false;
+    if (item.kind === "relay") {
+      // the broker must not deliver it again (a message without an id, such as a delegated task, has nothing to ack)
+      if (item.deliveryId) api.relayAck(this.sessionId, item.deliveryId).catch(() => {});
+      this.system(`Removed a queued message from ${item.from}.`);
+    }
+    this.renderQueue();
+    if (!this.busy) this.pump();
+  }
+
+  /** Move a queued app message back into the (empty) input box to change it. */
+  editQueued(item) {
+    if (this.input.value.trim()) {
+      this.statusEl.textContent = "Clear the message box to edit a queued message.";
+      return;
+    }
+    const i = this.queue.indexOf(item);
+    if (i < 0) return;
+    this.queue.splice(i, 1);
+    if (!this.queue.length) this.paused = false;
+    this.input.value = item.text;
+    this.autosize();
+    this.updatePopup();
+    this.input.focus();
+    this.renderQueue();
+  }
+
+  resumeQueue() {
+    this.paused = false;
+    this.renderQueue();
+    if (!this.busy) this.pump();
+  }
+
+  /** Queue an item (see MessageQueue); it is delivered at the next tool boundary (setting on) or when the turn ends. */
+  enqueue(item) {
+    this.queue.push({ id: ++queueItemSeq, ...item });
+    this.renderQueue();
+    if (!this.busy) this.pump();
+    this.showQueueStatus(); // also when idle and held (paused, edit, holdInbox): "Queue paused (N)" / "N waiting"
+  }
+
+  /** The bubble, relay source and broker acknowledgement for a queued item about to become a prompt. */
+  itemPrompt(item) {
+    if (item.kind === "app") return { el: this.userBubble(item.text), source: "app", delivery: null };
+    // the broker forgets it once its prompt has really started (a failed ack only means it is delivered again later)
+    const delivery = item.deliveryId ? UiState.deliveryAck(item.deliveryId, this.seenDeliveries, (id) => api.relayAck(this.sessionId, id).catch(() => {})) : null;
+    const el = bubble("relay", item.text, item.from);
+    this.mentionThumbs(el, item.text);
+    this.linkPaths(el.querySelector(".body"), item.fromCwd ?? null);
+    el._human = item.human; // typed by you in the relay GUI: yours for Left Shift+Up/Down
+    return { el, source: item.human ? "human" : "relay", delivery };
   }
 
   // --- context window and usage
@@ -1015,24 +1121,45 @@ class SessionView {
       this.pendingNotes.push(m.prompt);
       return;
     }
-    this.inbox.push(m);
-    if (!this.busy) this.pump();
-    else this.statusEl.textContent = `Working… (${this.inbox.length} relay message(s) waiting)`;
-  }
-
-  pump() {
-    if (this.busy || this.dead || this.deleting || this.historyOp || this.edit || this.holdInbox || !this.inbox.length) return;
-    const m = this.inbox.shift();
-    // the broker forgets it once its prompt has really started (a failed ack only means it is delivered again later)
-    const delivery = m.deliveryId ? UiState.deliveryAck(m.deliveryId, this.seenDeliveries, (id) => api.relayAck(this.sessionId, id).catch(() => {})) : null;
     // set by the broker for messages typed by a person in the relay GUI; a broker older than this app doesn't send it,
     // then the reserved-for-people name decides. It only re-opens the relay budget: relay text never attaches files.
     const human = m.human ?? m.from === "user";
-    const el = bubble("relay", m.text, m.from);
-    this.mentionThumbs(el, m.text);
-    this.linkPaths(el.querySelector(".body"), m.fromCwd ?? null);
-    el._human = human; // typed by you in the relay GUI: yours for Left Shift+Up/Down
-    this.runPrompt(m.prompt, el, human ? "human" : "relay", delivery);
+    this.enqueue({ kind: "relay", text: m.text, prompt: m.prompt, from: m.from, human, fromCwd: m.fromCwd ?? null, deliveryId: m.deliveryId, command: false });
+  }
+
+  /** End of a turn: the head item starts a new one (without the mid-turn wrapper). */
+  pump() {
+    const { busy, paused, edit, historyOp, holdInbox, deleting, dead } = this;
+    if (!MessageQueue.canDeliverIdle({ busy, paused, edit, historyOp, holdInbox, deleting, dead, queued: this.queue.length })) return;
+    const item = this.queue.shift();
+    this.renderQueue();
+    const { el, source, delivery } = this.itemPrompt(item);
+    this.runPrompt(item.prompt, el, source, delivery);
+  }
+
+  /** A tool boundary with the queue head eligible: send it now, as a second prompt that interrupts the running one. */
+  deliverMidTurn() {
+    const item = this.queue.shift();
+    this.renderQueue();
+    const { el, source, delivery } = this.itemPrompt(item);
+    this.runPrompt(item.prompt, el, source, delivery, { midTurn: true });
+  }
+
+  /** Copilot's abort marker after a mid-turn send: the delivered prompt has taken over the turn.
+   *  dropped: the tools in flight then (killed by the interruption, they stay "pending" forever). */
+  switchPoint({ record, dropped: ids }) {
+    const { delivery } = record;
+    const dropped = new Set(ids);
+    for (const toolCallId of dropped) this.toolCall({ toolCallId, status: "interrupted" });
+    // its permission question is gone with it (a card without a tool id was asked before the switch too); main still
+    // holds the request open, so it is answered as cancelled
+    for (const card of [...this.openCards]) {
+      if (!card._dismiss || (card._toolCallId != null && !dropped.has(card._toolCallId))) continue;
+      api.answerPermission(this.sessionId, card._reqId, null).catch(() => {});
+      card._dismiss("→ interrupted");
+    }
+    delivery?.returned(); // its prompt has really started
+    this.delivery = delivery;
   }
 
   // --- streaming blocks
@@ -1042,13 +1169,16 @@ class SessionView {
       this.flush();
       const body = h("div", { class: type === "agent" ? "md" : "body" });
       const run = { type, body, text: "", messageId };
-      const shown = () => FileLinks.parseRelayHeader(run.text).display; // a replayed relay message hides its [folder "..."] line
+      const shown = () => FileLinks.parseRelayHeader(shownUserText(run.text)).display; // a replayed relay message hides its [folder "..."] line
       let el;
       if (type === "thought") el = h("details", { class: "thought" }, h("summary", {}, "Thinking"), body);
       else {
         el = h("div", { class: `msg ${type}` }, body, copyBtn(() => shown()));
         el._md = () => (!shown().trim() ? null : type === "user" ? `**You:**\n\n${shown()}` : shown());
-        if (type === "user") el._matchText = () => run.text; // replayed text arrives after append
+        if (type === "user") {
+          el._matchText = () => run.text; // replayed text arrives after append; what was sent (wrapped if delivered mid-turn)
+          el._ownText = () => shownUserText(run.text);
+        }
       }
       run.el = el;
       this.append(el);
@@ -1080,7 +1210,7 @@ class SessionView {
     else if (r?.type === "user") this.mentionThumbs(r.el, r.text);
     if (r?.type === "agent") this.linkPaths(r.body, this.cwd);
     else if (r?.type === "user") {
-      const head = FileLinks.parseRelayHeader(r.text);
+      const head = FileLinks.parseRelayHeader(shownUserText(r.text));
       this.linkPaths(r.body, head.from ? head.folder : this.cwd);
     }
     this.run = null;
@@ -1096,18 +1226,24 @@ class SessionView {
         // our own prompt is already shown; only replayed history (session/load) is rendered
         if (!this.prompting) this.stream("user", text);
         break;
-      case "agent_message_chunk":
-        this.stream("agent", text, u.messageId);
+      case "agent_message_chunk": {
+        // the switch point of a mid-turn send is not shown (a Stop of yours still shows whatever Copilot sends)
+        const sw = this.chain.marker(text);
+        if (sw) this.switchPoint(sw);
+        else this.stream("agent", text, u.messageId);
         break;
+      }
       case "agent_thought_chunk":
         this.stream("thought", text, u.messageId);
         break;
       case "tool_call":
         this.flush();
         this.toolCall(u);
+        this.toolBoundary(u);
         break;
       case "tool_call_update":
         this.toolCall(u);
+        this.toolBoundary(u);
         break;
       case "plan":
         this.flush();
@@ -1130,6 +1266,17 @@ class SessionView {
     }
   }
 
+  /** Track the chain's tools; when the last one in flight finishes, the queue head may go out mid-turn. */
+  toolBoundary(u) {
+    if (!this.chain.toolUpdate(u)) return;
+    // one mid-turn send at a time: until its switch point the tools of the turn are not known to be settled; after
+    // your Stop a tool may still report completed/failed: what is queued then waits for the end of the turn
+    if (this.chain.midTurnBlocked()) return;
+    const { prompting, paused, edit, historyOp, holdInbox, deleting, dead } = this;
+    const s = { enabled: queueMidTurn, paused, prompting, edit, historyOp, holdInbox, deleting, dead, inFlight: this.chain.inFlight(), head: this.queue[0] };
+    if (MessageQueue.canDeliverMidTurn(s)) this.deliverMidTurn();
+  }
+
   toolCall(u) {
     let t = this.tools.get(u.toolCallId);
     if (!t) {
@@ -1147,7 +1294,7 @@ class SessionView {
     const d = t.data;
     const status = d.status ?? "pending";
     t.st.className = `st ${status}`;
-    t.st.textContent = { completed: "✓", failed: "✗", in_progress: "●", pending: "○" }[status] ?? "●";
+    t.st.textContent = { completed: "✓", failed: "✗", in_progress: "●", pending: "○", interrupted: "⊘" }[status] ?? "●";
     t.kind.textContent = d.kind && d.kind !== "other" ? d.kind : "";
     t.name.textContent = d.title ?? "tool";
     t.body.replaceChildren(...this.toolBody(d));
@@ -1193,11 +1340,13 @@ class SessionView {
       h("div", { class: "q" }, h("b", {}, "Permission needed: "), toolCall?.title ?? "tool call", permissionDetail(toolCall?.rawInput)),
     );
     // main has answered this one as cancelled (or the process is gone): nothing is left to decide
-    card._dismiss = () => {
+    card._dismiss = (label = "→ turn ended") => {
       card.classList.add("done");
-      opts.replaceChildren(h("span", {}, "→ turn ended"));
+      opts.replaceChildren(h("span", {}, label));
       this.closeCard(card);
     };
+    card._toolCallId = toolCall?.toolCallId ?? null; // a mid-turn switch dismisses the cards of the tools it killed
+    card._reqId = reqId; // ...and answers their requests
     const opts = h(
       "div",
       { class: "opts" },
@@ -1475,19 +1624,23 @@ class SessionView {
     const text = this.input.value.trim();
     if (!text || this.dead || this.deleting) return;
     const cmd = this.agentAvailable() ? SlashCommands.parseAgentCommand(text) : null;
+    const rename = SlashCommands.parseRenameCommand(text);
     if (this.busy) {
-      if (cmd) this.statusEl.textContent = "Wait until Copilot finishes this turn.";
+      // agent changes, /rename and an edit are not queued; with the queue setting off nothing is
+      if (cmd || rename || this.edit || this.historyOp || !queueMidTurn) {
+        if (cmd || rename) this.statusEl.textContent = "Wait until Copilot finishes this turn.";
+        // Send stays enabled with the queue on: say why nothing happened (a delete or replace rebuilds the view)
+        else if (this.historyOp && queueMidTurn) {
+          this.statusEl.textContent = this.historyOp.description === "edit" ? "Wait until the message has been replaced." : "Wait until the fork or delete of a message has finished.";
+        }
+        return;
+      }
+      this.takeInput();
+      this.enqueue({ kind: "app", text, prompt: text, command: SlashCommands.isCommandPrompt(text) });
       return;
     }
     if (this.edit) return this.sendEdit(text);
-    // sending a recalled message as it was brings back what you were typing before recalling it
-    const recalled = this.recallEl;
-    const typed = this.draft;
-    this.input.value = recalled ? typed : "";
-    this.setRecalled(null);
-    this.draft = "";
-    this.autosize();
-    this.updatePopup(); // the restored draft may be a "/command"
+    const { recalled, typed } = this.takeInput();
     if (cmd) {
       if (cmd.arg === "") {
         this.agentPicker.focus();
@@ -1509,12 +1662,23 @@ class SessionView {
       }
       return;
     }
-    const rename = SlashCommands.parseRenameCommand(text);
     if (rename) {
       this.applyRename(rename.name);
       return;
     }
     this.runPrompt(text, this.userBubble(text), "app");
+  }
+
+  /** Clear the box after a send: sending a recalled message as it was brings back what you were typing before. */
+  takeInput() {
+    const recalled = this.recallEl;
+    const typed = this.draft;
+    this.input.value = recalled ? typed : "";
+    this.setRecalled(null);
+    this.draft = "";
+    this.autosize();
+    this.updatePopup(); // the restored draft may be a "/command"
+    return { recalled, typed };
   }
 
   /** The bubble of a prompt typed in the app: image thumbnails for its @mentions, clickable paths. */
@@ -1535,7 +1699,7 @@ class SessionView {
     }
     if (this.historyOp) return;
     const { ordinal, matchText, ownText, draft } = this.edit;
-    const prefix = EditMessage.notesPrefix(matchText, ownText);
+    const prefix = EditMessage.notesPrefix(MessageQueue.unwrap(matchText) ?? matchText, ownText);
     const { sessionId } = this;
     this.historyOp = Symbol("edit"); // the view is replaced below, so the flag never needs releasing
     this.setBusy(true);
@@ -1576,8 +1740,12 @@ class SessionView {
     await run;
   }
 
-  /** @param {"app"|"human"|"relay"} source who wrote the prompt (decides the relay budget and image attachments) */
-  async runPrompt(text, bubble, source, delivery = null) {
+  /**
+   * @param {"app"|"human"|"relay"} source who wrote the prompt (decides the relay budget and image attachments)
+   * @param {{ midTurn?: boolean }} options midTurn: a queued item sent while a prompt of this view runs; it goes out
+   *   wrapped (MessageQueue.wrap), interrupts the running prompt and continues its turn (one chain = one turn)
+   */
+  async runPrompt(text, bubble, source, delivery = null, { midTurn = false } = {}) {
     this.flush();
     // CLI commands (/context ...) are not recorded in events.jsonl; compare the recorded count to tell
     const isCmd = SlashCommands.isCommandPrompt(text);
@@ -1586,6 +1754,9 @@ class SessionView {
     if (this.pendingNotes.length && !isCmd) {
       sent = this.pendingNotes.join("\n\n") + "\n\n" + text;
       this.pendingNotes = [];
+    }
+    if (midTurn) sent = MessageQueue.wrap(sent);
+    if (sent !== text) {
       // history records what was sent, so fork/delete match that; the bubble and Left Shift+Up keep what you wrote.
       // Before append: markTurn hands _matchText on to the turn's reply.
       bubble._ownText = bubble._matchText;
@@ -1593,38 +1764,58 @@ class SessionView {
     }
     this.append(bubble);
     this.toBottom();
+    // a mid-turn prompt owns the turn's updates (and is acknowledged) only from its switch point on (the record
+    // keeps its delivery until then)
+    const record = this.chain.start({ midTurn, delivery });
     this.setBusy(true);
-    this.prompting = true;
     const before = isCmd ? await api.userMessages(this.sessionId).catch(() => null) : null;
-    this.delivery = delivery;
+    if (!midTurn) this.delivery = delivery;
+    let end = null;
     try {
       const stop = await api.prompt(this.sessionId, sent, source);
-      delivery?.returned();
+      delivery?.returned(); // (a mid-turn one whose marker never came is acknowledged here)
       this.flush();
-      if (stop === "cancelled") this.system("Stopped.");
-      else if (stop && stop !== "end_turn") this.system(`Turn ended: ${stop}`);
+      // a prompt interrupted by a queued one answers "cancelled": that is not a Stop of yours
+      end = this.chain.returned(record, stop);
+      if (end.showStopped) this.system("Stopped.");
+      else if (stop && stop !== "cancelled" && stop !== "end_turn") this.system(`Turn ended: ${stop}`);
     } catch (e) {
-      delivery?.failed();
+      delivery?.failed(); // (nothing once acknowledged at the switch point)
+      end ??= this.chain.failed(record); // before its switch point: the prompts it was to interrupt run on
       this.error(e.message);
     } finally {
-      this.delivery = null;
-      this.prompting = false;
-      this.dismissPermissions();
-      // the view was closed or its session deleted meanwhile: nothing to update (a refresh would also replace the
-      // delete's warning in the status line)
-      if (views.get(this.sessionId) === this) {
-        if (before !== null) {
-          const after = await api.userMessages(this.sessionId).catch(() => null);
-          if (after === before) this.dropTurn(bubble);
-        }
-        if (!this.dead) this.setBusy(false);
-        if (!this.deleting) scheduleRefresh(); // a delete refreshes the list itself
-      }
+      if (end?.ended) await this.chainEnded(before, bubble, end.dropped);
     }
   }
 
+  /** The last prompt of the chain answered: the turn is over.
+   *  dropped: tools in flight when a queued prompt interrupted them, without a switch point to tell. */
+  async chainEnded(before, bubble, dropped) {
+    this.delivery = null;
+    for (const toolCallId of dropped) this.toolCall({ toolCallId, status: "interrupted" });
+    this.dismissPermissions();
+    // the view was closed or its session deleted meanwhile: nothing to update (a refresh would also replace the
+    // delete's warning in the status line)
+    if (views.get(this.sessionId) !== this) return;
+    if (before !== null) {
+      const after = await api.userMessages(this.sessionId).catch(() => null);
+      if (after === before) this.dropTurn(bubble);
+    }
+    if (this.chain.active()) return; // a new chain started during the await: it ends the turn itself
+    if (!this.dead) this.setBusy(false);
+    if (!this.deleting) scheduleRefresh(); // a delete refreshes the list itself
+  }
+
   cancel() {
-    if (this.busy) api.cancel(this.sessionId).catch((e) => this.error(e.message));
+    if (!this.busy) return;
+    this.chain.stop(); // no mid-turn send while Copilot winds the chain down
+    // Stop with items queued pauses the queue (setting on): nothing is delivered until you resume it
+    if (this.prompting && MessageQueue.pauseOnStop({ enabled: queueMidTurn, queued: this.queue.length })) {
+      this.paused = true;
+      this.renderQueue();
+      this.showQueueStatus();
+    }
+    api.cancel(this.sessionId).catch((e) => this.error(e.message));
   }
 
   markDead({ code, signal, stderr }) {
@@ -1662,7 +1853,7 @@ function renderRun(r, final = false) {
     decoratePres(r.body);
     if (final) linkify(r.body, { codeOnly: true }); // marked already links plain URLs in Markdown text
   } else {
-    r.body.textContent = r.type === "user" ? FileLinks.parseRelayHeader(r.text).display : r.text;
+    r.body.textContent = r.type === "user" ? FileLinks.parseRelayHeader(shownUserText(r.text)).display : r.text;
     if (final && r.type === "user") linkify(r.body); // a prompt replayed from the history (live ones are bubbles)
   }
   if (r.type === "user") {
@@ -1693,9 +1884,16 @@ async function openSession(s, { activate: show = true } = {}) {
   if (existing) {
     existing.el.remove();
     views.delete(s.sessionId);
+    // resuming a dead view: what was waiting in it moves to the new one (unpaused: a new view), with the delivery
+    // ids it took, so the broker's redelivery of a queued report is not taken twice
+    s = { ...s, seenDeliveries: s.seenDeliveries ?? existing.seenDeliveries, pendingNotes: s.pendingNotes ?? existing.pendingNotes };
   }
   const v = new SessionView(s);
   views.set(s.sessionId, v);
+  if (existing?.queue.length) {
+    v.queue.push(...existing.queue); // delivered when the resumed session is idle
+    v.renderQueue();
+  }
   v.setBusy(true); // before flushEarly: an early relay message must wait until the session is open
   flushEarly(v);
   if (show) activate(s.sessionId);
@@ -1747,10 +1945,11 @@ function dropView(id) {
   if (activeId === id) activate([...views.keys()].pop() ?? null, { keepSchedules: true });
 }
 
-/** Rebuild a closed session's view from its files (after its history changed or a delete failed); relay messages
- *  that were waiting in the old view move to the new one. */
+/** Rebuild a closed session's view from its files (after its history changed or a delete failed); queued items
+ *  that were waiting in the old view move to the new one, paused if they were (only ▶ or emptying the queue ends a
+ *  pause). */
 async function reopenView(old, error, { holdInbox = false, typed } = {}) {
-  const { sessionId, cwd, title, inbox, parentSessionId, seenDeliveries, pendingNotes } = old;
+  const { sessionId, cwd, title, queue, paused, parentSessionId, seenDeliveries, pendingNotes } = old;
   typed ??= old.recallEl ? old.draft : old.input.value; // what you typed (not a recalled earlier message)
   if (views.get(sessionId) === old) views.delete(sessionId);
   old.el.remove();
@@ -1759,13 +1958,16 @@ async function reopenView(old, error, { holdInbox = false, typed } = {}) {
   const v = views.get(sessionId);
   if (!v) return;
   if (error) v.error(error);
-  if (v.dead && inbox.length) v.error(`${inbox.length} relay message(s) waiting for this session were discarded.`);
+  if (v.dead && queue.length) v.error(`${queue.length} queued message(s) waiting for this session were discarded.`);
   if (typed && !v.input.value) {
     v.input.value = typed;
     v.autosize();
   }
-  if (inbox.length && !v.dead) {
-    v.inbox.push(...inbox);
+  if (queue.length && !v.dead) {
+    v.queue.push(...queue);
+    v.paused = paused && v.queue.length > 0;
+    v.renderQueue();
+    v.showQueueStatus();
     v.pump();
   }
   return v;
@@ -1774,12 +1976,25 @@ async function reopenView(old, error, { holdInbox = false, typed } = {}) {
 /** Open sub-sessions of id (all generations), deepest first; one being deleted is left to its delete. */
 const openDescendants = (id) => SessionTree.closeOrder(tree, id, (c) => views.has(c) && !views.get(c).deleting && !deleting.has(c));
 
-/** Close these views in this order after one question for the busy ones; nothing is closed if you cancel.
- *  question: the text for a single busy session instead of the count. */
+/** The question before closing these views (busy ones, and idle or dead ones with queued messages of yours that would
+ *  be lost), or null when there is nothing to ask. question: the text for a single busy session instead of the count. */
+function closeQuestion(ids, question) {
+  const list = ids.map((id) => views.get(id)).filter(Boolean);
+  const isBusy = (v) => v.busy && !v.dead;
+  const busy = list.filter(isBusy).length;
+  const queued = list.filter((v) => !isBusy(v) && v.queue.some((item) => item.kind === "app")).length;
+  if (!busy && !queued) return null;
+  if (!queued) return question ?? (busy === 1 ? "1 session is still working. Stop it and close?" : `${busy} sessions are still working. Stop them and close?`);
+  if (busy) return `${busy} session(s) are still working and ${queued} more have queued messages of yours that were not sent. Stop and close them?`;
+  const unsent = ids.length === 1 ? "This session has queued messages of yours that were not sent." : `${queued} session(s) have queued messages of yours that were not sent.`;
+  return `${unsent} Close and discard them?`;
+}
+
+/** Close these views in this order after one question for the busy ones (and those with queued messages of yours);
+ *  nothing is closed if you cancel. question: the text for a single busy session instead of the count. */
 async function closeViews(ids, question) {
-  const busy = ids.filter((id) => views.get(id)?.busy && !views.get(id).dead).length;
-  question ??= busy === 1 ? "1 session is still working. Stop it and close?" : `${busy} sessions are still working. Stop them and close?`;
-  if (busy && !confirm(question)) return;
+  const ask = closeQuestion(ids, question);
+  if (ask && !confirm(ask)) return;
   for (const id of ids) {
     const v = views.get(id);
     if (!v || v.deleting || deleting.has(id)) continue; // a running delete closes it, or restores it if the delete fails
@@ -2025,18 +2240,18 @@ async function deleteOne(s) {
     }
     if (res.stuck) {
       // closed, but its Copilot process would not exit: main refuses to open it again until that process is gone
-      const lost = v && views.get(s.sessionId) === v ? v.inbox.length : 0;
+      const lost = v && views.get(s.sessionId) === v ? v.queue.length : 0;
       dropView(s.sessionId);
-      return { deleted: false, text: `Could not delete the session: ${res.stuck}${lost ? ` (${lost} waiting relay message(s) were discarded)` : ""}`, isError: true };
+      return { deleted: false, text: `Could not delete the session: ${res.stuck}${lost ? ` (${lost} queued message(s) were discarded)` : ""}`, isError: true };
     }
     deletedIds.add(s.sessionId);
     if (ui.pinned.delete(s.sessionId)) saveUi();
-    const dropped = v && views.get(s.sessionId) === v ? v.inbox.length : 0; // relay messages it never got
+    const dropped = v && views.get(s.sessionId) === v ? v.queue.length : 0; // queued messages it never got
     dropView(s.sessionId); // only now: on a failure the session stays visible
     filePreview.forget(s.sessionId);
     sessions = sessions.filter((x) => x.sessionId !== s.sessionId);
     const problems = [
-      dropped && `${dropped} relay message(s) waiting for it were discarded`,
+      dropped && `${dropped} queued message(s) waiting for it were discarded`,
       res.leftover && `some files could not be removed yet (retried on the next start): ${res.leftover}`,
       res.store?.error && `its entry in session-store.db could not be removed: ${res.store.error}`,
     ].filter(Boolean);
@@ -2365,6 +2580,7 @@ async function openSettings() {
     `Find it with: ${s.platform === "win32" ? "where copilot" : "which copilot"}`;
   renderStorage();
   $("#set-relay").checked = s.relay;
+  $("#set-queue").checked = s.queueMidTurn;
   $("#set-context").value = s.contextTier;
   $("#set-relay").disabled = !s.relayAvailable;
   $("#set-relay-hint").textContent = s.relayAvailable
@@ -2404,7 +2620,9 @@ $("#store-clear").addEventListener("click", async (e) => {
 
 $("#settings").addEventListener("close", async () => {
   if ($("#settings").returnValue !== "save") return;
-  await api.setSettings({ copilotCommand: $("#set-command").value, relay: $("#set-relay").checked, contextTier: $("#set-context").value });
+  await api.setSettings({ copilotCommand: $("#set-command").value, relay: $("#set-relay").checked, contextTier: $("#set-context").value, queueMidTurn: $("#set-queue").checked });
+  queueMidTurn = $("#set-queue").checked;
+  for (const v of views.values()) v.settingChanged();
   refresh();
 });
 

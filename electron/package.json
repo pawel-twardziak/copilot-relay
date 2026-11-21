@@ -37,6 +37,7 @@
       "paths.mjs",
       "file-access.mjs",
       "delegation.mjs",
+      "prompt-count.mjs",
       "links-cache.mjs",
       "session-list.mjs",
       "context-tier.mjs",

@@ -144,6 +144,7 @@ details.thought > div { white-space: pre-wrap; padding: 4px 0 0 14px; border-lef
 .tool .st { font-size: 11px; }
 .tool .st.completed { color: var(--ok); }
 .tool .st.failed { color: var(--err); }
+.tool .st.interrupted { color: var(--err); }
 .tool .st.in_progress, .tool .st.pending { color: var(--warn); }
 .tool .kind { color: var(--muted); }
 .tool .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -173,6 +174,16 @@ details.thought > div { white-space: pre-wrap; padding: 4px 0 0 14px; border-lef
 .composer textarea { flex: 1; resize: none; min-height: 40px; max-height: 240px; line-height: 1.4; }
 .composer .btns { display: flex; flex-direction: column; gap: 6px; }
 .status-line { padding: 0 14px 6px; background: var(--panel); color: var(--muted); font-size: 12px; min-height: 18px; }
+/* messages waiting for a busy session: a strip above the composer */
+.queue-strip { padding: 6px 14px; border-top: 1px solid var(--border); background: var(--panel); font-size: 12px; color: var(--muted); }
+.queue-strip[hidden] { display: none; }
+.queue-head { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+.queue-paused { color: var(--warn); }
+.queue-row { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+.queue-from { flex: none; }
+.queue-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.queue-text.editable { cursor: pointer; }
+.queue-text.editable:hover { text-decoration: underline; }
 /* editing a message: a strip above the composer; the message and everything after it are dimmed */
 .edit-bar { display: flex; align-items: center; gap: 10px; padding: 6px 14px; border-top: 1px solid var(--border); background: var(--panel); color: var(--muted); font-size: 12px; }
 .edit-bar[hidden] { display: none; }
