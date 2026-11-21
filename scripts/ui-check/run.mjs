@@ -17,8 +17,10 @@ if (unknown.length) {
 setRecording(record);
 
 const failures = [];
-for (const check of checks.filter((c) => !names.length || names.includes(c.name))) {
-  for (const mode of record ? ["off"] : (check.modes ?? DEFAULT_MODES)) {
+// recording runs in mode "off" only, so only the checks that run in "off"
+const modesOf = (c) => c.modes ?? DEFAULT_MODES;
+for (const check of checks.filter((c) => (!names.length || names.includes(c.name)) && (!record || modesOf(c).includes("off")))) {
+  for (const mode of record ? ["off"] : modesOf(check)) {
     const label = `${check.name} [${mode}]`;
     const started = Date.now();
     let app = null;
