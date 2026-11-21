@@ -79,3 +79,26 @@ test("replay: a task recognised late replaces the badge already routed to work",
   assert.equal(r.changes[0].replacesTool, "t9");
   assert.deepEqual([r.to, r.task], ["group", true]);
 });
+
+const bgTask = (a) => a.route(call("task1", { title: "B", rawInput: { agent_type: "explore", prompt: "p", mode: "background" } }));
+
+test("a non-UUID after agent_id: does not link the subagent", () => {
+  const a = Activity.create();
+  bgTask(a);
+  a.route(update("task1", { status: "completed", content: [{ type: "content", content: { type: "text", text: "agent_id: explore" } }] }));
+  assert.equal(a.group("g1").agentId, null);
+});
+
+test("the link falls back to a string rawOutput.content", () => {
+  const a = Activity.create();
+  bgTask(a);
+  a.route(update("task1", { status: "completed", rawOutput: { content: "Agent started with agent_id: 545ca39a-d731-47a0-aac7-dc4b29d53701." } }));
+  assert.equal(a.group("g1").agentId, "545ca39a-d731-47a0-aac7-dc4b29d53701");
+});
+
+test("other main-agent update types go to the log", () => {
+  const a = Activity.create();
+  for (const sessionUpdate of ["user_message_chunk", "plan", "usage_update"]) {
+    assert.deepEqual(a.route({ sessionUpdate }), { to: "main", changes: [] });
+  }
+});

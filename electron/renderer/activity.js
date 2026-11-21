@@ -4,7 +4,7 @@
 
 const toolCalls = globalThis.ToolCalls ?? require("./tool-calls.js");
 
-const AGENT_ID = /agent_id:\s*([\w-]+)/;
+const AGENT_ID = /agent_id:\s*([0-9a-f-]{36})/i;
 
 function isTask(u) {
   const input = u.rawInput;
@@ -55,27 +55,31 @@ function createActivity() {
     return group;
   }
 
+  function linkResult(update, dest, changes) {
+    const match = AGENT_ID.exec(resultText(update));
+    const group = groups.get(dest.groupId);
+    if (match && !group.agentId) link(group, match[1]);
+    return { to: "group", groupId: dest.groupId, task: true, changes };
+  }
+
   function routeTool(u, changes) {
     const id = u.toolCallId;
     const known = tools.get(id);
     if (isTask(u)) {
-      if (known?.task) return linkResult(u, known);
+      if (known?.task) return linkResult(u, known, changes);
       if (known && known.to === "group") return { to: "group", groupId: known.groupId, changes }; // a subagent's own tool
       const group = addGroup({ title: u.title, prompt: u.rawInput.prompt, mode: u.rawInput.mode, anchored: true, taskToolCallId: id }, changes, known ? id : null);
       const dest = { to: "group", groupId: group.id, task: true };
       tools.set(id, dest);
-      return linkResult(u, dest);
+      return linkResult(u, dest, changes);
     }
-    if (known) return known.task ? linkResult(u, known) : { to: known.to, groupId: known.groupId, changes };
+    if (known) return known.task ? linkResult(u, known, changes) : routed(known, changes);
     tools.set(id, { to: "work" });
     return { to: "work", changes };
+  }
 
-    function linkResult(update, dest) {
-      const match = AGENT_ID.exec(resultText(update));
-      const group = groups.get(dest.groupId);
-      if (match && !group.agentId) link(group, match[1]);
-      return { to: "group", groupId: dest.groupId, task: true, changes };
-    }
+  function routed(dest, changes) {
+    return dest.to === "group" ? { to: "group", groupId: dest.groupId, changes } : { to: dest.to, changes };
   }
 
   return {
@@ -90,13 +94,9 @@ function createActivity() {
         if (isTool && !tools.has(u.toolCallId)) tools.set(u.toolCallId, { to: "group", groupId: group.id });
         return { to: "group", groupId: group.id, changes };
       }
-      if (isTool) {
-        const r = routeTool(u, changes);
-        if (r.to === "work") delete r.groupId;
-        return r;
-      }
-      if (type === "agent_message_chunk") return { to: "main", changes };
-      return { to: "work", changes };
+      if (isTool) return routeTool(u, changes);
+      if (type === "agent_thought_chunk") return { to: "work", changes };
+      return { to: "main", changes };
     },
     group(groupId) {
       return groups.get(groupId) ?? null;
