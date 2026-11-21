@@ -61,7 +61,7 @@ today's behaviour. Only the desktop app is in scope; the terminal extension is u
 - **Wrapper** around a message delivered mid-turn, telling the agent to handle it and then return to its task.
 - **Queue strip** above the input box listing queued items: remove (✕) any item; click an own prompt to edit it.
 - **Esc / Stop pauses the queue**; a ▶ button in the strip resumes it.
-- **Setting** "Deliver queued messages during a turn", on by default; off restores today's behaviour exactly.
+- **Setting** "Deliver queued messages during a turn", off by default (the user's choice); off restores today's behaviour exactly.
 
 ## Non-goals
 
@@ -201,7 +201,7 @@ Above the input box, shown when the queue is not empty:
 ### Setting
 
 Settings: checkbox **"Deliver queued messages during a turn"**, stored as `queueMidTurn` in the app's
-`settings.json` (`loadSettings()` / `settings:get` / `settings:set`), default on. Off means today's behaviour:
+`settings.json` (`loadSettings()` / `settings:get` / `settings:set`), default off (a missing key is off). Off means today's behaviour:
 relay messages wait until the turn ends, own prompts are refused while busy, no mid-turn delivery. The queue
 strip still lists waiting relay items (✕ works). The change applies to open sessions at once; own prompts
 already queued when it is turned off are delivered at the end of the turn.
@@ -233,8 +233,9 @@ already queued when it is turned off are delivered at the end of the turn.
 
 ## Docs
 
-`electron/README.md`, copilot-relay section: messages that arrive while the session works are queued and
-delivered after the current tool step; the queue strip; pause; the setting. Its line "Messages that arrive
+`electron/README.md`, copilot-relay section: with the setting on (it is off by default), messages that arrive
+while the session works are queued and delivered after the current tool step; the queue strip; pause; the
+setting. Its line "Messages that arrive
 while it is working wait in a queue" changes accordingly.
 
 ## Left to the builder
