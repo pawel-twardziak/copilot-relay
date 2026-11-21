@@ -434,6 +434,9 @@ async function openSession(sessionId, cwd) {
     const res = await conn.request("session/load", { sessionId, cwd, mcpServers: relay.mcpServers });
     entry.configOptions = res?.configOptions ?? entry.configOptions;
     if (open.get(sessionId) === entry) usage.refresh(sessionId);
+    // the invoke answer can reach the window before the last replayed updates; this marker, sent the way the updates
+    // are, cannot: the window ends the replay on both
+    send("acp:replayed", { sessionId });
     return { sessionId, cwd, configOptions: viewConfig(sessionId, res?.configOptions) };
   } catch (e) {
     entry.relay?.stop();

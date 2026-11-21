@@ -88,6 +88,7 @@ contextBridge.exposeInMainWorld("api", {
   onJobRunFinished: on("jobs:runFinished"),
   onJobOpenRun: on("jobs:openRun"),
   onUpdate: on("acp:update"),
+  onReplayed: on("acp:replayed"),
   onPermission: on("acp:permission"),
   onExit: on("acp:exit"),
   onUsage: on("usage:update"),
