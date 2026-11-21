@@ -31,3 +31,17 @@ test("merge does not change the object it was given", () => {
   TC.merge(prev, { status: "completed" });
   assert.equal(prev.status, "pending");
 });
+
+test("agentOf: the subagent that owns an update, from Copilot's _meta", () => {
+  assert.equal(TC.agentOf({ _meta: { "github.com/copilot": { agentId: "a-1" } } }), "a-1");
+  assert.equal(TC.agentOf({ status: "pending" }), null); // the main agent's
+  assert.equal(TC.agentOf(null), null);
+});
+
+test("a subagent's permission card outlives the turn; a Stop or the main agent's turn end closes it", () => {
+  // a background subagent keeps running after the main turn ends, and main still holds its question open
+  assert.equal(TC.keepCardAtTurnEnd({ agentId: "a-1", stopped: false }), true);
+  // Stop answers every open question as cancelled (main's cancelTurn)
+  assert.equal(TC.keepCardAtTurnEnd({ agentId: "a-1", stopped: true }), false);
+  assert.equal(TC.keepCardAtTurnEnd({ agentId: null, stopped: false }), false);
+});
