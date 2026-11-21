@@ -145,10 +145,11 @@ function createChain() {
       return { showStopped, ...finish(record) };
     },
     /** The record's prompt failed. Before its switch point it never took over: the prompts it was to interrupt are
-     *  still running, and a Stop of them is reported again. */
+     *  still running, and a Stop of them is reported again. beforeSwitch: it failed before its switch point. */
     failed(record) {
-      if (pendingSwitch === record) for (const r of record.interrupts) r.interrupted = false;
-      return finish(record);
+      const beforeSwitch = pendingSwitch === record;
+      if (beforeSwitch) for (const r of record.interrupts) r.interrupted = false;
+      return { ...finish(record), beforeSwitch };
     },
     /** You stopped the turn (no effect outside a chain). */
     stop() {
@@ -164,9 +165,14 @@ function createChain() {
 function createFollowUp() {
   let pending = false;
   return {
-    /** A queued item was delivered mid-turn: a task waits to be continued. */
+    /** A queued item was delivered mid-turn: a task waits to be continued. Returns an undo for a send that failed
+     *  before its switch point (it never interrupted the task, which runs on): the state before it comes back. */
     interrupted() {
+      const before = pending;
       pending = true;
+      return () => {
+        pending = before;
+      };
     },
     /** An item delivered now goes as an answer prompt. */
     answerDue: () => pending,
@@ -174,10 +180,15 @@ function createFollowUp() {
     userPrompt() {
       pending = false;
     },
-    /** The chain ended: "continue" (send the continue prompt), "pump" (the next queued item goes as an answer) or "none". */
-    afterTurn({ stopped, queued = 0, paused, dead, deleting } = {}) {
+    /** The waiting task is dropped without a prompt of yours (e.g. you emptied a queue paused by your Stop). */
+    drop() {
+      pending = false;
+    },
+    /** The chain ended: "continue" (send the continue prompt), "pump" (the next queued item goes as an answer) or "none".
+     *  failed: the chain ended in an error (not a Stop): nothing is continued, the waiting task is dropped. */
+    afterTurn({ stopped, failed, queued = 0, paused, dead, deleting } = {}) {
       if (!pending) return "none";
-      if (dead || deleting) {
+      if (dead || deleting || failed) {
         pending = false;
         return "none";
       }

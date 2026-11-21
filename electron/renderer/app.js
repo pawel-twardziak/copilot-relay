@@ -954,7 +954,8 @@ class SessionView {
       await api.closeSession(sessionId).catch(() => {});
     }
     // rebuild the view from the replay (not closeView: the session is already closed)
-    await reopenView(this, failure && `Could not delete: ${failure.message}`);
+    // a failed cut leaves the history as it was: a task waiting to be continued still waits
+    await reopenView(this, failure && `Could not delete: ${failure.message}`, { keepFollowUp: !!failure });
   }
 
   system(text) {
@@ -1023,7 +1024,7 @@ class SessionView {
     const i = this.queue.indexOf(item);
     if (i < 0) return;
     this.queue.splice(i, 1);
-    if (!this.queue.length) this.paused = false;
+    if (!this.queue.length) this.endPauseOnEmpty();
     if (item.kind === "relay") {
       // the broker must not deliver it again (a message without an id, such as a delegated task, has nothing to ack)
       if (item.deliveryId) api.relayAck(this.sessionId, item.deliveryId).catch(() => {});
@@ -1042,7 +1043,7 @@ class SessionView {
     const i = this.queue.indexOf(item);
     if (i < 0) return;
     this.queue.splice(i, 1);
-    if (!this.queue.length) this.paused = false;
+    if (!this.queue.length) this.endPauseOnEmpty();
     this.input.value = item.text;
     this.autosize();
     this.updatePopup();
@@ -1055,7 +1056,7 @@ class SessionView {
     const res = MessageQueue.takeBack(this.queue, this.input.value);
     if (!res) return false;
     this.queue.splice(0, this.queue.length, ...res.rest);
-    if (!this.queue.length) this.paused = false;
+    if (!this.queue.length) this.endPauseOnEmpty();
     if (this.recallEl) this.setRecalled(null); // the recalled text is now part of the draft
     this.input.value = res.text;
     this.input.setSelectionRange(res.caret, res.caret);
@@ -1063,6 +1064,14 @@ class SessionView {
     this.updatePopup();
     this.renderQueue();
     return true;
+  }
+
+  /** The queue was emptied by hand: a pause ends. A pause comes from your Stop, so the task it stopped is not continued
+   *  later by itself (unpaused, e.g. during an answer turn, the waiting task stays). */
+  endPauseOnEmpty() {
+    if (!this.paused) return;
+    this.paused = false;
+    this.followUp.drop();
   }
 
   resumeQueue() {
@@ -1174,8 +1183,7 @@ class SessionView {
     const item = this.queue.shift();
     this.renderQueue();
     const { el, source, delivery } = this.itemPrompt(item);
-    this.followUp.interrupted();
-    this.runPrompt(item.prompt, el, source, delivery, { midTurn: true, more: this.queue.length > 0 });
+    this.runPrompt(item.prompt, el, source, delivery, { midTurn: true, more: this.queue.length > 0 }); // interrupts the task
   }
 
   /** After the last answer to queued messages: the app's own prompt that resumes the interrupted task. It is a small
@@ -1760,7 +1768,8 @@ class SessionView {
       failure = e;
       await api.closeSession(sessionId).catch(() => {}); // closed for sure: the reopen replays it unchanged
     }
-    const v = await reopenView(this, failure && `Could not replace the message: ${failure.message}`, { holdInbox: true, typed: failure ? text : draft });
+    // the edited message goes as a plain prompt, also after a failed cut (you have taken over): no task is continued
+    const v = await reopenView(this, failure && `Could not replace the message: ${failure.message}`, { holdInbox: true, typed: failure ? text : draft, keepFollowUp: false });
     if (failure || !v || v.dead) {
       // the edited text must survive: a failed cut leaves it as a plain draft, a failed reopen too
       const target = v ?? this;
@@ -1819,10 +1828,13 @@ class SessionView {
     // a mid-turn prompt owns the turn's updates (and is acknowledged) only from its switch point on (the record
     // keeps its delivery until then)
     const record = this.chain.start({ midTurn, delivery });
+    // a mid-turn send interrupts the task: it is continued after the answers (undone if the send never took over)
+    const undoInterrupt = midTurn ? this.followUp.interrupted() : null;
     this.setBusy(true);
     const before = isCmd ? await api.userMessages(this.sessionId).catch(() => null) : null;
     if (!midTurn) this.delivery = delivery;
     let end = null;
+    let failed = false; // the chain ended with this prompt's error
     try {
       const stop = await api.prompt(this.sessionId, sent, source);
       delivery?.returned(); // (a mid-turn one whose marker never came is acknowledged here)
@@ -1833,17 +1845,21 @@ class SessionView {
       else if (stop && stop !== "cancelled" && stop !== "end_turn") this.system(`Turn ended: ${stop}`);
     } catch (e) {
       delivery?.failed(); // (nothing once acknowledged at the switch point)
-      end ??= this.chain.failed(record); // before its switch point: the prompts it was to interrupt run on
+      if (!end) {
+        end = this.chain.failed(record); // before its switch point: the prompts it was to interrupt run on
+        failed = true;
+        if (end.beforeSwitch) undoInterrupt?.(); // the task was not interrupted
+      }
       this.error(e.message);
     } finally {
-      if (end?.ended) await this.chainEnded(before, bubble, end.dropped, end.stopped);
+      if (end?.ended) await this.chainEnded(before, bubble, end.dropped, end.stopped, failed);
     }
   }
 
   /** The last prompt of the chain answered: the turn is over.
    *  dropped: tools in flight when a queued prompt interrupted them, without a switch point to tell;
-   *  stopped: you pressed Stop during the chain. */
-  async chainEnded(before, bubble, dropped, stopped) {
+   *  stopped: you pressed Stop during the chain; failed: it ended with an error. */
+  async chainEnded(before, bubble, dropped, stopped, failed = false) {
     this.delivery = null;
     for (const toolCallId of dropped) this.toolCall({ toolCallId, status: "interrupted" });
     this.dismissPermissions();
@@ -1860,7 +1876,7 @@ class SessionView {
     // after the last answer to queued messages the interrupted task goes on; "pump": the next queued item is answered
     // first (setBusy(false) has scheduled it)
     const { paused, dead, deleting } = this;
-    if (this.followUp.afterTurn({ stopped, queued: this.queue.length, paused, dead, deleting }) === "continue") this.sendContinue();
+    if (this.followUp.afterTurn({ stopped, failed, queued: this.queue.length, paused, dead, deleting }) === "continue") void this.sendContinue();
   }
 
   cancel() {
@@ -2005,9 +2021,11 @@ function dropView(id) {
 
 /** Rebuild a closed session's view from its files (after its history changed or a delete failed); queued items
  *  that were waiting in the old view move to the new one, paused if they were (only ▶ or emptying the queue ends a
- *  pause). */
-async function reopenView(old, error, { holdInbox = false, typed } = {}) {
+ *  pause). keepFollowUp: the history is unchanged, so a task waiting to be continued after the answers (paused by
+ *  your Stop) still waits; false when the history was cut (the task may be gone with it). */
+async function reopenView(old, error, { holdInbox = false, typed, keepFollowUp = true } = {}) {
   const { sessionId, cwd, title, queue, paused, parentSessionId, seenDeliveries, pendingNotes } = old;
+  const followUpDue = keepFollowUp && old.followUp.answerDue();
   typed ??= old.recallEl ? old.draft : old.input.value; // what you typed (not a recalled earlier message)
   if (views.get(sessionId) === old) views.delete(sessionId);
   old.el.remove();
@@ -2024,6 +2042,7 @@ async function reopenView(old, error, { holdInbox = false, typed } = {}) {
   if (queue.length && !v.dead) {
     v.queue.push(...queue);
     v.paused = paused && v.queue.length > 0;
+    if (followUpDue) v.followUp.interrupted(); // before the pump below: the items still go as answers
     v.renderQueue();
     v.showQueueStatus();
     v.pump();

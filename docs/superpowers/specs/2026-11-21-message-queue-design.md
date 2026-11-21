@@ -165,6 +165,8 @@ When each one is used:
   Stop, the user continues by typing.
 - The continue prompt is not an own message: no image attachments, it does not re-open the relay budget, it is
   never editable or recalled.
+- Non-waking notices (`pendingNotes`) are not put in front of the continue prompt, because it must match exactly
+  on replay; they wait for the next prompt.
 
 `<message>` is the text exactly as it would have been sent at the end of a turn: an own prompt as typed, a
 relay message as the prompt the broker built (`m.prompt`, starting with its `[from …]` line, folder and reply

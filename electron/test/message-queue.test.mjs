@@ -416,3 +416,49 @@ test("follow-up, normal turn", () => {
   assert.equal(f.answerDue(), false);
   assert.equal(f.afterTurn({ queued: 1 }), "none");
 });
+
+test("follow-up, undo of a send that failed before its switch point", () => {
+  const f = createFollowUp();
+  const undo = f.interrupted();
+  undo();
+  assert.equal(f.answerDue(), false);
+  assert.equal(f.afterTurn({ queued: 0 }), "none");
+  // a task already waiting stays waiting
+  f.interrupted();
+  const undo2 = f.interrupted();
+  undo2();
+  assert.equal(f.answerDue(), true);
+});
+
+test("follow-up, drop", () => {
+  const f = createFollowUp();
+  f.interrupted();
+  f.drop();
+  assert.equal(f.answerDue(), false);
+  assert.equal(f.afterTurn({ queued: 0 }), "none");
+});
+
+test("follow-up, a chain that failed sends no continue prompt and drops the task", () => {
+  const f = createFollowUp();
+  f.interrupted();
+  assert.equal(f.afterTurn({ failed: true, queued: 0 }), "none");
+  assert.equal(f.answerDue(), false);
+  f.interrupted();
+  assert.equal(f.afterTurn({ failed: true, queued: 2 }), "none");
+  assert.equal(f.answerDue(), false);
+});
+
+test("chain: failed tells whether it was before the switch point", () => {
+  const c = MQ.createChain();
+  const a = c.start();
+  const b = c.start({ midTurn: true });
+  assert.equal(c.failed(b).beforeSwitch, true);
+  const d = c.start({ midTurn: true });
+  assert.ok(c.marker(ABORT_TEXT));
+  const end = c.failed(d);
+  assert.equal(end.beforeSwitch, false);
+  assert.equal(end.ended, false);
+  const last = c.returned(a, "cancelled");
+  assert.equal(last.ended, true);
+  assert.equal(c.failed(a).ended, false); // already finished
+});
