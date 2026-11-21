@@ -9,8 +9,8 @@ turn."). A long turn (many tool calls) therefore delays an answer to another ses
 the agent without stopping it.
 
 The user wants one queue per session that the agent picks up **at the first safe moment during its turn**, for
-relay messages and the user's own prompts alike. After handling a queued message the agent goes back to the
-task it was doing, unless the message changes or cancels it. A setting turns the queue off and restores
+relay messages and the user's own prompts alike. The agent answers a queued message visibly, then goes back to
+the task it was doing, unless the message changes or cancels it. A setting turns the queue off and restores
 today's behaviour. Only the desktop app is in scope; the terminal extension is unchanged.
 
 ## Findings (Copilot CLI 1.0.114, Windows, measured with four throwaway ACP probe scripts)
@@ -39,6 +39,12 @@ work PC. The findings below are their recorded outcome.
 - **Sent while another tool still runs, that tool is killed** (probe 4, test P): its ACP status stays
   `pending`, no result is recorded, the agent re-ran it. A tool waiting for permission is killed the same way
   (probe 1: the prompt arrived during the permission request and the tool never ran).
+- **Inside its tool loop the model often answers only in its reasoning** (two real sessions, Claude Opus 5.5
+  via Copilot, 1.0.114): a queued "co robisz?" / "ile to zajmie?" got an empty visible reply plus the next tool
+  call, with the answer only in `reasoningText`, and the final report never mentioned it. Wrapper wording did
+  not change this (two endings tried). The same happens outside the queue: interim sentences meant for the
+  user land in `reasoningText` in some steps and in the visible reply in others. A response that ends the
+  turn (no tool call) always had its text in the visible reply.
 
 ## Approaches
 
@@ -59,7 +65,8 @@ work PC. The findings below are their recorded outcome.
 - **One queue per session** in the renderer, in arrival order, for relay messages (today's `inbox`) and for
   prompts the user sends while the session works. Send stays enabled during a turn.
 - **Delivery at the first safe moment** (see Delivery rules), one queued item per delivery.
-- **Wrapper** around a message delivered mid-turn, telling the agent to handle it and then return to its task.
+- **Answer, then continue**: a delivered queued message asks for a visible answer that ends the response (no
+  tools); when the queue is empty the app sends one hidden "continue the task" prompt.
 - **Queue strip** above the input box listing queued items: remove (✕) any item; click an own prompt to edit it.
 - **Esc / Stop pauses the queue**; a ▶ button in the strip resumes it.
 - **Setting** "Deliver queued messages during a turn", off by default (the user's choice); off restores today's behaviour exactly.
@@ -102,51 +109,71 @@ A queued item is delivered:
 1. **Mid-turn**, when a `tool_call_update` brings a tool to `completed`/`failed` and then no tool is in
    flight, the queue is not paused, and the session is in a prompt the app started (`this.prompting`), not in
    an edit (`this.edit`), history operation (`historyOp`), `holdInbox`, delete or dead state. The head item
-   goes out wrapped (below) if it is mid-turn eligible: plain text or text with image mentions, from the user
+   goes out as an answer prompt (below) if it is mid-turn eligible: plain text or text with image mentions, from the user
    or a relay. A slash-command item at the head is not eligible; nothing is sent mid-turn while it is at the
    head (items keep their order).
 2. **At the end of a turn**, as today's `pump()`: when the session becomes idle and the queue is not paused,
-   the head item starts a new turn, without the mid-turn wrapper.
+   the head item starts a new turn: as an answer prompt when an interrupted task is waiting to be continued
+   (see Answer, then continue), otherwise as a plain prompt.
 
 One item per delivery: each delivered item is its own `session/prompt`, so each is its own `user.message`,
 its own bubble and its own target for edit/fork/delete. The next item waits for the next boundary or the end
 of the turn.
 
-### The mid-turn wrapper
+### Answer, then continue
 
-The model receives (`_matchText` returns what was sent, as for `pendingNotes`):
+A queued message is delivered as an **answer prompt**; after the last one the app sends a **continue prompt**.
+This takes the queued message out of the agent's tool loop, so the answer is a turn-ending, visible reply.
+
+**Answer prompt** (`_matchText` returns what was sent, as for `pendingNotes`):
 
 ```
 [queued message, delivered during your work]
 <message>
 
-[End of the queued message. If it asks you something, answer it now in a short visible reply to the user (your thinking is not shown to them), then go back to the task you were doing and finish it, unless this message changes or cancels that task. Repeat the answer in your final message if the task goes on after it.]
+[End of the queued message. Reply to it now and end your response there. Do not call tools, except relay-send_message to answer another session, and do not continue your earlier task yet: you will be asked to continue it next.]
 ```
 
-The first ending ("Handle it now. Then go back …") was replaced after a real session (Claude Opus 5.5 via
-Copilot): asked "co robisz?" and "długo Ci zajmie?" mid-turn, the model wrote its answers only in its reasoning
-(`reasoningText`), left the visible reply empty, called the next tool, and never answered in its final message.
-`unwrap` still accepts the first ending, so messages recorded with it replay correctly.
+**Continue prompt**, sent by the app itself:
+
+```
+[continue after queued messages]
+Continue the task you were working on before the queued message(s) above, taking them into account. If they changed the task, follow the change; if they cancelled it, do not continue and say so in one sentence.
+```
+
+When each one is used:
+
+- The answer prompt wraps every queued item delivered **while a task is interrupted**: the mid-turn delivery
+  at a tool boundary (it interrupts the task), and every item delivered at the end of an answer turn while
+  the queue still has items.
+- When an answer turn ends, the queue is not paused and nothing else is queued, the app sends the continue
+  prompt (one per series: n queued messages cost n + 1 prompts). It is not sent when the task was not
+  interrupted (items delivered at the end of a normal turn go as plain prompts, as before), after Stop, or
+  when the session is dead or deleting.
+- An answer turn that ends with `cancelled` (the user pressed Stop) sends no continue prompt; the pause rules
+  apply. ▶ resumes the queue; the continue prompt then follows the last answer. With nothing queued after a
+  Stop, the user continues by typing.
+- The continue prompt is not an own message: no image attachments, it does not re-open the relay budget, it is
+  never editable or recalled.
 
 `<message>` is the text exactly as it would have been sent at the end of a turn: an own prompt as typed, a
 relay message as the prompt the broker built (`m.prompt`, starting with its `[from …]` line, folder and reply
 instructions), so replying with `relay-send_message` still works.
 
-**The format is fixed, not free wording** (my call), because the app must recognise it on replay: the first
-line is the exact marker `[queued message, delivered during your work]` and the last paragraph starts with
-`[End of the queued message.`. One pure helper builds it and one parses it (`unwrap(text)` → the inner
-`<message>` or null), with tests for the round trip.
+**The formats are fixed** because the app must recognise them on replay. Answer prompt: first line exactly
+`[queued message, delivered during your work]`, last paragraph exactly the ending above. `unwrap(text)` also
+accepts the two earlier endings ("Handle it now. Then go back …" and "If it asks you something, answer it now
+… Repeat the answer in your final message …"), so messages recorded by earlier versions replay correctly.
+Continue prompt: the whole text is fixed; `isContinuePrompt(text)` recognises it exactly.
 
-**Live and after reopening, the bubble looks like any message of its kind** (my call): the renderer shows the
-unwrapped text everywhere it shows a user message, i.e. in the live bubble, in replayed history
-(`stream()`/`flush()` for `user_message_chunk`), and wherever own vs relay is decided
-(`EditMessage.isOwnMessage`, `FileLinks.parseRelayHeader`, Left Shift+Up recall). A replayed relay message
-therefore is a relay bubble "from X" again, not editable, with its folder header parsed; an own message shows
-only what was typed. `_matchText` keeps returning the full sent text for history matching.
+**How they look.** An answer prompt looks like any message of its kind, live and after reopening (unwrapped
+text; a relay message is a relay bubble "from X" again, not editable; an own message shows what was typed;
+`_matchText` keeps the full sent text). A continue prompt is shown as a small system-style line
+"↻ continuing the task", live and on replay; it still counts as a user message for turn ordinals (it is a
+`user.message` in the history), but carries no edit/recall actions.
 
-**Editing a message that was delivered mid-turn sends the new text as a plain prompt** (my call): edit
-truncates the history at that message, so the interrupted task's later work is gone with it and there is no
-running task to return to.
+**Editing a delivered message sends the new text as a plain prompt**: edit truncates the history at that
+message, so there is no interrupted task to continue.
 
 ### The turn as the app sees it
 
@@ -201,7 +228,8 @@ Above the input box, shown when the queue is not empty:
   reports included; the strip is visible because the queue is not empty, and the status line says
   "Queue paused (N)". Only ▶ (or removing the last item) ends the pause. ▶ sends the head item at once if the
   session is idle, otherwise at the next boundary.
-- While paused and idle, Send sends the typed prompt as a normal turn at once; the queue stays paused.
+- While paused and idle, Send sends the typed prompt as a normal turn at once; the queue stays paused, and a
+  pending continue prompt is dropped (the user has taken over).
 - The pause is per session view and not persisted; reopening the session (or the app) starts unpaused.
 
 ### Setting
@@ -229,13 +257,17 @@ already queued when it is turned off are delivered at the end of the turn.
   choice) with unit tests: in-flight tracking from a sequence of updates, the delivery decision (boundary,
   paused, setting off, command at head, edit/historyOp/holdInbox), wrap/unwrap round trip (own and relay text),
   the switch point (exact-chunk match only, once per send; tools in flight at it dropped), the pause rules
-  (empty queue, setting off), remove/edit of items.
+  (empty queue, setting off), remove/edit of items; answer/continue: which delivery is an answer prompt, when
+  the continue prompt is due (after the last answer; not after Stop, not when paused, not when the task was
+  not interrupted, dropped when the user sends a prompt), `isContinuePrompt` exact match, `unwrap` with all
+  three endings.
 - Main process: the prompting counter with two overlapping prompts on the fake agent
   (`electron/test/fixtures/fake-agent.mjs`): `entry.prompting` stays true until both answered.
 - Manual on the work PC: a long multi-tool task with (a) an own prompt typed mid-turn, (b) a relay message
   from another session, (c) two tools in parallel (nothing delivered until both finish), (d) Esc with items
   queued (pause, ▶), (e) the setting off, (f) reopen the session: the delivered messages are bubbles in place
-  and edit/fork/delete on them works.
+  and edit/fork/delete on them works; (g) a queued question ("co robisz?") during a long task: a visible
+  answer, then "↻ continuing the task" and the task goes on; (h) two queued messages: two answers, one continue.
 
 ## Docs
 
@@ -247,5 +279,5 @@ while it is working wait in a queue" changes accordingly.
 ## Left to the builder
 
 - Module layout of the queue logic and how the renderer routes updates and acks within a chain.
-- Strip styling and the wording of system lines (the wrapper format is fixed, see The mid-turn wrapper).
+- Strip styling and the wording of system lines (the prompt formats are fixed, see Answer, then continue).
 - How "interrupted" tool cards look.
