@@ -1355,8 +1355,7 @@ class SessionView {
       this.tools.set(u.toolCallId, t);
       this.append(el);
     }
-    Object.assign(t.data, Object.fromEntries(Object.entries(u).filter(([, v]) => v != null)));
-    const d = t.data;
+    const d = (t.data = ToolCalls.merge(t.data, u));
     const status = d.status ?? "pending";
     t.st.className = `st ${status}`;
     t.st.textContent = { completed: "✓", failed: "✗", in_progress: "●", pending: "○", interrupted: "⊘" }[status] ?? "●";
