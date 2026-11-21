@@ -1,0 +1,101 @@
+{
+  "thread": "**You:**\n\nLook around.\n\nI'll look around first.\n\n*Tool: ls (completed)*\n\n**Plan:**\n- [x] Read a.txt\n- [ ] Summarize it\n\n*Tool: cat b.txt (completed)*\n\n**Subagent: Summarize a.txt** (completed)\n\n> Read a.txt\n> and summarize it.\n\nReading a.txt.\n\n*Tool: view a.txt (completed)*\n\na.txt has two lines.\n\n**Subagent: Watch the build** (no news)\n\n> Watch the build log.\n\nWatching the build log.\n\n*Tool: echo done > out.txt (completed)*\n\na.txt has two lines; the build is being watched.\n\n**You:**\n\nRun both checks.\n\n**Subagent: Check the docs** (completed)\n\n> Check the docs.\n\nDocs: up to date.\n\n**Subagent: Check the tests** (completed)\n\n> Check the tests.\n\nTests: all pass.\n\n**Subagent: Check the config** (completed)\n\n> Check the config.\n\nDocs and tests are fine.\n\n**You:**\n\nAnything else?\n\n**Subagent** (no news)\n\nA note from a subagent no task started.\n\nNothing else to do.",
+  "log": [
+    [
+      "msg user",
+      1,
+      "user",
+      true
+    ],
+    [
+      "msg agent",
+      1,
+      "reply",
+      true
+    ],
+    [
+      "group work",
+      null,
+      null,
+      false
+    ],
+    [
+      "plan",
+      null,
+      null,
+      false
+    ],
+    [
+      "group work",
+      null,
+      null,
+      false
+    ],
+    [
+      "group subagent",
+      null,
+      null,
+      false
+    ],
+    [
+      "group subagent",
+      null,
+      null,
+      false
+    ],
+    [
+      "msg agent",
+      null,
+      null,
+      false
+    ],
+    [
+      "msg user",
+      2,
+      "user",
+      true
+    ],
+    [
+      "group subagent",
+      2,
+      "reply",
+      true
+    ],
+    [
+      "group subagent",
+      null,
+      null,
+      false
+    ],
+    [
+      "group subagent",
+      null,
+      null,
+      false
+    ],
+    [
+      "msg agent",
+      null,
+      null,
+      false
+    ],
+    [
+      "msg user",
+      3,
+      "user",
+      true
+    ],
+    [
+      "group subagent",
+      null,
+      null,
+      false
+    ],
+    [
+      "msg agent",
+      3,
+      "reply",
+      true
+    ]
+  ]
+}
