@@ -1353,10 +1353,24 @@ class SessionView {
     return r;
   }
 
-  /** The container a routed update goes to: null = the log. */
-  containerOf(r) {
-    if (r.to === "group") return this.groupEls.get(r.groupId) ?? null;
-    return r.to === "work" ? this.workGroup() : null;
+  /** A streamed chunk where Activity routes it: the log, the work group or a subagent's group. A subagent's text never
+   *  falls back to the log: without its group element it is not shown. */
+  streamRouted(type, u, text) {
+    const r = this.route(u);
+    if (r.to === "main") return this.stream(type, text, u.messageId);
+    const container = r.to === "work" ? this.workGroup() : this.groupEls.get(r.groupId);
+    if (container) this.stream(type, text, u.messageId, container);
+  }
+
+  /** The turn is over (chain end, replay end): background subagents with no news get ○ (Activity.settle), and the
+   *  tools left pending in work groups (killed, stopped, replayed without an end) no longer count as running. */
+  settleGroups() {
+    this.applyChanges(this.activity.settle());
+    for (const g of this.log.querySelectorAll(":scope > .group.work")) {
+      if (!g._info.running.size) continue;
+      g._info.running.clear();
+      g._renderHeader();
+    }
   }
 
   applyChanges(changes) {
@@ -1446,14 +1460,13 @@ class SessionView {
         // the switch point of a mid-turn send is not shown (a Stop of yours still shows whatever Copilot sends)
         const sw = this.chain.marker(text);
         if (sw) this.switchPoint(sw);
-        else this.stream("agent", text, u.messageId, this.containerOf(this.route(u)));
+        else this.streamRouted("agent", u, text);
         break;
       }
       case "agent_thought_chunk":
-        this.stream("thought", text, u.messageId, this.containerOf(this.route(u)));
+        this.streamRouted("thought", u, text);
         break;
       case "tool_call":
-        this.flush();
         this.applyTool(u);
         this.toolBoundary(u);
         break;
@@ -1496,10 +1509,14 @@ class SessionView {
   /** The single entry for every tool update, also the synthetic "interrupted" ones of switchPoint/chainEnded. */
   applyTool(u) {
     const r = this.route(u);
-    const group = r.to === "group" ? this.groupEls.get(r.groupId) : null;
-    if (r.task) {
-      if (group) this.taskUpdate(group, u);
-    } else this.toolCall(u, group);
+    if (r.to === "work") {
+      if (u.sessionUpdate === "tool_call") this.flush(); // its badge closes the log's block (a subagent's does not)
+      return this.toolCall(u);
+    }
+    const group = this.groupEls.get(r.groupId);
+    if (!group) return; // never in the log or the main agent's work
+    if (r.task) this.taskUpdate(group, u);
+    else this.toolCall(u, group);
   }
 
   /** A tool badge: a new one goes into the given group, else into the main agent's work group; an update goes to the
@@ -2045,7 +2062,7 @@ class SessionView {
   async chainEnded(before, bubble, dropped, stopped, failed = false) {
     this.delivery = null;
     for (const toolCallId of dropped) this.applyTool({ sessionUpdate: "tool_call_update", toolCallId, status: "interrupted" });
-    this.applyChanges(this.activity.settle()); // background subagents with no news: ○
+    this.settleGroups();
     this.dismissPermissions({ all: false, stopped });
     // the view was closed or its session deleted meanwhile: nothing to update (a refresh would also replace the
     // delete's warning in the status line)
@@ -2161,7 +2178,7 @@ async function openSession(s, { activate: show = true } = {}) {
     const res = await api.openSession(s.sessionId, s.cwd);
     v.resuming = false;
     v.flush();
-    v.applyChanges(v.activity.settle()); // replayed background subagents with no evidence of an end: ○
+    v.settleGroups();
     v.setConfig(res.configOptions);
     v.toBottom();
     v.setBusy(false);
