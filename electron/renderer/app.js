@@ -1852,7 +1852,7 @@ class SessionView {
       }
       this.error(e.message);
     } finally {
-      if (end?.ended) await this.chainEnded(before, bubble, end.dropped, end.stopped, failed);
+      if (end?.ended) await this.chainEnded(before, bubble, end.dropped, end.stopped, failed || end.failed);
     }
   }
 

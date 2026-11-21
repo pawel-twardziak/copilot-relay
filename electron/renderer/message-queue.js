@@ -90,8 +90,9 @@ function createChain() {
   let pendingSwitch = null; // the mid-turn record until its abort marker shows it took over
   let stopping = false; // you stopped the chain: nothing more goes out mid-turn until it has ended
   let midTurnSent = false; // a queued item was delivered during this chain
+  let failedAfterSwitch = false; // a prompt failed after its switch point: the chain ends as failed whichever prompt ends it
 
-  const none = { ended: false, stopped: false, dropped: [] };
+  const none = { ended: false, stopped: false, failed: false, dropped: [] };
   /** The record's prompt is over; the chain ends with the last one (tools still in flight then are returned when
    *  a mid-turn prompt may have killed them: no switch point told). */
   function finish(record) {
@@ -103,7 +104,9 @@ function createChain() {
     pendingSwitch = null;
     const stopped = stopping;
     stopping = false;
-    return { ended: true, stopped, dropped: midTurnSent ? tracker.drop() : [] };
+    const failed = failedAfterSwitch;
+    failedAfterSwitch = false;
+    return { ended: true, stopped, failed, dropped: midTurnSent ? tracker.drop() : [] };
   }
 
   return {
@@ -115,6 +118,7 @@ function createChain() {
         tracker = createToolTracker();
         midTurnSent = false;
         stopping = false;
+        failedAfterSwitch = false;
       }
       const record = { midTurn, delivery, interrupted: false, interrupts: [] };
       if (midTurn) {
@@ -149,6 +153,7 @@ function createChain() {
     failed(record) {
       const beforeSwitch = pendingSwitch === record;
       if (beforeSwitch) for (const r of record.interrupts) r.interrupted = false;
+      else failedAfterSwitch = true;
       return { ...finish(record), beforeSwitch };
     },
     /** You stopped the turn (no effect outside a chain). */
@@ -193,7 +198,9 @@ function createFollowUp() {
         return "none";
       }
       if (stopped) {
-        if (!(queued > 0)) pending = false;
+        // kept only when this Stop paused the queue: ▶ answers the items, then continues. An item queued while
+        // Copilot winds down (not paused) must not be answered with the stopped task still pending.
+        if (!paused) pending = false;
         return "none";
       }
       if (queued > 0) return "pump";

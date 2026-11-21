@@ -389,9 +389,13 @@ test("follow-up, Stop", () => {
   assert.equal(f.afterTurn({ stopped: true, queued: 0 }), "none");
   assert.equal(f.answerDue(), false);
   f.interrupted();
-  assert.equal(f.afterTurn({ stopped: true, queued: 2 }), "none");
+  assert.equal(f.afterTurn({ stopped: true, queued: 2, paused: true }), "none");
   assert.equal(f.answerDue(), true);
   assert.equal(f.afterTurn({ queued: 0 }), "continue");
+  // an item queued while Copilot winds down after the Stop (queue not paused): the stopped task is dropped
+  f.interrupted();
+  assert.equal(f.afterTurn({ stopped: true, queued: 1, paused: false }), "none");
+  assert.equal(f.answerDue(), false);
 });
 
 test("follow-up, paused / dead", () => {
@@ -461,4 +465,29 @@ test("chain: failed tells whether it was before the switch point", () => {
   const last = c.returned(a, "cancelled");
   assert.equal(last.ended, true);
   assert.equal(c.failed(a).ended, false); // already finished
+});
+
+test("chain: a prompt that failed after its switch point marks the chain failed, in either return order", () => {
+  for (const failedFirst of [true, false]) {
+    const c = MQ.createChain();
+    const a = c.start();
+    const b = c.start({ midTurn: true });
+    assert.ok(c.marker(ABORT_TEXT));
+    let end;
+    if (failedFirst) {
+      assert.equal(c.failed(b).ended, false);
+      end = c.returned(a, "cancelled");
+    } else {
+      assert.equal(c.returned(a, "cancelled").ended, false);
+      end = c.failed(b);
+    }
+    assert.equal(end.ended, true);
+    assert.equal(end.failed, true);
+  }
+  // a failure before the switch point does not count, and a new chain starts clean
+  const c = MQ.createChain();
+  const a = c.start();
+  const b = c.start({ midTurn: true });
+  assert.equal(c.failed(b).failed, false);
+  assert.equal(c.returned(a, "end_turn").failed, false);
 });
