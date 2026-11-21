@@ -238,7 +238,16 @@ const shownUserText = (raw) => (MessageQueue.isContinuePrompt(raw) ? MessageQueu
 /** The text of a replayed user message that is yours (Edit, Left Shift+Up/Down): none for the continue prompt. */
 const ownUserText = (raw) => (MessageQueue.isContinuePrompt(raw) ? "" : shownUserText(raw));
 let queueItemSeq = 0; // ids of queued items (MessageQueue item shape)
-// a group's status mark in its header (Activity statuses; a work group is running while one of its tools runs)
+// a group's status mark in its header (Activity statuses; a work group is running while one of its tools runs): its
+// tooltip, and the word for it in Copy thread
+const MARK_TITLES = {
+  running: "running",
+  completed: "completed",
+  failed: "failed",
+  interrupted: "interrupted (main turn stopped; the subagent may still be working)",
+  quiet: "quiet (no news)",
+};
+const STATUS_WORDS = { quiet: "no news" };
 api
   .getSettings()
   .then((s) => {
@@ -315,7 +324,7 @@ class SessionView {
     this.sendBtn = h("button", { class: "primary", onclick: () => this.send() }, "Send");
     this.stopBtn = h("button", { onclick: () => this.cancel(), disabled: true }, "Stop");
     this.statusEl = h("div", { class: "status-line" });
-    this.bgEl = h("span", { class: "bg-running", hidden: true }); // "N subagents running": only the log's groups, never busy
+    this.bgEl = h("button", { type: "button", class: "bg-running", hidden: true, title: "Show the first running subagent" }); // "N subagents running": only the log's groups, never busy
     this.closeChildrenBtn = h(
       "button",
       { class: "danger", hidden: true, title: "Close every sub-session of this one (they stay resumable)", onclick: () => closeViews(openDescendants(this.sessionId)) },
@@ -356,8 +365,7 @@ class SessionView {
       this.editBar,
       this.queueEl,
       h("div", { class: "composer" }, this.cmdPopup, this.input, this.agentPicker, h("div", { class: "btns" }, this.sendBtn, this.stopBtn)),
-      this.statusEl,
-      this.bgEl,
+      h("div", { class: "status-bar" }, this.statusEl, this.bgEl), // the running line sits beside the status: no shift
     );
     this.bgEl.onclick = () => {
       const first = this.activity.running().map((id) => this.groupEls.get(id)).find(Boolean);
@@ -1327,14 +1335,16 @@ class SessionView {
       const items = [...body.children].map((c) => c._md?.()?.trim()).filter(Boolean);
       if (kind === "work") return items.join("\n\n");
       const quoted = i.prompt ? i.prompt.split("\n").map((l) => `> ${l}`).join("\n") : "";
-      return [`**Subagent: ${i.title}** (${i.status})`, quoted, ...items].filter(Boolean).join("\n\n");
+      const name = i.title && i.title !== "subagent" ? `**Subagent: ${i.title}**` : "**Subagent**";
+      return [`${name} (${STATUS_WORDS[i.status] ?? i.status})`, quoted, ...items].filter(Boolean).join("\n\n");
     };
     el._renderHeader = () => {
       const i = el._info;
-      // work: ● while a tool runs, then ✗ if one failed, ○ if one never ended, else ✓
+      // work: ● while a tool runs, then ✗ if one failed, ○ if one never ended or was interrupted, else ✓
       const status = kind === "work" ? (i.running.size ? "running" : i.failed.size ? "failed" : i.leftover.size ? "quiet" : "completed") : i.status;
       mark.className = `mark ${status}`;
       mark.textContent = Activity.MARKS[status] ?? Activity.MARKS.running;
+      mark.title = MARK_TITLES[status] ?? MARK_TITLES.running;
       const runningTitle = [...i.running.values()].pop();
       name.textContent = name.title = Activity.headerText({ kind, title: i.title, tools: i.tools, thoughts: i.thoughts, runningTitle, lastLine: i.status === "running" ? i.lastLine : "", waiting: i.waiting });
     };
@@ -1381,8 +1391,9 @@ class SessionView {
     this.stream(type, text, u.messageId, container);
   }
 
-  /** The turn is over (chain end, replay end): background subagents with no news get ○ (Activity.settle), and the
-   *  tools left pending in work groups (killed, stopped, replayed without an end) no longer count as running. */
+  /** The turn is over (chain end, replay end, the process gone): Activity.settle turns a sync subagent still running
+   *  into ⊘ (stopped, no task update came) and a background one with no news into ○; the tools left pending in work
+   *  groups (killed, stopped, replayed without an end) no longer count as running. */
   settleGroups() {
     this.applyChanges(this.activity.settle());
     for (const g of this.log.querySelectorAll(":scope > .group.work")) {
@@ -1444,6 +1455,8 @@ class SessionView {
     const items = [...from._body.childNodes];
     if (into._prompt) into._prompt.after(...items);
     else into._body.prepend(...items);
+    if (from.open) into.open = true; // you opened it: it stays open
+    into._runs = from._runs; // a continuing message keeps its block (an unlinked task group never streamed: no runs of its own)
     into._info.tools += from._info.tools;
     into._info.thoughts += from._info.thoughts;
     for (const [id, title] of from._info.running) into._info.running.set(id, title);
@@ -1575,7 +1588,8 @@ class SessionView {
     const { running } = t.group._info;
     if (status === "pending" || status === "in_progress") running.set(u.toolCallId, d.title ?? "tool");
     else running.delete(u.toolCallId);
-    if (status !== "pending" && status !== "in_progress") t.group._info.leftover.delete(u.toolCallId);
+    if (status === "interrupted") t.group._info.leftover.add(u.toolCallId); // ○ like a tool that never ended, not ✓
+    else if (status !== "pending" && status !== "in_progress") t.group._info.leftover.delete(u.toolCallId);
     if (status === "failed") t.group._info.failed.add(u.toolCallId);
     else t.group._info.failed.delete(u.toolCallId);
     t.group._renderHeader();
@@ -2144,6 +2158,7 @@ class SessionView {
   markDead({ code, signal, stderr }) {
     this.flush();
     this.dead = true;
+    this.settleGroups(); // no ● and no "N subagents running" in a dead view
     this.clearEdit(); // the text stays in the box
     this.dismissPermissions();
     this.error(`Copilot process exited (${code ?? signal}).${stderr ? "\n" + stderr : ""}\nClick the session in the list to resume it again.`);
@@ -2235,6 +2250,7 @@ async function openSession(s, { activate: show = true } = {}) {
   } catch (e) {
     v.resuming = false;
     v.dead = true;
+    v.settleGroups(); // what was replayed before the failure keeps no ●
     v.error(`Could not resume this session: ${e.message}`);
     v.setBusy(false);
   }

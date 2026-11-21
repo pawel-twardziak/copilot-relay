@@ -10,7 +10,9 @@ It runs on Windows, macOS and Linux.
   with 📌 (on hover): pinned sessions are listed on top, above the folders. Both are remembered. While you filter the
   list every folder is shown expanded.
 - Chat with streamed answers, file diffs and permission prompts. Tool calls and thinking collapse into groups, and each
-  subagent has its own collapsed group.
+  subagent has its own collapsed group. In a group's header, ○ means no news (a background subagent sent nothing more
+  and no one confirmed it finished, or a tool never ended or was interrupted) and ⊘ means the main turn was stopped
+  while a subagent ran: it may still be working, and what it sends later is still shown in its group.
   Press **Stop** (or `Esc`) to cancel a turn.
 - Links are clickable. Web and `mailto:` links open in your browser or mail app. File links and file paths in
   tool calls and diffs open in the default app. Relative paths resolve against the session folder, and `:line` /

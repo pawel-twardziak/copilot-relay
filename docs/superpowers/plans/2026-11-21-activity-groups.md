@@ -34,7 +34,7 @@ target container, and keeps one `StreamRuns` per container. The queue's tool tra
 - Main agent text arriving between two subagent chunks must stay in the log, not in a group (test in Task 1).
 - Two subagents failing back to back must produce two error lines in two groups (test in Task 2 + StreamRuns per
   container in Task 4).
-- A Stop during a sync subagent: the task group shows ⊘, then ● and ✓ when the subagent's late updates arrive (test
+- A Stop during a sync subagent: the task group shows ⊘, and it stays ⊘ (late updates still shown) (test
   in Task 2).
 - Replay where a subagent tool's update precedes its `tool_call` must land in the subagent group, not the work group
   (test in Task 1).

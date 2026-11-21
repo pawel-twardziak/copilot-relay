@@ -165,9 +165,9 @@ details.thought > div { white-space: pre-wrap; padding: 4px 0 0 14px; border-lef
 .group .mark.failed, .group .mark.interrupted { color: var(--err); }
 .group .mark.running { color: var(--warn); }
 .group .mark.quiet { color: var(--muted); }
-.bg-running { display: block; padding: 0 14px 6px; background: var(--panel); color: var(--muted); font-size: 12px; cursor: pointer; }
+.bg-running { flex: none; font: inherit; padding: 0; border: 0; background: none; color: var(--muted); cursor: pointer; }
 .bg-running[hidden] { display: none; }
-.bg-running:hover { color: var(--fg, inherit); text-decoration: underline; }
+.bg-running:hover:not(:disabled), .bg-running:focus-visible { color: var(--text); text-decoration: underline; }
 .group > summary .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .group:hover > summary .acts { opacity: 1; }
 .group-body { border-top: 1px solid var(--border); padding: 8px 10px; display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
@@ -198,7 +198,8 @@ details.thought > div { white-space: pre-wrap; padding: 4px 0 0 14px; border-lef
 .composer { position: relative; display: flex; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--border); background: var(--panel); }
 .composer textarea { flex: 1; resize: none; min-height: 40px; max-height: 240px; line-height: 1.4; }
 .composer .btns { display: flex; flex-direction: column; gap: 6px; }
-.status-line { padding: 0 14px 6px; background: var(--panel); color: var(--muted); font-size: 12px; min-height: 18px; }
+.status-bar { display: flex; align-items: baseline; gap: 12px; padding: 0 14px 6px; background: var(--panel); font-size: 12px; line-height: 16px; min-height: 22px; } /* one line always reserved: the running line never shifts the composer */
+.status-line { flex: 1; min-width: 0; color: var(--muted); }
 /* messages waiting for a busy session: a strip above the composer */
 .queue-strip { padding: 6px 14px; border-top: 1px solid var(--border); background: var(--panel); font-size: 12px; color: var(--muted); }
 .queue-strip[hidden] { display: none; }
