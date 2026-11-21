@@ -232,8 +232,11 @@ let tree = SessionTree.index(links); // parent/child index over `links` (bare se
 const views = new Map(); // sessionId -> SessionView
 let activeId = null;
 let queueMidTurn = false; // setting: deliver queued messages while a turn runs
-/** Text of a replayed user message as the user sees it: a mid-turn delivery comes back wrapped. */
-const shownUserText = (raw) => MessageQueue.unwrap(raw) ?? raw;
+/** Text of a replayed user message as the user sees it: a queued message comes back wrapped, the app's continue
+ *  prompt as its label. */
+const shownUserText = (raw) => (MessageQueue.isContinuePrompt(raw) ? MessageQueue.CONTINUE_LABEL : MessageQueue.unwrap(raw) ?? raw);
+/** The text of a replayed user message that is yours (Edit, Left Shift+Up/Down): none for the continue prompt. */
+const ownUserText = (raw) => (MessageQueue.isContinuePrompt(raw) ? "" : shownUserText(raw));
 let queueItemSeq = 0; // ids of queued items (MessageQueue item shape)
 api
   .getSettings()
@@ -274,6 +277,8 @@ class SessionView {
     // prompts of this view pending: a mid-turn delivery overlaps the running one, one turn for the app (its tools,
     // switch point, interrupted prompts and your Stop: MessageQueue.createChain)
     this.chain = MessageQueue.createChain();
+    // a task interrupted by a queued message: the answers come first, then the continue prompt (createFollowUp)
+    this.followUp = MessageQueue.createFollowUp();
     this.relayName = null;
     this.turn = 0; // user/relay messages so far = the turn ordinal of the latest one (see append)
     this.turnText = null; // getter for the latest user message's text
@@ -1152,22 +1157,36 @@ class SessionView {
     this.enqueue({ kind: "relay", text: m.text, prompt: m.prompt, from: m.from, human, fromCwd: m.fromCwd ?? null, deliveryId: m.deliveryId, command: false });
   }
 
-  /** End of a turn: the head item starts a new one (without the mid-turn wrapper). */
+  /** End of a turn: the head item starts a new one; while an interrupted task waits it goes as an answer prompt
+   *  (wrapped), otherwise as a plain prompt. */
   pump() {
     const { busy, paused, edit, historyOp, holdInbox, deleting, dead } = this;
     if (!MessageQueue.canDeliverIdle({ busy, paused, edit, historyOp, holdInbox, deleting, dead, queued: this.queue.length })) return;
     const item = this.queue.shift();
     this.renderQueue();
     const { el, source, delivery } = this.itemPrompt(item);
-    this.runPrompt(item.prompt, el, source, delivery);
+    this.runPrompt(item.prompt, el, source, delivery, { answer: this.followUp.answerDue(), more: this.queue.length > 0 });
   }
 
-  /** A tool boundary with the queue head eligible: send it now, as a second prompt that interrupts the running one. */
+  /** A tool boundary with the queue head eligible: send it now, as a second prompt that interrupts the running one
+   *  (an answer prompt; the interrupted task is continued after the last answer). */
   deliverMidTurn() {
     const item = this.queue.shift();
     this.renderQueue();
     const { el, source, delivery } = this.itemPrompt(item);
-    this.runPrompt(item.prompt, el, source, delivery, { midTurn: true });
+    this.followUp.interrupted();
+    this.runPrompt(item.prompt, el, source, delivery, { midTurn: true, more: this.queue.length > 0 });
+  }
+
+  /** After the last answer to queued messages: the app's own prompt that resumes the interrupted task. It is a small
+   *  system-style line, never editable or recalled (it is still a user message for the turn ordinals). */
+  sendContinue() {
+    const label = MessageQueue.CONTINUE_LABEL;
+    const el = h("div", { class: "msg user continue" }, h("div", { class: "body" }, label), copyBtn(() => label));
+    el._md = () => `_${label}_`;
+    el._matchText = () => MessageQueue.CONTINUE_PROMPT;
+    el._ownText = () => "";
+    return this.runPrompt(MessageQueue.CONTINUE_PROMPT, el, "relay");
   }
 
   /** Copilot's abort marker after a mid-turn send: the delivered prompt has taken over the turn.
@@ -1199,10 +1218,14 @@ class SessionView {
       if (type === "thought") el = h("details", { class: "thought" }, h("summary", {}, "Thinking"), body);
       else {
         el = h("div", { class: `msg ${type}` }, body, copyBtn(() => shown()));
-        el._md = () => (!shown().trim() ? null : type === "user" ? `**You:**\n\n${shown()}` : shown());
+        el._md = () => {
+          if (!shown().trim()) return null;
+          if (type !== "user") return shown();
+          return MessageQueue.isContinuePrompt(run.text) ? `_${shown()}_` : `**You:**\n\n${shown()}`;
+        };
         if (type === "user") {
           el._matchText = () => run.text; // replayed text arrives after append; what was sent (wrapped if delivered mid-turn)
-          el._ownText = () => shownUserText(run.text);
+          el._ownText = () => ownUserText(run.text); // none for the continue prompt
         }
       }
       run.el = el;
@@ -1691,6 +1714,7 @@ class SessionView {
       this.applyRename(rename.name);
       return;
     }
+    this.followUp.userPrompt(); // you take over: a task waiting for its continue prompt is dropped
     this.runPrompt(text, this.userBubble(text), "app");
   }
 
@@ -1767,20 +1791,23 @@ class SessionView {
 
   /**
    * @param {"app"|"human"|"relay"} source who wrote the prompt (decides the relay budget and image attachments)
-   * @param {{ midTurn?: boolean }} options midTurn: a queued item sent while a prompt of this view runs; it goes out
-   *   wrapped (MessageQueue.wrap), interrupts the running prompt and continues its turn (one chain = one turn)
+   * @param {{ midTurn?: boolean, answer?: boolean, more?: boolean }} options midTurn: a queued item sent while a
+   *   prompt of this view runs; it interrupts the running prompt and continues its turn (one chain = one turn).
+   *   answer (default: midTurn): it goes out as an answer prompt (MessageQueue.wrap), more: other items are still
+   *   queued behind it (the agent is told not to go back to its task yet). A command is never wrapped.
    */
-  async runPrompt(text, bubble, source, delivery = null, { midTurn = false } = {}) {
+  async runPrompt(text, bubble, source, delivery = null, { midTurn = false, answer = midTurn, more = false } = {}) {
     this.flush();
     // CLI commands (/context ...) are not recorded in events.jsonl; compare the recorded count to tell
     const isCmd = SlashCommands.isCommandPrompt(text);
     let sent = text;
-    // not on a command: text in front of it would turn it into an ordinary prompt, the notes wait for the next one
-    if (this.pendingNotes.length && !isCmd) {
+    // not on a command: text in front of it would turn it into an ordinary prompt, the notes wait for the next one;
+    // nor on the continue prompt: it is recognised on replay by its exact text
+    if (this.pendingNotes.length && !isCmd && !MessageQueue.isContinuePrompt(text)) {
       sent = this.pendingNotes.join("\n\n") + "\n\n" + text;
       this.pendingNotes = [];
     }
-    if (midTurn) sent = MessageQueue.wrap(sent);
+    if (answer && !isCmd) sent = MessageQueue.wrap(sent, { more });
     if (sent !== text) {
       // history records what was sent, so fork/delete match that; the bubble and Left Shift+Up keep what you wrote.
       // Before append: markTurn hands _matchText on to the turn's reply.
@@ -1809,13 +1836,14 @@ class SessionView {
       end ??= this.chain.failed(record); // before its switch point: the prompts it was to interrupt run on
       this.error(e.message);
     } finally {
-      if (end?.ended) await this.chainEnded(before, bubble, end.dropped);
+      if (end?.ended) await this.chainEnded(before, bubble, end.dropped, end.stopped);
     }
   }
 
   /** The last prompt of the chain answered: the turn is over.
-   *  dropped: tools in flight when a queued prompt interrupted them, without a switch point to tell. */
-  async chainEnded(before, bubble, dropped) {
+   *  dropped: tools in flight when a queued prompt interrupted them, without a switch point to tell;
+   *  stopped: you pressed Stop during the chain. */
+  async chainEnded(before, bubble, dropped, stopped) {
     this.delivery = null;
     for (const toolCallId of dropped) this.toolCall({ toolCallId, status: "interrupted" });
     this.dismissPermissions();
@@ -1829,6 +1857,10 @@ class SessionView {
     if (this.chain.active()) return; // a new chain started during the await: it ends the turn itself
     if (!this.dead) this.setBusy(false);
     if (!this.deleting) scheduleRefresh(); // a delete refreshes the list itself
+    // after the last answer to queued messages the interrupted task goes on; "pump": the next queued item is answered
+    // first (setBusy(false) has scheduled it)
+    const { paused, dead, deleting } = this;
+    if (this.followUp.afterTurn({ stopped, queued: this.queue.length, paused, dead, deleting }) === "continue") this.sendContinue();
   }
 
   cancel() {
@@ -1879,6 +1911,7 @@ function renderRun(r, final = false) {
     if (final) linkify(r.body, { codeOnly: true }); // marked already links plain URLs in Markdown text
   } else {
     r.body.textContent = r.type === "user" ? FileLinks.parseRelayHeader(shownUserText(r.text)).display : r.text;
+    if (r.type === "user") r.el.classList.toggle("continue", MessageQueue.isContinuePrompt(r.text)); // the app's continue prompt
     if (final && r.type === "user") linkify(r.body); // a prompt replayed from the history (live ones are bubbles)
   }
   if (r.type === "user") {
