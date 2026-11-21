@@ -269,7 +269,10 @@ class SessionView {
     this.reopenRequests = new Map();
     this.busy = false;
     this.dead = false;
-    this.run = null; // current streamed block { type, el, text }
+    // streamed blocks { type, messageId, el, body, text }: each chunk goes to its message's block (StreamRuns)
+    this.runs = StreamRuns.create();
+    this.dirty = new Set(); // runs with text not rendered yet
+    this.touched = new Set(); // runs changed since the last flush (to finish: final render, links)
     this.tools = new Map();
     this.renderQueued = false;
     this.queue = []; // MessageQueue items (relay messages, your prompts sent while busy) waiting for delivery
@@ -1216,11 +1219,11 @@ class SessionView {
 
   // --- streaming blocks
   stream(type, text, messageId) {
-    // a different messageId means a new message even if the type is the same
-    if (!this.run || this.run.type !== type || ((messageId || this.run.messageId) && messageId !== this.run.messageId)) {
+    let run = this.runs.find(type, messageId);
+    if (!run) {
       this.flush();
       const body = h("div", { class: type === "agent" ? "md" : "body" });
-      const run = { type, body, text: "", messageId };
+      run = { type, body, text: "", messageId };
       const shown = () => FileLinks.parseRelayHeader(shownUserText(run.text)).display; // a replayed relay message hides its [folder "..."] line
       let el;
       if (type === "thought") el = h("details", { class: "thought" }, h("summary", {}, "Thinking"), body);
@@ -1238,9 +1241,11 @@ class SessionView {
       }
       run.el = el;
       this.append(el);
-      this.run = run;
+      this.runs.add(run);
     }
-    this.run.text += text;
+    run.text += text;
+    this.dirty.add(run);
+    this.touched.add(run);
     this.queueRender();
   }
   queueRender() {
@@ -1248,28 +1253,32 @@ class SessionView {
     this.renderQueued = true;
     requestAnimationFrame(() => {
       this.renderQueued = false;
-      const r = this.run;
-      if (!r) return;
-      renderRun(r);
+      if (!this.dirty.size) return;
+      for (const r of this.dirty) renderRun(r);
+      this.dirty.clear();
       if (this.follow) this.toBottom();
     });
   }
   flush() {
-    // Finish the current block before something else is appended. If a frame is still pending, render it now
-    // (final render, with links); if the last frame already rendered everything, only add the links, so
-    // the message is not parsed again and a text selection in it survives.
-    const r = this.run;
-    if (r && this.renderQueued) renderRun(r, true);
-    else if (r?.type === "agent") linkify(r.body, { codeOnly: true });
-    else if (r?.type === "user") linkify(r.body);
-    if (r?.type === "agent") this.imageRefs(r.body);
-    else if (r?.type === "user") this.mentionThumbs(r.el, r.text);
-    if (r?.type === "agent") this.linkPaths(r.body, this.cwd);
-    else if (r?.type === "user") {
-      const head = FileLinks.parseRelayHeader(shownUserText(r.text));
-      this.linkPaths(r.body, head.from ? head.folder : this.cwd);
+    // Finish the blocks streamed into since the last flush before something else is appended. A block with text not
+    // rendered yet is rendered now (final render, with links); one whose last frame rendered everything only gets
+    // the links, so the message is not parsed again and a text selection in it survives. A message that streams on
+    // later (a background subagent) is rendered again in its own block and finished at the next flush.
+    for (const r of this.touched) {
+      if (this.dirty.has(r)) renderRun(r, true);
+      else if (r.type === "agent") linkify(r.body, { codeOnly: true });
+      else if (r.type === "user") linkify(r.body);
+      if (r.type === "agent") this.imageRefs(r.body);
+      else if (r.type === "user") this.mentionThumbs(r.el, r.text);
+      if (r.type === "agent") this.linkPaths(r.body, this.cwd);
+      else if (r.type === "user") {
+        const head = FileLinks.parseRelayHeader(shownUserText(r.text));
+        this.linkPaths(r.body, head.from ? head.folder : this.cwd);
+      }
     }
-    this.run = null;
+    this.touched.clear();
+    this.dirty.clear();
+    this.runs.close();
   }
 
   // --- ACP session/update
