@@ -150,6 +150,27 @@ details.thought > div { white-space: pre-wrap; padding: 4px 0 0 14px; border-lef
 .tool .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tool .body { border-top: 1px solid var(--border); padding: 8px 10px; max-height: 360px; overflow: auto; }
 .tool .body pre { margin: 0 0 6px; white-space: pre-wrap; }
+/* groups: the main agent's work (tools, thinking) and each subagent, collapsed; a one-line header of fixed height */
+.group { max-width: 920px; border: 1px solid var(--border); border-radius: 6px; font-size: 12.5px; }
+.group.subagent { background: var(--panel); }
+.group > summary {
+  height: 26px; box-sizing: border-box; padding: 0 10px; cursor: pointer; display: flex; gap: 8px; align-items: center;
+  list-style: none; color: var(--muted);
+}
+.group > summary::-webkit-details-marker { display: none; }
+.group > summary::before { content: "▸"; flex: none; }
+.group[open] > summary::before { content: "▾"; }
+.group .mark { flex: none; font-size: 11px; }
+.group .mark.completed { color: var(--ok); }
+.group .mark.failed, .group .mark.interrupted { color: var(--err); }
+.group .mark.running { color: var(--warn); }
+.group > summary .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group:hover > summary .acts { opacity: 1; }
+.group-body { border-top: 1px solid var(--border); padding: 8px 10px; display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
+.group-body > .tool, .group-body > details.thought { font-size: 12.5px; }
+.task-prompt { color: var(--muted); font-size: 12.5px; }
+.task-prompt summary { cursor: pointer; }
+.task-prompt pre { margin: 4px 0 0; white-space: pre-wrap; padding-left: 14px; border-left: 2px solid var(--border); }
 .diff-path { color: var(--muted); margin-bottom: 4px; }
 .diff .add { color: var(--ok); }
 .diff .del { color: var(--err); }
