@@ -27,7 +27,7 @@ test("a task call creates an anchored subagent group and owns its later updates"
   assert.equal(a.route(update("task1", { status: "completed" })).groupId, "g1");
   assert.equal(a.group("g1").mode, "sync");
   assert.equal(a.group("g1").taskToolCallId, "task1");
-  assert.equal(a.group("g1").status, "running");
+  assert.equal(a.group("g1").status, "completed");
 });
 
 test("background: the agent_id in the task result links the subagent", () => {
@@ -101,4 +101,75 @@ test("other main-agent update types go to the log", () => {
   for (const sessionUpdate of ["user_message_chunk", "plan", "usage_update"]) {
     assert.deepEqual(a.route({ sessionUpdate }), { to: "main", changes: [] });
   }
+});
+
+const A = "545ca39a-d731-47a0-aac7-dc4b29d53701";
+const statuses = (r) => r.changes.filter((c) => c.type === "status").map((c) => [c.groupId, c.status]);
+const syncTask = (id, title = "T") => call(id, { title, rawInput: { agent_type: "explore", prompt: "p", mode: "sync" } });
+const bgTaskLinked = (a, id, agentId) => {
+  a.route(call(id, { title: "B", rawInput: { agent_type: "explore", prompt: "p", mode: "background" } }));
+  a.route(update(id, { status: "completed", content: [{ type: "content", content: { type: "text", text: `Agent started in background with agent_id: ${agentId}.` } }] }));
+};
+
+test("sync: the task's status is the group's; interrupted, then late updates run again and complete", () => {
+  const a = Activity.create();
+  a.route(syncTask("t1"));
+  assert.deepEqual(statuses(a.route(chunk("agent_message_chunk", "s1", "x", A))), []);
+  assert.deepEqual(statuses(a.route(update("t1", { status: "interrupted" }))), [["g1", "interrupted"]]);
+  assert.deepEqual(statuses(a.route(chunk("agent_message_chunk", "s1", "y", A))), [["g1", "running"]]);
+  assert.deepEqual(statuses(a.route(update("t1", { status: "completed" }))), [["g1", "completed"]]);
+});
+
+test("background: quiet after settle without evidence, running on a new update, completed by read_agent", () => {
+  const a = Activity.create();
+  bgTaskLinked(a, "t1", A);
+  assert.deepEqual(a.settle(), [{ type: "status", groupId: "g1", status: "quiet" }]);
+  assert.deepEqual(statuses(a.route(chunk("agent_message_chunk", "s2", "z", A))), [["g1", "running"]]);
+  a.route(call("r1", { title: "read_agent", rawInput: { agent_id: A } }));
+  const r = a.route(update("r1", { status: "completed", rawOutput: { content: `Agent is idle (waiting for messages). agent_id: ${A}, agent_type: explore, status: idle` } }));
+  assert.equal(r.to, "work");
+  assert.deepEqual(statuses(r), [["g1", "completed"]]);
+});
+
+test("two subagents failing back to back mark their own groups failed", () => {
+  const a = Activity.create();
+  a.route(syncTask("t1"));
+  a.route(syncTask("t2"));
+  const fail = (agentId) => ({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Error: Execution failed: 400" }, _meta: { "github.com/copilot": { agentId } } });
+  const ra = a.route(fail("A"));
+  const rb = a.route(fail("B"));
+  assert.notEqual(ra.groupId, rb.groupId);
+  assert.deepEqual(statuses(ra), [[ra.groupId, "failed"]]);
+  assert.deepEqual(statuses(rb), [[rb.groupId, "failed"]]);
+});
+
+test("parallel sync: a finished task takes the standalone group whose last message equals its result", () => {
+  const a = Activity.create();
+  a.route(syncTask("t1", "One"));
+  a.route(syncTask("t2", "Two"));
+  a.route(chunk("agent_message_chunk", "sa", "alpha", "A")); // g3
+  a.route(chunk("agent_message_chunk", "sb", "be", "B")); // g4
+  a.route(chunk("agent_message_chunk", "sb", "ta", "B"));
+  const r = a.route(update("t2", { status: "completed", rawOutput: { content: "beta\n" } }));
+  assert.ok(r.changes.some((c) => c.type === "merged" && c.from === "g4" && c.into === "g2"));
+  assert.deepEqual(statuses(r), [["g2", "completed"]]);
+  assert.equal(a.route(chunk("agent_message_chunk", "sb2", "more", "B")).groupId, "g2");
+  assert.ok(!a.route(update("t1", { status: "completed", rawOutput: { content: "no match" } })).changes.some((c) => c.type === "merged"));
+});
+
+test("replaying: background groups get no running phase; settle gives quiet", () => {
+  const a = Activity.create();
+  bgTaskLinked(a, "t1", A);
+  a.settle(); // quiet
+  assert.deepEqual(statuses(a.route(chunk("agent_message_chunk", "s3", "x", A), { replaying: true })), []);
+  assert.deepEqual(a.settle(), []); // already quiet
+});
+
+test("running() lists running groups", () => {
+  const a = Activity.create();
+  a.route(syncTask("t1"));
+  bgTaskLinked(a, "t2", A);
+  assert.deepEqual(a.running(), ["g1", "g2"]);
+  a.route(update("t1", { status: "completed" }));
+  assert.deepEqual(a.running(), ["g2"]);
 });
