@@ -238,6 +238,16 @@ const shownUserText = (raw) => (MessageQueue.isContinuePrompt(raw) ? MessageQueu
 /** The text of a replayed user message that is yours (Edit, Left Shift+Up/Down): none for the continue prompt. */
 const ownUserText = (raw) => (MessageQueue.isContinuePrompt(raw) ? "" : shownUserText(raw));
 let queueItemSeq = 0; // ids of queued items (MessageQueue item shape)
+// a group's status mark in its header (Activity statuses; a work group is running while one of its tools runs): its
+// tooltip, and the word for it in Copy thread
+const MARK_TITLES = {
+  running: "running",
+  completed: "completed",
+  failed: "failed",
+  interrupted: "interrupted (main turn stopped; the subagent may still be working)",
+  quiet: "quiet (no news)",
+};
+const STATUS_WORDS = { quiet: "no news" };
 api
   .getSettings()
   .then((s) => {
@@ -273,7 +283,10 @@ class SessionView {
     this.runs = StreamRuns.create();
     this.dirty = new Set(); // runs with text not rendered yet
     this.touched = new Set(); // runs changed since the last flush (to finish: final render, links)
-    this.tools = new Map();
+    this.tools = new Map(); // toolCallId -> badge { el, st, name, kind, body, data, group } (task calls have none)
+    // where each update goes: the log, the main agent's work group or a subagent's group (Activity)
+    this.activity = Activity.create();
+    this.groupEls = new Map(); // Activity groupId -> its subagent group element
     this.renderQueued = false;
     this.queue = []; // MessageQueue items (relay messages, your prompts sent while busy) waiting for delivery
     this.paused = false; // Stop with items queued: nothing is delivered automatically until resumed
@@ -311,6 +324,7 @@ class SessionView {
     this.sendBtn = h("button", { class: "primary", onclick: () => this.send() }, "Send");
     this.stopBtn = h("button", { onclick: () => this.cancel(), disabled: true }, "Stop");
     this.statusEl = h("div", { class: "status-line" });
+    this.bgEl = h("button", { type: "button", class: "bg-running", hidden: true, title: "Show the first running subagent" }); // "N subagents running": only the log's groups, never busy
     this.closeChildrenBtn = h(
       "button",
       { class: "danger", hidden: true, title: "Close every sub-session of this one (they stay resumable)", onclick: () => closeViews(openDescendants(this.sessionId)) },
@@ -351,8 +365,12 @@ class SessionView {
       this.editBar,
       this.queueEl,
       h("div", { class: "composer" }, this.cmdPopup, this.input, this.agentPicker, h("div", { class: "btns" }, this.sendBtn, this.stopBtn)),
-      this.statusEl,
+      h("div", { class: "status-bar" }, this.statusEl, this.bgEl), // the running line sits beside the status: no shift
     );
+    this.bgEl.onclick = () => {
+      const first = this.activity.running().map((id) => this.groupEls.get(id)).find(Boolean);
+      first?.scrollIntoView({ block: "nearest" });
+    };
     // Left Shift+Up/Down walks through your earlier messages, with the draft as the newest entry; registered first,
     // so it also works while the command popup is open. Right Shift+arrows still extend the text selection.
     this.input.addEventListener("keydown", (e) => {
@@ -745,13 +763,22 @@ class SessionView {
       this.turnReplied = false;
       this.turnReplyEl = null;
       Object.assign(el, { _turn: this.turn, _kind: "user" });
-    } else if (this.turn > 0 && !this.turnReplied && ((c.contains("msg") && c.contains("agent")) || (el.tagName === "DETAILS" && c.contains("tool")))) {
+    } else if (this.turn > 0 && !this.turnReplied && this.isReply(el)) {
       this.turnReplied = true;
       this.turnReplyEl = el;
       // cuts are anchored on user messages: a reply is found through its turn's user message
       Object.assign(el, { _turn: this.turn, _kind: "reply", _matchText: this.turnText });
     } else return;
     this.addActions(el);
+  }
+
+  /** Whether el can be its turn's reply: an answer, a tool badge or a group (not a standalone subagent group: it may
+   *  arrive after the next user message). */
+  isReply(el) {
+    const c = el.classList;
+    if (c.contains("msg") && c.contains("agent")) return true;
+    if (el.tagName === "DETAILS" && c.contains("tool")) return true;
+    return c.contains("group") && el._anchored !== false;
   }
 
   /** Un-number a turn that Copilot did not record (a CLI command such as /context): strip its actions. */
@@ -1205,7 +1232,7 @@ class SessionView {
   switchPoint({ record, dropped: ids }) {
     const { delivery } = record;
     const dropped = new Set(ids);
-    for (const toolCallId of dropped) this.toolCall({ toolCallId, status: "interrupted" });
+    for (const toolCallId of dropped) this.applyTool({ sessionUpdate: "tool_call_update", toolCallId, status: "interrupted" });
     // its permission question is gone with it (a card without a tool id was asked before the switch too); main still
     // holds the request open, so it is answered as cancelled. A subagent's question is not: the interruption is the
     // main agent's, the subagent may still be waiting for the answer.
@@ -1219,10 +1246,13 @@ class SessionView {
   }
 
   // --- streaming blocks
-  stream(type, text, messageId) {
-    let run = this.runs.find(type, messageId);
+  /** container: null = the log (top-level, through append), else a group element (its body and its own runs). */
+  stream(type, text, messageId, container = null) {
+    const runs = container ? container._runs : this.runs;
+    let run = runs.find(type, messageId);
     if (!run) {
-      this.flush();
+      if (container) this.finishRuns();
+      else this.flush();
       const body = h("div", { class: type === "agent" ? "md" : "body" });
       run = { type, body, text: "", messageId };
       const shown = () => FileLinks.parseRelayHeader(shownUserText(run.text)).display; // a replayed relay message hides its [folder "..."] line
@@ -1241,8 +1271,11 @@ class SessionView {
         }
       }
       run.el = el;
-      this.append(el);
-      this.runs.add(run);
+      if (container) {
+        if (type === "thought") container._info.thoughts++;
+        this.groupAppend(container, el);
+      } else this.append(el);
+      runs.add(run);
     }
     run.text += text;
     this.dirty.add(run);
@@ -1260,8 +1293,14 @@ class SessionView {
       if (this.follow) this.toBottom();
     });
   }
+  /** Before something else is appended to the log: finish the streamed blocks (finishRuns); chunks without a
+   *  messageId then start a new block. */
   flush() {
-    // Finish the blocks streamed into since the last flush before something else is appended. A block with text not
+    this.finishRuns();
+    this.runs.close();
+  }
+  finishRuns() {
+    // Finish the blocks streamed into since the last flush, in the log and in groups. A block with text not
     // rendered yet is rendered now (final render, with links); one whose last frame rendered everything only gets
     // the links, so the message is not parsed again and a text selection in it survives. A message that streams on
     // later (a background subagent) is rendered again in its own block and finished at the next flush.
@@ -1279,7 +1318,178 @@ class SessionView {
     }
     this.touched.clear();
     this.dirty.clear();
-    this.runs.close();
+  }
+
+  // --- groups: the main agent's work (tools, thinking) and each subagent, collapsed (Activity decides the place)
+  /** A <details class="group work|subagent">: a one-line header (_renderHeader from _info) and a body. */
+  groupElement(kind, { title = "", prompt = null, anchored = true } = {}) {
+    const mark = h("span", { class: "mark" });
+    const name = h("span", { class: "title" });
+    const body = h("div", { class: "group-body" });
+    const el = h("details", { class: `group ${kind}` }, h("summary", {}, mark, name), body);
+    // (the kind is in _info: el._kind is the turn mark's "user"/"reply")
+    el._info = { kind, title, prompt, status: "running", tools: 0, thoughts: 0, running: new Map(), failed: new Set(), leftover: new Set(), waiting: false, lastLine: "" }; // running: toolCallId -> title
+    Object.assign(el, { _body: body, _runs: StreamRuns.create(), _anchored: anchored });
+    el._md = () => {
+      const i = el._info;
+      const items = [...body.children].map((c) => c._md?.()?.trim()).filter(Boolean);
+      if (kind === "work") return items.join("\n\n");
+      const quoted = i.prompt ? i.prompt.split("\n").map((l) => `> ${l}`).join("\n") : "";
+      const name = i.title && i.title !== "subagent" ? `**Subagent: ${i.title}**` : "**Subagent**";
+      return [`${name} (${STATUS_WORDS[i.status] ?? i.status})`, quoted, ...items].filter(Boolean).join("\n\n");
+    };
+    el._renderHeader = () => {
+      const i = el._info;
+      // work: ● while a tool runs, then ✗ if one failed, ○ if one never ended or was interrupted, else ✓
+      const status = kind === "work" ? (i.running.size ? "running" : i.failed.size ? "failed" : i.leftover.size ? "quiet" : "completed") : i.status;
+      mark.className = `mark ${status}`;
+      mark.textContent = Activity.MARKS[status] ?? Activity.MARKS.running;
+      mark.title = MARK_TITLES[status] ?? MARK_TITLES.running;
+      const runningTitle = [...i.running.values()].pop();
+      name.textContent = name.title = Activity.headerText({ kind, title: i.title, tools: i.tools, thoughts: i.thoughts, runningTitle, lastLine: i.status === "running" ? i.lastLine : "", waiting: i.waiting });
+    };
+    el._renderHeader();
+    return el;
+  }
+
+  /** The main agent's open work group: the log's last element when it is one, else a new one. */
+  workGroup() {
+    const last = this.log.lastElementChild;
+    if (last?._info?.kind === "work") return last;
+    this.flush();
+    return this.append(this.groupElement("work"));
+  }
+
+  /** An item into a group's body: never a turn mark; the log still follows the bottom. */
+  groupAppend(group, el) {
+    group._body.append(el);
+    group._renderHeader();
+    if (this.follow) this.toBottom();
+  }
+
+  /** Route an update (Activity) and apply the group changes it brings. */
+  route(u) {
+    const r = this.activity.route(u, { replaying: !!this.resuming });
+    this.applyChanges(r.changes);
+    return r;
+  }
+
+  /** A streamed chunk where Activity routes it: the log, the work group or a subagent's group. A subagent's text never
+   *  falls back to the log: without its group element it is not shown. */
+  streamRouted(type, u, text) {
+    const r = this.route(u);
+    if (r.to === "main") return this.stream(type, text, u.messageId);
+    const container = r.to === "work" ? this.workGroup() : this.groupEls.get(r.groupId);
+    if (!container) return;
+    if (type === "agent" && container._info.kind === "subagent") {
+      const line = (this.activity.group(r.groupId)?.lastText ?? "").split("\n").map((l) => l.trim()).filter(Boolean).pop();
+      if (line) {
+        container._info.lastLine = line.length > 60 ? line.slice(0, 59) + "…" : line;
+        container._renderHeader();
+      }
+    }
+    this.stream(type, text, u.messageId, container);
+  }
+
+  /** The turn is over (chain end, replay end, the process gone): Activity.settle turns a sync subagent still running
+   *  into ⊘ (stopped, no task update came) and a background one with no news into ○; the tools left pending in work
+   *  groups (killed, stopped, replayed without an end) no longer count as running. */
+  settleGroups() {
+    this.applyChanges(this.activity.settle());
+    for (const g of this.log.querySelectorAll(":scope > .group.work")) {
+      if (!g._info.running.size) continue;
+      for (const id of g._info.running.keys()) g._info.leftover.add(id); // ○ until they end
+      g._info.running.clear();
+      g._renderHeader();
+    }
+    this.refreshBg();
+  }
+
+  /** "N subagent(s) running" after the status line; a click shows the first one. */
+  refreshBg() {
+    const n = this.activity.running().length;
+    this.bgEl.hidden = !n;
+    this.bgEl.textContent = n ? `${n} subagent${n === 1 ? "" : "s"} running` : "";
+  }
+
+  applyChanges(changes) {
+    for (const c of changes) {
+      if (c.type === "created") this.addSubagentGroup(c);
+      else if (c.type === "status") {
+        const el = this.groupEls.get(c.groupId);
+        if (!el) continue;
+        el._info.status = c.status;
+        el._renderHeader();
+      } else if (c.type === "merged") this.mergeGroups(this.groupEls.get(c.from), this.groupEls.get(c.into), c.from);
+    }
+    this.refreshBg();
+  }
+
+  /** A subagent group, appended at the log's end (a task's group stands for its badge: replacesTool removes it). */
+  addSubagentGroup({ groupId, title, prompt, anchored, replacesTool }) {
+    const el = this.groupElement("subagent", { title: title || "subagent", prompt, anchored });
+    el._task = {};
+    const badge = replacesTool != null ? this.tools.get(replacesTool) : null;
+    if (badge) {
+      // an earlier update of the task (replay) made it a tool badge: its data is the task's now
+      this.tools.delete(replacesTool);
+      el._task = badge.data;
+      badge.el.remove();
+      const g = badge.group;
+      g._info.tools--;
+      g._info.running.delete(replacesTool);
+      g._info.failed.delete(replacesTool);
+      if (g._body.childElementCount || g._turn) g._renderHeader();
+      else g.remove();
+    }
+    this.groupEls.set(groupId, el);
+    this.renderTask(el);
+    this.flush();
+    this.append(el);
+  }
+
+  /** Parallel sync subagents: a standalone group turned out to be a task's; its items go after the task's prompt. */
+  mergeGroups(from, into, fromId) {
+    this.groupEls.delete(fromId);
+    if (!from || !into) return;
+    const items = [...from._body.childNodes];
+    if (into._prompt) into._prompt.after(...items);
+    else into._body.prepend(...items);
+    if (from.open) into.open = true; // you opened it: it stays open
+    into._runs = from._runs; // a continuing message keeps its block (an unlinked task group never streamed: no runs of its own)
+    into._info.tools += from._info.tools;
+    into._info.thoughts += from._info.thoughts;
+    for (const [id, title] of from._info.running) into._info.running.set(id, title);
+    for (const id of from._info.failed) into._info.failed.add(id);
+    for (const id of from._info.leftover) into._info.leftover.add(id);
+    for (const t of this.tools.values()) if (t.group === from) t.group = into;
+    from.remove();
+    into._renderHeader();
+  }
+
+  /** A task call's update: no badge, its prompt and error are in its group (the status comes with the changes). */
+  taskUpdate(el, u) {
+    el._task = ToolCalls.merge(el._task, u);
+    this.renderTask(el);
+  }
+  renderTask(el) {
+    const d = el._task;
+    const prompt = d.rawInput?.prompt ?? el._info.prompt;
+    if (prompt) {
+      el._info.prompt = prompt;
+      if (!el._prompt) {
+        el._prompt = h("details", { class: "task-prompt" }, h("summary", {}, "Prompt"), h("pre", {}));
+        el._body.prepend(el._prompt);
+      }
+      el._prompt.querySelector("pre").textContent = prompt;
+    }
+    const error = d.status === "failed" ? d.rawOutput?.message : null;
+    if (error) {
+      el._error ??= h("div", { class: "msg error" });
+      el._error._md = () => `Error: ${el._error.textContent}`;
+      el._error.textContent = error;
+      if (!el._error.isConnected) this.groupAppend(el, el._error);
+    } else el._error?.remove();
   }
 
   // --- ACP session/update
@@ -1296,19 +1506,18 @@ class SessionView {
         // the switch point of a mid-turn send is not shown (a Stop of yours still shows whatever Copilot sends)
         const sw = this.chain.marker(text);
         if (sw) this.switchPoint(sw);
-        else this.stream("agent", text, u.messageId);
+        else this.streamRouted("agent", u, text);
         break;
       }
       case "agent_thought_chunk":
-        this.stream("thought", text, u.messageId);
+        this.streamRouted("thought", u, text);
         break;
       case "tool_call":
-        this.flush();
-        this.toolCall(u);
+        this.applyTool(u);
         this.toolBoundary(u);
         break;
       case "tool_call_update":
-        this.toolCall(u);
+        this.applyTool(u);
         this.toolBoundary(u);
         break;
       case "plan":
@@ -1343,7 +1552,22 @@ class SessionView {
     if (MessageQueue.canDeliverMidTurn(s)) this.deliverMidTurn();
   }
 
-  toolCall(u) {
+  /** The single entry for every tool update, also the synthetic "interrupted" ones of switchPoint/chainEnded. */
+  applyTool(u) {
+    const r = this.route(u);
+    if (r.to === "work") {
+      if (u.sessionUpdate === "tool_call") this.flush(); // its badge closes the log's block (a subagent's does not)
+      return this.toolCall(u);
+    }
+    const group = this.groupEls.get(r.groupId);
+    if (!group) return; // never in the log or the main agent's work
+    if (r.task) this.taskUpdate(group, u);
+    else this.toolCall(u, group);
+  }
+
+  /** A tool badge: a new one goes into the given group, else into the main agent's work group; an update goes to the
+   *  badge wherever it is. */
+  toolCall(u, group = null) {
     let t = this.tools.get(u.toolCallId);
     if (!t) {
       const st = h("span", { class: "st" });
@@ -1351,13 +1575,24 @@ class SessionView {
       const kind = h("span", { class: "kind" });
       const body = h("div", { class: "body" });
       const el = h("details", { class: "tool" }, h("summary", {}, st, kind, name), body);
-      t = { el, st, name, kind, body, data: {} };
+      t = { el, st, name, kind, body, data: {}, group: group ?? this.workGroup() };
       el._md = () => `*Tool: ${t.data.title ?? "tool"} (${t.data.status ?? "pending"})*`;
       this.tools.set(u.toolCallId, t);
-      this.append(el);
+      this.finishRuns();
+      t.group._runs.close();
+      t.group._info.tools++;
+      this.groupAppend(t.group, el);
     }
     const d = (t.data = ToolCalls.merge(t.data, u));
     const status = d.status ?? "pending";
+    const { running } = t.group._info;
+    if (status === "pending" || status === "in_progress") running.set(u.toolCallId, d.title ?? "tool");
+    else running.delete(u.toolCallId);
+    if (status === "interrupted") t.group._info.leftover.add(u.toolCallId); // ○ like a tool that never ended, not ✓
+    else if (status !== "pending" && status !== "in_progress") t.group._info.leftover.delete(u.toolCallId);
+    if (status === "failed") t.group._info.failed.add(u.toolCallId);
+    else t.group._info.failed.delete(u.toolCallId);
+    t.group._renderHeader();
     t.st.className = `st ${status}`;
     t.st.textContent = { completed: "✓", failed: "✗", in_progress: "●", pending: "○", interrupted: "⊘" }[status] ?? "●";
     t.kind.textContent = d.kind && d.kind !== "other" ? d.kind : "";
@@ -1392,7 +1627,10 @@ class SessionView {
   plan(entries) {
     const list = h("ul", {}, entries.map((e) => h("li", { class: e.status }, e.content)));
     const asMd = () => "**Plan:**\n" + entries.map((e) => `- [${e.status === "completed" ? "x" : " "}] ${e.content}`).join("\n");
-    if (this.planEl && this.log.lastElementChild === this.planEl) this.planEl.replaceChildren(h("b", {}, "Plan"), list);
+    // in place while only groups came after it (tool calls and thinking collapse into groups)
+    let after = this.planEl?.isConnected ? this.planEl.nextElementSibling : null;
+    while (after?.classList.contains("group")) after = after.nextElementSibling;
+    if (this.planEl?.isConnected && !after) this.planEl.replaceChildren(h("b", {}, "Plan"), list);
     else this.planEl = this.append(h("div", { class: "plan" }, h("b", {}, "Plan"), list));
     this.planEl._md = asMd;
   }
@@ -1414,6 +1652,11 @@ class SessionView {
     // a subagent's question (a background subagent runs on after the turn): see dismissPermissions
     card._agentId = ToolCalls.agentOf(toolCall) ?? ToolCalls.agentOf(this.tools.get(card._toolCallId)?.data);
     card._reqId = reqId; // ...and answers their requests
+    card._group = this.tools.get(card._toolCallId)?.group ?? null; // its header shows ⏸ while the card is open
+    if (card._group) {
+      card._group._info.waiting = true;
+      card._group._renderHeader();
+    }
     const opts = h(
       "div",
       { class: "opts" },
@@ -1565,6 +1808,11 @@ class SessionView {
 
   closeCard(card) {
     if (this.openCards.delete(card)) renderList();
+    const g = card._group;
+    if (g && ![...this.openCards].some((c) => c._group === g)) {
+      g._info.waiting = false;
+      g._renderHeader();
+    }
   }
 
   /** The turn is over (all: the process is gone): main no longer waits for its permission questions, except a
@@ -1876,7 +2124,8 @@ class SessionView {
    *  stopped: you pressed Stop during the chain; failed: it ended with an error. */
   async chainEnded(before, bubble, dropped, stopped, failed = false) {
     this.delivery = null;
-    for (const toolCallId of dropped) this.toolCall({ toolCallId, status: "interrupted" });
+    for (const toolCallId of dropped) this.applyTool({ sessionUpdate: "tool_call_update", toolCallId, status: "interrupted" });
+    this.settleGroups();
     this.dismissPermissions({ all: false, stopped });
     // the view was closed or its session deleted meanwhile: nothing to update (a refresh would also replace the
     // delete's warning in the status line)
@@ -1909,6 +2158,7 @@ class SessionView {
   markDead({ code, signal, stderr }) {
     this.flush();
     this.dead = true;
+    this.settleGroups(); // no ● and no "N subagents running" in a dead view
     this.clearEdit(); // the text stays in the box
     this.dismissPermissions();
     this.error(`Copilot process exited (${code ?? signal}).${stderr ? "\n" + stderr : ""}\nClick the session in the list to resume it again.`);
@@ -1992,6 +2242,7 @@ async function openSession(s, { activate: show = true } = {}) {
     const res = await api.openSession(s.sessionId, s.cwd);
     v.resuming = false;
     v.flush();
+    v.settleGroups();
     v.setConfig(res.configOptions);
     v.toBottom();
     v.setBusy(false);
@@ -1999,6 +2250,7 @@ async function openSession(s, { activate: show = true } = {}) {
   } catch (e) {
     v.resuming = false;
     v.dead = true;
+    v.settleGroups(); // what was replayed before the failure keeps no ●
     v.error(`Could not resume this session: ${e.message}`);
     v.setBusy(false);
   }
