@@ -157,8 +157,12 @@ For each update it returns where it goes:
    `status: idle` or `status: completed` for an `agent_id` sets that subagent group's status (rule 6).
 6. **Group status**, shown as a mark in the header.
    - **Sync:** the `task`'s status. ● running, ✓ completed, ✗ failed, ⊘ interrupted.
-     - Interrupted only means the main agent's turn was cut. The subagent goes on (see "Stop and interruptions"), so
-       a later update from it sets ● again, and its end sets ✓.
+     - Interrupted only means the main agent's turn was cut. The subagent goes on (see "Stop and interruptions"):
+       its later updates are still shown in its group, but the group stays ⊘. After a Stop, Copilot sends nothing
+       more for the `task` call, so there is no end to wait for. A real `task` update (completed/failed) still sets
+       ✓/✗.
+     - `settle()` (end of the chain, end of a replay) turns a sync group that is still ● into ⊘. This covers a Stop,
+       where no update for the `task` ever comes.
    - **Background, live:**
      - ● while updates arrive or the prompt chain is active.
      - ✓ after a `read_agent` result reports it idle or completed.
