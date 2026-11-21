@@ -144,6 +144,7 @@ details.thought > div { white-space: pre-wrap; padding: 4px 0 0 14px; border-lef
 .tool .st { font-size: 11px; }
 .tool .st.completed { color: var(--ok); }
 .tool .st.failed { color: var(--err); }
+.tool .st.interrupted { color: var(--err); }
 .tool .st.in_progress, .tool .st.pending { color: var(--warn); }
 .tool .kind { color: var(--muted); }
 .tool .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
