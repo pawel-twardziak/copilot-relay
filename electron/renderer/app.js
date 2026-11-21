@@ -314,6 +314,7 @@ class SessionView {
     this.filesBtn = h("button", { title: "Files opened from this conversation", hidden: true, onclick: () => filePreview.show(this) });
     this.cmdPopup = h("div", { class: "cmd-popup", role: "listbox", hidden: true, onmousedown: (e) => e.preventDefault() });
     this.editText = h("span");
+    this.queueEl = h("div", { class: "queue-strip", hidden: true });
     this.editBar = h("div", { class: "edit-bar", hidden: true }, this.editText, h("button", { onclick: () => this.cancelEdit() }, "Cancel"));
 
     this.el = h(
@@ -335,6 +336,7 @@ class SessionView {
       this.relationsEl,
       this.log,
       this.editBar,
+      this.queueEl,
       h("div", { class: "composer" }, this.cmdPopup, this.input, this.agentPicker, h("div", { class: "btns" }, this.sendBtn, this.stopBtn)),
       this.statusEl,
     );
@@ -972,8 +974,66 @@ class SessionView {
     this.statusEl.textContent = MessageQueue.statusText({ busy, dead, deleting, queued: this.queue.length, paused });
   }
 
-  /** Task 4 draws the queue strip here; called after every change of the queue. */
-  renderQueue() {}
+  /** Draws the queue strip above the input; called after every change of the queue. */
+  renderQueue() {
+    const q = this.queue;
+    this.queueEl.hidden = q.length === 0;
+    this.queueEl.replaceChildren();
+    if (q.length) {
+      const head = h("div", { class: "queue-head" }, h("span", {}, `Queue (${q.length})`));
+      if (this.paused) {
+        head.append(h("span", { class: "queue-paused" }, "Paused"), h("button", { title: "Resume delivering the queued messages", onclick: () => this.resumeQueue() }, "▶ resume"));
+      }
+      this.queueEl.append(head);
+      for (const item of q) {
+        const text = h("span", { class: "queue-text", title: item.text }, item.text);
+        if (item.kind === "app") {
+          text.classList.add("editable");
+          text.onclick = () => this.editQueued(item);
+        }
+        this.queueEl.append(
+          h("div", { class: "queue-row" }, h("span", { class: "queue-from" }, item.kind === "app" ? "you:" : `from ${item.from}:`), text, h("button", { title: "Remove from the queue", onclick: () => this.removeQueued(item) }, "✕")),
+        );
+      }
+    }
+    this.showQueueStatus();
+  }
+
+  removeQueued(item) {
+    const i = this.queue.indexOf(item);
+    if (i < 0) return;
+    this.queue.splice(i, 1);
+    if (!this.queue.length) this.paused = false;
+    if (item.kind === "relay" && item.deliveryId) {
+      api.relayAck(this.sessionId, item.deliveryId).catch(() => {});
+      this.system(`Removed a queued message from ${item.from}.`);
+    }
+    this.renderQueue();
+    if (!this.busy) this.pump();
+  }
+
+  /** Move a queued app message back into the (empty) input box to change it. */
+  editQueued(item) {
+    if (this.input.value.trim()) {
+      this.statusEl.textContent = "Clear the message box to edit a queued message.";
+      return;
+    }
+    const i = this.queue.indexOf(item);
+    if (i < 0) return;
+    this.queue.splice(i, 1);
+    if (!this.queue.length) this.paused = false;
+    this.input.value = item.text;
+    this.autosize();
+    this.updatePopup();
+    this.input.focus();
+    this.renderQueue();
+  }
+
+  resumeQueue() {
+    this.paused = false;
+    this.renderQueue();
+    if (!this.busy) this.pump();
+  }
 
   /** Queue an item (see MessageQueue); it is delivered at the next tool boundary (setting on) or when the turn ends. */
   enqueue(item) {
