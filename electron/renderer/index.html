@@ -51,6 +51,11 @@
         </label>
         <p class="hint">Messages for a working session are delivered after its current tool step. Off: they wait until the turn ends.</p>
         <label>
+          Tool and subagent details
+          <select id="set-activity"><option value="off">In the chat</option><option value="subagents">Subagents in a side panel</option><option value="all">All in a side panel</option></select>
+        </label>
+        <p class="hint">Where the details of tool calls and subagents open. Applies at once to open sessions.</p>
+        <label>
           Default context window
           <select id="set-context"><option value="default">200k</option><option value="long_context">1M</option></select>
         </label>

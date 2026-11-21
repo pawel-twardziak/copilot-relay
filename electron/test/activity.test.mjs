@@ -272,3 +272,10 @@ test("after a merge, an owner-less update of a tool first seen in the standalone
   a.route(update("t1", { status: "completed", rawOutput: { content: "alpha" } })); // g3 merged into g1
   assert.equal(a.route(update("v1", { status: "completed" })).groupId, "g1");
 });
+
+test("inPanel: all takes both kinds, subagents only subagent groups, off none", () => {
+  assert.deepEqual(["work", "subagent"].map((k) => Activity.inPanel("all", k)), [true, true]);
+  assert.deepEqual(["work", "subagent"].map((k) => Activity.inPanel("subagents", k)), [false, true]);
+  assert.deepEqual(["work", "subagent"].map((k) => Activity.inPanel("off", k)), [false, false]);
+  assert.equal(Activity.inPanel(undefined, "subagent"), false);
+});

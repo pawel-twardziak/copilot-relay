@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { launch } from "./driver.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const FIXTURES = path.join(ROOT, "electron", "test", "fixtures", "acp");
@@ -55,6 +56,7 @@ export const checks = [
     // the load replays the whole history, then fails: the dead view shows all of it, settled (the answer must not
     // end the replay before the last update); a few times, as the order of the two used to vary
     name: "failed-load-settles",
+    modes: ["off"],
     scenario: path.join(FIXTURES, "failing-load-scenario.mjs"),
     async run(app) {
       await playScenario(app);
@@ -74,6 +76,7 @@ export const checks = [
     // closed while it resumes and opened again: the second view ends its replay (the first open's end must not
     // take the second one's wait, nor end it early)
     name: "reopen-while-resuming",
+    modes: ["off"],
     scenario: path.join(FIXTURES, "slow-load-scenario.mjs"),
     async run(app) {
       await playScenario(app);
@@ -90,6 +93,28 @@ export const checks = [
       await app.idle();
       assert.equal(await app.ev(`views.get(${id}).statusEl.textContent === "Resuming session…"`), false);
       assert.deepStrictEqual(await app.dump(), readBaseline("replay"));
+    },
+  },
+  {
+    // Save without touching the select keeps the mode, in the page and on disk (a relaunch reads it back)
+    name: "save-keeps-mode",
+    modes: ["all"],
+    async run(app) {
+      await app.ev(`document.querySelector("#btn-settings").click()`);
+      await app.check(`document.querySelector("#settings").open`, "the Settings dialog");
+      await app.ev(`document.querySelector("#set-save").click()`);
+      await app.check(`!document.querySelector("#settings").open`, "the Settings dialog to close");
+      assert.equal(await app.ev(`api.getSettings().then((s) => s.activityPanel)`), "all");
+      await app.close({ keep: true });
+      const again = await launch({ scenario: PANEL_SCENARIO, dir: app.dir });
+      try {
+        assert.equal(await again.ev(`api.getSettings().then((s) => s.activityPanel)`), "all");
+        await again.ev(`document.querySelector("#btn-settings").click()`);
+        await again.check(`document.querySelector("#settings").open`, "the Settings dialog");
+        assert.equal(await again.ev(`document.querySelector("#set-activity").value`), "all");
+      } finally {
+        await again.close();
+      }
     },
   },
 ];

@@ -80,17 +80,20 @@ async function attach(port) {
  * Starts the app. scenario: the scripted agent's scenario module (path); settings: more fields for settings.json.
  * @returns the driver; every method that waits throws after 20 s.
  */
-export async function launch({ scenario, settings = {}, width = 1280, height = 800 }) {
-  const tmp = mkdtempSync(path.join(os.tmpdir(), "ui-check-"));
+export async function launch({ scenario, settings = {}, width = 1280, height = 800, dir = null }) {
+  // dir: the folder of an earlier launch kept with close({ keep: true }); this launch uses its settings and removes it
+  const tmp = dir ?? mkdtempSync(path.join(os.tmpdir(), "ui-check-"));
   const config = path.join(tmp, "config");
   const work = path.join(tmp, "work"); // the session folder: the session id is scripted-work
-  mkdirSync(path.join(config, "copilot-relay-desktop"), { recursive: true });
-  mkdirSync(work);
-  mkdirSync(path.join(tmp, "copilot-home"));
-  writeFileSync(
-    path.join(config, "copilot-relay-desktop", "settings.json"),
-    JSON.stringify({ copilotCommand: AGENT, relay: false, ...settings }, null, 2),
-  );
+  if (!dir) {
+    mkdirSync(path.join(config, "copilot-relay-desktop"), { recursive: true });
+    mkdirSync(work);
+    mkdirSync(path.join(tmp, "copilot-home"));
+    writeFileSync(
+      path.join(config, "copilot-relay-desktop", "settings.json"),
+      JSON.stringify({ copilotCommand: AGENT, relay: false, ...settings }, null, 2),
+    );
+  }
   const port = await freePort();
   // X11 only, so the window is on Xvfb's display even from a Wayland session (Electron would pick Wayland).
   // Its own process group: close() stops xvfb, Electron and the agents it started together.
@@ -108,7 +111,10 @@ export async function launch({ scenario, settings = {}, width = 1280, height = 8
   const exited = new Promise((resolve) => proc.once("exit", resolve));
 
   let ws = null;
-  async function close() {
+  let closed = false;
+  async function close({ keep = false } = {}) {
+    if (closed) return;
+    closed = true;
     ws?.close();
     try {
       process.kill(-proc.pid, "SIGTERM");
@@ -118,7 +124,7 @@ export async function launch({ scenario, settings = {}, width = 1280, height = 8
       process.kill(-proc.pid, "SIGKILL"); // what is left of the group (Electron's helpers, the agents)
     } catch {}
     if (!gone) await exited;
-    rmSync(tmp, { recursive: true, force: true });
+    if (!keep) rmSync(tmp, { recursive: true, force: true });
   }
 
   try {
@@ -146,7 +152,10 @@ export async function launch({ scenario, settings = {}, width = 1280, height = 8
     await resize(width, height);
 
     return {
+      /** The launch's folder: pass it as dir to launch again with the same settings (after close({ keep: true })). */
+      dir: tmp,
       ev,
+      check,
       resize,
       /** A new session in the work folder (scripted-work); later calls act on it. */
       async newSession() {

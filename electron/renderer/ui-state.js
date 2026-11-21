@@ -104,6 +104,19 @@ function deliveryAck(id, seen, ack) {
   };
 }
 
-const UiState = { listModel, CHAT_SCALE, stepScale, imageMentions, VIEWER_ZOOM, fitScale, zoomAt, acceptDelivery, deliveryAck };
+/** The side panel's geometry (activity panel): minimum width, the width the chat keeps, default width, the gap left
+ *  beside the drawer when the panel overlays a narrow window. */
+const PANEL = { min: 280, chatMin: 480, def: 420, drawerGap: 40 };
+
+/** Below chatMin + min the panel overlays the chat (narrow) instead of sharing the row; width is the stored one
+ *  (or the default) kept within [min, what the layout leaves]. */
+function panelLayout(viewWidth, stored) {
+  const narrow = viewWidth < PANEL.chatMin + PANEL.min;
+  const want = Number.isFinite(stored) ? stored : PANEL.def;
+  const room = viewWidth - (narrow ? PANEL.drawerGap : PANEL.chatMin);
+  return { narrow, width: Math.max(PANEL.min, Math.min(want, room)) };
+}
+
+const UiState = { PANEL, panelLayout, listModel, CHAT_SCALE, stepScale, imageMentions, VIEWER_ZOOM, fitScale, zoomAt, acceptDelivery, deliveryAck };
 globalThis.UiState = UiState;
 if (typeof module !== "undefined") module.exports = UiState;

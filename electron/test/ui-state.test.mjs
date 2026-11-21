@@ -166,3 +166,13 @@ test("a prompt that fails after it started stays acknowledged and seen", () => {
   assert.deepEqual(acks, ["d1"]);
   assert.equal(acceptDelivery(seen, "d1"), false);
 });
+
+test("panelLayout: wide keeps 480 px for the chat, narrow below 760 px", () => {
+  assert.deepEqual(UiState.panelLayout(980, 420), { narrow: false, width: 420 });
+  assert.deepEqual(UiState.panelLayout(980, 900), { narrow: false, width: 500 }); // 980 - 480
+  assert.deepEqual(UiState.panelLayout(980, 100), { narrow: false, width: 280 });
+  assert.deepEqual(UiState.panelLayout(760, 420), { narrow: false, width: 280 });
+  assert.deepEqual(UiState.panelLayout(759, 420), { narrow: true, width: 420 });
+  assert.deepEqual(UiState.panelLayout(400, 420), { narrow: true, width: 360 }); // 400 - 40
+  assert.deepEqual(UiState.panelLayout(980, NaN), { narrow: false, width: 420 }); // default
+});

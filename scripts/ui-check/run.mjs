@@ -4,7 +4,7 @@
 import { checks, PANEL_SCENARIO, setRecording } from "./checks.mjs";
 import { launch } from "./driver.mjs";
 
-const DEFAULT_MODES = ["off"];
+const DEFAULT_MODES = ["off", "subagents", "all"];
 
 const args = process.argv.slice(2);
 const record = args.includes("--record");
