@@ -268,6 +268,7 @@ class SessionView {
     this.tracker = MessageQueue.createToolTracker(); // tools in flight in the running chain
     this.midTurnSent = false; // a queued item was delivered during the running chain
     this.pendingSwitch = null; // { delivery } of a mid-turn prompt until Copilot's abort marker shows it took over
+    this.stopping = false; // you stopped the running chain: nothing more goes out mid-turn until it has ended
     this.relayName = null;
     this.turn = 0; // user/relay messages so far = the turn ordinal of the latest one (see append)
     this.turnText = null; // getter for the latest user message's text
@@ -979,7 +980,7 @@ class SessionView {
     this.queue.push({ id: ++queueItemSeq, ...item });
     this.renderQueue();
     if (!this.busy) this.pump();
-    else this.showQueueStatus();
+    this.showQueueStatus(); // also when idle and held (paused, edit, holdInbox): "Queue paused (N)" / "N waiting"
   }
 
   /** The bubble, relay source and broker acknowledgement for a queued item about to become a prompt. */
@@ -1074,10 +1075,12 @@ class SessionView {
   deliverMidTurn() {
     const item = this.queue.shift();
     this.renderQueue();
-    for (const r of this.chainRecords) r.interrupted = true; // they answer "cancelled" when the delivered one ends
+    // they answer "cancelled" when the delivered one ends; restored if the delivered request fails before its switch
+    const interrupts = this.chainRecords.filter((r) => !r.interrupted);
+    for (const r of interrupts) r.interrupted = true;
     this.midTurnSent = true;
     const { el, source, delivery } = this.itemPrompt(item);
-    this.runPrompt(item.prompt, el, source, delivery, { midTurn: true });
+    this.runPrompt(item.prompt, el, source, delivery, { midTurn: true, interrupts });
   }
 
   /** Copilot's abort marker after a mid-turn send: the delivered prompt has taken over the turn. */
@@ -1085,7 +1088,12 @@ class SessionView {
     const { delivery } = this.pendingSwitch;
     this.pendingSwitch = null;
     // a tool the interruption killed stays "pending" forever: it no longer counts as in flight
-    for (const toolCallId of this.tracker.drop()) this.toolCall({ toolCallId, status: "interrupted" });
+    const dropped = new Set(this.tracker.drop());
+    for (const toolCallId of dropped) this.toolCall({ toolCallId, status: "interrupted" });
+    // its permission question is gone with it (a card without a tool id was asked before the switch too)
+    for (const card of [...this.openCards]) {
+      if (card._dismiss && (card._toolCallId == null || dropped.has(card._toolCallId))) card._dismiss("→ interrupted");
+    }
     delivery?.returned(); // its prompt has really started
     this.delivery = delivery;
   }
@@ -1194,7 +1202,9 @@ class SessionView {
     if (this.chain === 0 || !this.tracker.update(u)) return;
     // one mid-turn send at a time: until its switch point the tools of the turn are not known to be settled
     if (this.pendingSwitch) return;
-    const { paused, prompting, edit, historyOp, holdInbox, deleting, dead } = this;
+    const { prompting, edit, historyOp, holdInbox, deleting, dead } = this;
+    // after your Stop a tool may still report completed/failed: what is queued then waits for the end of the turn
+    const paused = this.paused || this.stopping;
     const s = { enabled: queueMidTurn, paused, prompting, edit, historyOp, holdInbox, deleting, dead, inFlight: this.tracker.size(), head: this.queue[0] };
     if (MessageQueue.canDeliverMidTurn(s)) this.deliverMidTurn();
   }
@@ -1262,11 +1272,12 @@ class SessionView {
       h("div", { class: "q" }, h("b", {}, "Permission needed: "), toolCall?.title ?? "tool call", permissionDetail(toolCall?.rawInput)),
     );
     // main has answered this one as cancelled (or the process is gone): nothing is left to decide
-    card._dismiss = () => {
+    card._dismiss = (label = "→ turn ended") => {
       card.classList.add("done");
-      opts.replaceChildren(h("span", {}, "→ turn ended"));
+      opts.replaceChildren(h("span", {}, label));
       this.closeCard(card);
     };
+    card._toolCallId = toolCall?.toolCallId ?? null; // a mid-turn switch dismisses the cards of the tools it killed
     const opts = h(
       "div",
       { class: "opts" },
@@ -1659,9 +1670,10 @@ class SessionView {
   /**
    * @param {"app"|"human"|"relay"} source who wrote the prompt (decides the relay budget and image attachments)
    * @param {{ midTurn?: boolean }} options midTurn: a queued item sent while a prompt of this view runs; it goes out
-   *   wrapped (MessageQueue.wrap), interrupts the running prompt and continues its turn (one chain = one turn)
+   *   wrapped (MessageQueue.wrap), interrupts the running prompt and continues its turn (one chain = one turn);
+   *   interrupts: the chain records it marked interrupted (restored when it fails before its switch point)
    */
-  async runPrompt(text, bubble, source, delivery = null, { midTurn = false } = {}) {
+  async runPrompt(text, bubble, source, delivery = null, { midTurn = false, interrupts = [] } = {}) {
     this.flush();
     // CLI commands (/context ...) are not recorded in events.jsonl; compare the recorded count to tell
     const isCmd = SlashCommands.isCommandPrompt(text);
@@ -1684,6 +1696,7 @@ class SessionView {
     if (this.chain++ === 0) {
       this.tracker = MessageQueue.createToolTracker();
       this.midTurnSent = false;
+      this.stopping = false;
     }
     this.chainRecords.push(record);
     this.setBusy(true);
@@ -1702,6 +1715,8 @@ class SessionView {
       } else if (stop && stop !== "end_turn") this.system(`Turn ended: ${stop}`);
     } catch (e) {
       delivery?.failed(); // (nothing once acknowledged at the switch point)
+      // it never took over: the prompts it was to interrupt are still running, a Stop of them is reported again
+      if (pending && this.pendingSwitch === pending) for (const r of interrupts) r.interrupted = false;
       this.error(e.message);
     } finally {
       if (pending && this.pendingSwitch === pending) this.pendingSwitch = null;
@@ -1714,6 +1729,7 @@ class SessionView {
   async chainEnded(before, bubble) {
     this.delivery = null;
     this.pendingSwitch = null;
+    this.stopping = false;
     // tools in flight when a queued prompt interrupted them, without a switch point to tell
     if (this.midTurnSent) for (const toolCallId of this.tracker.drop()) this.toolCall({ toolCallId, status: "interrupted" });
     this.dismissPermissions();
@@ -1731,6 +1747,7 @@ class SessionView {
 
   cancel() {
     if (!this.busy) return;
+    if (this.prompting) this.stopping = true; // no mid-turn send while Copilot winds the chain down
     // Stop with items queued pauses the queue (setting on): nothing is delivered until you resume it
     if (this.prompting && MessageQueue.pauseOnStop({ enabled: queueMidTurn, queued: this.queue.length })) {
       this.paused = true;
