@@ -210,3 +210,65 @@ test("MARKS", () => {
 test("headerText: a waiting work group shows the permission mark in place of the running tool", () => {
   assert.equal(Activity.headerText({ kind: "work", tools: 2, thoughts: 0, runningTitle: "ls", waiting: true }), "2 tools · ⏸ permission");
 });
+
+test("running(): two parallel sync tasks and their two standalone groups count as two subagents", () => {
+  const a = Activity.create();
+  a.route(syncTask("t1", "One"));
+  a.route(syncTask("t2", "Two"));
+  assert.deepEqual(a.running(), ["g1", "g2"]);
+  a.route(chunk("agent_message_chunk", "sa", "alpha", "A")); // g3
+  assert.equal(a.running().length, 2);
+  a.route(chunk("agent_message_chunk", "sb", "beta", "B")); // g4
+  assert.deepEqual(a.running(), ["g3", "g4"]);
+  a.route(update("t2", { status: "completed", rawOutput: { content: "beta" } })); // g4 merged into g2
+  assert.deepEqual(a.running(), ["g3"]);
+});
+
+test("parallel sync with identical results: the group updated last merges first", () => {
+  const a = Activity.create();
+  a.route(syncTask("t1", "One"));
+  a.route(syncTask("t2", "Two"));
+  a.route(chunk("agent_message_chunk", "sa", "Done.", "A")); // g3, One's subagent
+  a.route(chunk("agent_message_chunk", "sb", "Done.", "B")); // g4, Two's subagent, updated last
+  const merged = (r) => r.changes.filter((c) => c.type === "merged").map((c) => [c.from, c.into]);
+  assert.deepEqual(merged(a.route(update("t2", { status: "completed", rawOutput: { content: "Done." } }))), [["g4", "g2"]]);
+  assert.deepEqual(merged(a.route(update("t1", { status: "completed", rawOutput: { content: "Done." } }))), [["g3", "g1"]]);
+});
+
+test("an ended sync task is not linked to a new subagent", () => {
+  const a = Activity.create();
+  a.route(syncTask("t1", "One"));
+  a.route(update("t1", { status: "completed", rawOutput: { content: "ok" } })); // ended without any subagent update
+  a.route(syncTask("t2", "Two"));
+  const r = a.route(chunk("agent_message_chunk", "s1", "x", "A"));
+  assert.deepEqual([r.groupId, r.changes.filter((c) => c.type === "created").length], ["g2", 0]);
+});
+
+test("a failed task of any mode marks its group failed", () => {
+  for (const mode of ["background", undefined]) {
+    const a = Activity.create();
+    a.route(call("t1", { title: "B", rawInput: { agent_type: "explore", prompt: "p", mode } }));
+    assert.deepEqual(statuses(a.route(update("t1", { status: "failed", rawOutput: { message: "boom" } }))), [["g1", "failed"]], String(mode));
+  }
+});
+
+test("read_agent: only the status in the header with the agent_id counts, not the agent's output", () => {
+  const a = Activity.create();
+  bgTaskLinked(a, "t1", A);
+  a.route(call("r1", { title: "read_agent", rawInput: { agent_id: A } }));
+  const body = `Agent is running. agent_id: ${A}, agent_type: explore, status: running\n\nOutput so far:\nThe job reports status: completed`;
+  assert.deepEqual(statuses(a.route(update("r1", { status: "completed", rawOutput: { content: body } }))), []);
+  a.route(call("r2", { title: "read_agent", rawInput: { agent_id: A } }));
+  const done = `Agent completed. agent_id: ${A}, agent_type: explore, status: completed\n\nstatus: running`;
+  assert.deepEqual(statuses(a.route(update("r2", { status: "completed", rawOutput: { content: done } }))), [["g1", "completed"]]);
+});
+
+test("after a merge, an owner-less update of a tool first seen in the standalone group goes to the task's group", () => {
+  const a = Activity.create();
+  a.route(syncTask("t1", "One"));
+  a.route(syncTask("t2", "Two"));
+  a.route(chunk("agent_message_chunk", "sa", "alpha", "A")); // g3
+  assert.equal(a.route(call("v1", { title: "Viewing" }, "A")).groupId, "g3");
+  a.route(update("t1", { status: "completed", rawOutput: { content: "alpha" } })); // g3 merged into g1
+  assert.equal(a.route(update("v1", { status: "completed" })).groupId, "g1");
+});

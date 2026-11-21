@@ -5,8 +5,9 @@
 const toolCalls = globalThis.ToolCalls ?? require("./tool-calls.js");
 
 const AGENT_ID = /agent_id:\s*([0-9a-f-]{36})/i;
-const AGENT_DONE = /status:\s*(idle|completed)\b/i;
+const AGENT_DONE = /^(idle|completed)$/i;
 const TASK_ENDS = new Set(["completed", "failed", "interrupted"]);
+const ENDED = new Set(["completed", "failed"]);
 
 function isTask(u) {
   const input = u.rawInput;
@@ -21,11 +22,21 @@ function resultText(u) {
   return typeof out === "string" ? out : "";
 }
 
+/** A read_agent result's header: the agent_id and the status field that follows it on the same line (the agent's
+ *  output below the header may say anything). */
+function agentHeader(text) {
+  const match = AGENT_ID.exec(text);
+  if (!match) return null;
+  const rest = text.slice(match.index + match[0].length).split("\n")[0];
+  return { id: match[1], status: /\bstatus:\s*(\w+)/i.exec(rest)?.[1] ?? null };
+}
+
 function createActivity() {
   const tools = new Map(); // toolCallId -> { to, groupId?, task? }
   const groups = new Map(); // groupId -> group
   const byAgent = new Map(); // agentId -> groupId
   const messageOf = new Map(); // groupId -> messageId of the message lastText is built from
+  let seq = 0; // bumped on every update a subagent owns: group.seq tells which group was updated last
 
   function setStatus(group, status, changes) {
     if (group.status === status) return;
@@ -45,10 +56,13 @@ function createActivity() {
   function merge(taskGroup, update, changes) {
     const text = resultText(update).trim();
     if (!text || taskGroup.agentId) return;
-    const standalone = [...groups.values()].find((g) => !g.anchored && !g.mergedInto && g.agentId && g.lastText?.trim() === text);
+    // identical results ("Done."): the task's result follows its own subagent's last chunk, so the latest one wins
+    const matches = [...groups.values()].filter((g) => !g.anchored && !g.mergedInto && g.agentId && g.lastText?.trim() === text);
+    const standalone = matches.reduce((best, g) => (!best || g.seq > best.seq ? g : best), null);
     if (!standalone) return;
     standalone.mergedInto = taskGroup.id;
     link(taskGroup, standalone.agentId);
+    for (const dest of tools.values()) if (dest.groupId === standalone.id) dest.groupId = taskGroup.id; // its tools' later updates
     taskGroup.lastText = standalone.lastText;
     changes.push({ type: "merged", from: standalone.id, into: taskGroup.id });
   }
@@ -62,10 +76,9 @@ function createActivity() {
   }
 
   function readAgentResult(u, changes) {
-    const text = resultText(u);
-    const id = AGENT_ID.exec(text)?.[1];
-    const group = id && groups.get(byAgent.get(id));
-    if (group && AGENT_DONE.test(text)) setStatus(group, "completed", changes);
+    const header = agentHeader(resultText(u));
+    const group = header && groups.get(byAgent.get(header.id));
+    if (group && AGENT_DONE.test(header.status ?? "")) setStatus(group, "completed", changes);
   }
 
   function addGroup(fields, changes, replacesTool = null) {
@@ -79,6 +92,7 @@ function createActivity() {
       taskToolCallId: fields.taskToolCallId ?? null,
       status: "running",
       lastText: null,
+      seq: 0,
     };
     groups.set(group.id, group);
     changes.push({ type: "created", groupId: group.id, title: group.title, prompt: group.prompt, anchored: group.anchored, replacesTool });
@@ -93,7 +107,7 @@ function createActivity() {
   function groupOwnedBy(agentId, changes) {
     const known = byAgent.get(agentId);
     if (known) return groups.get(known);
-    const open = [...groups.values()].filter((g) => g.anchored && g.mode === "sync" && !g.agentId);
+    const open = [...groups.values()].filter((g) => g.anchored && g.mode === "sync" && !g.agentId && !ENDED.has(g.status));
     const group = open.length === 1 ? open[0] : addGroup({ title: "subagent", prompt: null, anchored: false }, changes);
     link(group, agentId);
     return group;
@@ -106,7 +120,7 @@ function createActivity() {
     if (group.mode === "sync" && TASK_ENDS.has(update.status)) {
       if (update.status === "completed") merge(group, update, changes);
       setStatus(group, update.status, changes);
-    }
+    } else if (update.status === "failed") setStatus(group, "failed", changes); // a background task that could not start
     return { to: "group", groupId: dest.groupId, task: true, changes };
   }
 
@@ -141,6 +155,7 @@ function createActivity() {
       const owner = toolCalls.agentOf(u);
       if (owner) {
         const group = groupOwnedBy(owner, changes);
+        group.seq = ++seq;
         ownedStatus(group, u, replaying, changes);
         if (isTool && !tools.has(u.toolCallId)) tools.set(u.toolCallId, { to: "group", groupId: group.id });
         return { to: "group", groupId: group.id, changes };
@@ -157,8 +172,14 @@ function createActivity() {
       }
       return changes;
     },
+    /** Running subagents, each once: an unlinked sync task's subagent may already run in a standalone group (parallel
+     *  sync), so as many unlinked task groups as there are running standalone groups are left out. */
     running() {
-      return [...groups.values()].filter((g) => !g.mergedInto && g.status === "running").map((g) => g.id);
+      const live = [...groups.values()].filter((g) => !g.mergedInto && g.status === "running");
+      const unlinked = live.filter((g) => g.anchored && g.mode === "sync" && !g.agentId);
+      const standalone = live.filter((g) => !g.anchored).length;
+      const counted = new Set(unlinked.slice(0, Math.min(unlinked.length, standalone)));
+      return live.filter((g) => !counted.has(g)).map((g) => g.id);
     },
     group(groupId) {
       return groups.get(groupId) ?? null;
