@@ -235,7 +235,13 @@ let queueMidTurn = false; // setting: deliver queued messages while a turn runs
 /** Text of a replayed user message as the user sees it: a mid-turn delivery comes back wrapped. */
 const shownUserText = (raw) => MessageQueue.unwrap(raw) ?? raw;
 let queueItemSeq = 0; // ids of queued items (MessageQueue item shape)
-api.getSettings().then((s) => (queueMidTurn = s.queueMidTurn === true)).catch(() => {});
+api
+  .getSettings()
+  .then((s) => {
+    queueMidTurn = s.queueMidTurn === true;
+    for (const v of views.values()) v.settingChanged(); // views opened before the settings arrived
+  })
+  .catch(() => {});
 
 // ---------------------------------------------------------------------------
 // session view
@@ -265,12 +271,9 @@ class SessionView {
     this.renderQueued = false;
     this.queue = []; // MessageQueue items (relay messages, your prompts sent while busy) waiting for delivery
     this.paused = false; // Stop with items queued: nothing is delivered automatically until resumed
-    this.chain = 0; // prompts of this view pending: a mid-turn delivery overlaps the running one, one turn for the app
-    this.chainRecords = []; // { interrupted } per pending prompt: interrupted ones answer "cancelled" without a "Stopped."
-    this.tracker = MessageQueue.createToolTracker(); // tools in flight in the running chain
-    this.midTurnSent = false; // a queued item was delivered during the running chain
-    this.pendingSwitch = null; // { delivery } of a mid-turn prompt until Copilot's abort marker shows it took over
-    this.stopping = false; // you stopped the running chain: nothing more goes out mid-turn until it has ended
+    // prompts of this view pending: a mid-turn delivery overlaps the running one, one turn for the app (its tools,
+    // switch point, interrupted prompts and your Stop: MessageQueue.createChain)
+    this.chain = MessageQueue.createChain();
     this.relayName = null;
     this.turn = 0; // user/relay messages so far = the turn ordinal of the latest one (see append)
     this.turnText = null; // getter for the latest user message's text
@@ -955,7 +958,7 @@ class SessionView {
 
   /** A prompt of this view is pending (the user_message_chunk of a live prompt is not shown again). */
   get prompting() {
-    return this.chain > 0;
+    return this.chain.active();
   }
 
   setBusy(b) {
@@ -1006,8 +1009,9 @@ class SessionView {
     if (i < 0) return;
     this.queue.splice(i, 1);
     if (!this.queue.length) this.paused = false;
-    if (item.kind === "relay" && item.deliveryId) {
-      api.relayAck(this.sessionId, item.deliveryId).catch(() => {});
+    if (item.kind === "relay") {
+      // the broker must not deliver it again (a message without an id, such as a delegated task, has nothing to ack)
+      if (item.deliveryId) api.relayAck(this.sessionId, item.deliveryId).catch(() => {});
       this.system(`Removed a queued message from ${item.from}.`);
     }
     this.renderQueue();
@@ -1137,24 +1141,22 @@ class SessionView {
   deliverMidTurn() {
     const item = this.queue.shift();
     this.renderQueue();
-    // they answer "cancelled" when the delivered one ends; restored if the delivered request fails before its switch
-    const interrupts = this.chainRecords.filter((r) => !r.interrupted);
-    for (const r of interrupts) r.interrupted = true;
-    this.midTurnSent = true;
     const { el, source, delivery } = this.itemPrompt(item);
-    this.runPrompt(item.prompt, el, source, delivery, { midTurn: true, interrupts });
+    this.runPrompt(item.prompt, el, source, delivery, { midTurn: true });
   }
 
-  /** Copilot's abort marker after a mid-turn send: the delivered prompt has taken over the turn. */
-  switchPoint() {
-    const { delivery } = this.pendingSwitch;
-    this.pendingSwitch = null;
-    // a tool the interruption killed stays "pending" forever: it no longer counts as in flight
-    const dropped = new Set(this.tracker.drop());
+  /** Copilot's abort marker after a mid-turn send: the delivered prompt has taken over the turn.
+   *  dropped: the tools in flight then (killed by the interruption, they stay "pending" forever). */
+  switchPoint({ record, dropped: ids }) {
+    const { delivery } = record;
+    const dropped = new Set(ids);
     for (const toolCallId of dropped) this.toolCall({ toolCallId, status: "interrupted" });
-    // its permission question is gone with it (a card without a tool id was asked before the switch too)
+    // its permission question is gone with it (a card without a tool id was asked before the switch too); main still
+    // holds the request open, so it is answered as cancelled
     for (const card of [...this.openCards]) {
-      if (card._dismiss && (card._toolCallId == null || dropped.has(card._toolCallId))) card._dismiss("→ interrupted");
+      if (!card._dismiss || (card._toolCallId != null && !dropped.has(card._toolCallId))) continue;
+      api.answerPermission(this.sessionId, card._reqId, null).catch(() => {});
+      card._dismiss("→ interrupted");
     }
     delivery?.returned(); // its prompt has really started
     this.delivery = delivery;
@@ -1224,11 +1226,13 @@ class SessionView {
         // our own prompt is already shown; only replayed history (session/load) is rendered
         if (!this.prompting) this.stream("user", text);
         break;
-      case "agent_message_chunk":
+      case "agent_message_chunk": {
         // the switch point of a mid-turn send is not shown (a Stop of yours still shows whatever Copilot sends)
-        if (this.pendingSwitch && MessageQueue.isAbortChunk(text)) this.switchPoint();
+        const sw = this.chain.marker(text);
+        if (sw) this.switchPoint(sw);
         else this.stream("agent", text, u.messageId);
         break;
+      }
       case "agent_thought_chunk":
         this.stream("thought", text, u.messageId);
         break;
@@ -1264,13 +1268,12 @@ class SessionView {
 
   /** Track the chain's tools; when the last one in flight finishes, the queue head may go out mid-turn. */
   toolBoundary(u) {
-    if (this.chain === 0 || !this.tracker.update(u)) return;
-    // one mid-turn send at a time: until its switch point the tools of the turn are not known to be settled
-    if (this.pendingSwitch) return;
-    const { prompting, edit, historyOp, holdInbox, deleting, dead } = this;
-    // after your Stop a tool may still report completed/failed: what is queued then waits for the end of the turn
-    const paused = this.paused || this.stopping;
-    const s = { enabled: queueMidTurn, paused, prompting, edit, historyOp, holdInbox, deleting, dead, inFlight: this.tracker.size(), head: this.queue[0] };
+    if (!this.chain.toolUpdate(u)) return;
+    // one mid-turn send at a time: until its switch point the tools of the turn are not known to be settled; after
+    // your Stop a tool may still report completed/failed: what is queued then waits for the end of the turn
+    if (this.chain.midTurnBlocked()) return;
+    const { prompting, paused, edit, historyOp, holdInbox, deleting, dead } = this;
+    const s = { enabled: queueMidTurn, paused, prompting, edit, historyOp, holdInbox, deleting, dead, inFlight: this.chain.inFlight(), head: this.queue[0] };
     if (MessageQueue.canDeliverMidTurn(s)) this.deliverMidTurn();
   }
 
@@ -1343,6 +1346,7 @@ class SessionView {
       this.closeCard(card);
     };
     card._toolCallId = toolCall?.toolCallId ?? null; // a mid-turn switch dismisses the cards of the tools it killed
+    card._reqId = reqId; // ...and answers their requests
     const opts = h(
       "div",
       { class: "opts" },
@@ -1625,6 +1629,10 @@ class SessionView {
       // agent changes, /rename and an edit are not queued; with the queue setting off nothing is
       if (cmd || rename || this.edit || this.historyOp || !queueMidTurn) {
         if (cmd || rename) this.statusEl.textContent = "Wait until Copilot finishes this turn.";
+        // Send stays enabled with the queue on: say why nothing happened (a delete or replace rebuilds the view)
+        else if (this.historyOp && queueMidTurn) {
+          this.statusEl.textContent = this.historyOp.description === "edit" ? "Wait until the message has been replaced." : "Wait until the fork or delete of a message has finished.";
+        }
         return;
       }
       this.takeInput();
@@ -1735,10 +1743,9 @@ class SessionView {
   /**
    * @param {"app"|"human"|"relay"} source who wrote the prompt (decides the relay budget and image attachments)
    * @param {{ midTurn?: boolean }} options midTurn: a queued item sent while a prompt of this view runs; it goes out
-   *   wrapped (MessageQueue.wrap), interrupts the running prompt and continues its turn (one chain = one turn);
-   *   interrupts: the chain records it marked interrupted (restored when it fails before its switch point)
+   *   wrapped (MessageQueue.wrap), interrupts the running prompt and continues its turn (one chain = one turn)
    */
-  async runPrompt(text, bubble, source, delivery = null, { midTurn = false, interrupts = [] } = {}) {
+  async runPrompt(text, bubble, source, delivery = null, { midTurn = false } = {}) {
     this.flush();
     // CLI commands (/context ...) are not recorded in events.jsonl; compare the recorded count to tell
     const isCmd = SlashCommands.isCommandPrompt(text);
@@ -1757,46 +1764,35 @@ class SessionView {
     }
     this.append(bubble);
     this.toBottom();
-    const record = { interrupted: false };
-    if (this.chain++ === 0) {
-      this.tracker = MessageQueue.createToolTracker();
-      this.midTurnSent = false;
-      this.stopping = false;
-    }
-    this.chainRecords.push(record);
+    // a mid-turn prompt owns the turn's updates (and is acknowledged) only from its switch point on (the record
+    // keeps its delivery until then)
+    const record = this.chain.start({ midTurn, delivery });
     this.setBusy(true);
     const before = isCmd ? await api.userMessages(this.sessionId).catch(() => null) : null;
-    // a mid-turn prompt owns the turn's updates (and is acknowledged) only from its switch point on
-    const pending = midTurn ? { delivery } : null;
-    if (midTurn) this.pendingSwitch = pending;
-    else this.delivery = delivery;
+    if (!midTurn) this.delivery = delivery;
+    let end = null;
     try {
       const stop = await api.prompt(this.sessionId, sent, source);
       delivery?.returned(); // (a mid-turn one whose marker never came is acknowledged here)
       this.flush();
       // a prompt interrupted by a queued one answers "cancelled": that is not a Stop of yours
-      if (stop === "cancelled") {
-        if (!record.interrupted) this.system("Stopped.");
-      } else if (stop && stop !== "end_turn") this.system(`Turn ended: ${stop}`);
+      end = this.chain.returned(record, stop);
+      if (end.showStopped) this.system("Stopped.");
+      else if (stop && stop !== "cancelled" && stop !== "end_turn") this.system(`Turn ended: ${stop}`);
     } catch (e) {
       delivery?.failed(); // (nothing once acknowledged at the switch point)
-      // it never took over: the prompts it was to interrupt are still running, a Stop of them is reported again
-      if (pending && this.pendingSwitch === pending) for (const r of interrupts) r.interrupted = false;
+      end ??= this.chain.failed(record); // before its switch point: the prompts it was to interrupt run on
       this.error(e.message);
     } finally {
-      if (pending && this.pendingSwitch === pending) this.pendingSwitch = null;
-      this.chainRecords.splice(this.chainRecords.indexOf(record), 1);
-      if (--this.chain === 0) await this.chainEnded(before, bubble);
+      if (end?.ended) await this.chainEnded(before, bubble, end.dropped);
     }
   }
 
-  /** The last prompt of the chain answered: the turn is over. */
-  async chainEnded(before, bubble) {
+  /** The last prompt of the chain answered: the turn is over.
+   *  dropped: tools in flight when a queued prompt interrupted them, without a switch point to tell. */
+  async chainEnded(before, bubble, dropped) {
     this.delivery = null;
-    this.pendingSwitch = null;
-    this.stopping = false;
-    // tools in flight when a queued prompt interrupted them, without a switch point to tell
-    if (this.midTurnSent) for (const toolCallId of this.tracker.drop()) this.toolCall({ toolCallId, status: "interrupted" });
+    for (const toolCallId of dropped) this.toolCall({ toolCallId, status: "interrupted" });
     this.dismissPermissions();
     // the view was closed or its session deleted meanwhile: nothing to update (a refresh would also replace the
     // delete's warning in the status line)
@@ -1805,14 +1801,14 @@ class SessionView {
       const after = await api.userMessages(this.sessionId).catch(() => null);
       if (after === before) this.dropTurn(bubble);
     }
-    if (this.chain > 0) return; // a new chain started during the await: it ends the turn itself
+    if (this.chain.active()) return; // a new chain started during the await: it ends the turn itself
     if (!this.dead) this.setBusy(false);
     if (!this.deleting) scheduleRefresh(); // a delete refreshes the list itself
   }
 
   cancel() {
     if (!this.busy) return;
-    if (this.prompting) this.stopping = true; // no mid-turn send while Copilot winds the chain down
+    this.chain.stop(); // no mid-turn send while Copilot winds the chain down
     // Stop with items queued pauses the queue (setting on): nothing is delivered until you resume it
     if (this.prompting && MessageQueue.pauseOnStop({ enabled: queueMidTurn, queued: this.queue.length })) {
       this.paused = true;
@@ -1888,9 +1884,16 @@ async function openSession(s, { activate: show = true } = {}) {
   if (existing) {
     existing.el.remove();
     views.delete(s.sessionId);
+    // resuming a dead view: what was waiting in it moves to the new one (unpaused: a new view), with the delivery
+    // ids it took, so the broker's redelivery of a queued report is not taken twice
+    s = { ...s, seenDeliveries: s.seenDeliveries ?? existing.seenDeliveries, pendingNotes: s.pendingNotes ?? existing.pendingNotes };
   }
   const v = new SessionView(s);
   views.set(s.sessionId, v);
+  if (existing?.queue.length) {
+    v.queue.push(...existing.queue); // delivered when the resumed session is idle
+    v.renderQueue();
+  }
   v.setBusy(true); // before flushEarly: an early relay message must wait until the session is open
   flushEarly(v);
   if (show) activate(s.sessionId);
@@ -1943,9 +1946,10 @@ function dropView(id) {
 }
 
 /** Rebuild a closed session's view from its files (after its history changed or a delete failed); queued items
- *  that were waiting in the old view move to the new one (unpaused). */
+ *  that were waiting in the old view move to the new one, paused if they were (only ▶ or emptying the queue ends a
+ *  pause). */
 async function reopenView(old, error, { holdInbox = false, typed } = {}) {
-  const { sessionId, cwd, title, queue, parentSessionId, seenDeliveries, pendingNotes } = old;
+  const { sessionId, cwd, title, queue, paused, parentSessionId, seenDeliveries, pendingNotes } = old;
   typed ??= old.recallEl ? old.draft : old.input.value; // what you typed (not a recalled earlier message)
   if (views.get(sessionId) === old) views.delete(sessionId);
   old.el.remove();
@@ -1961,6 +1965,7 @@ async function reopenView(old, error, { holdInbox = false, typed } = {}) {
   }
   if (queue.length && !v.dead) {
     v.queue.push(...queue);
+    v.paused = paused && v.queue.length > 0;
     v.renderQueue();
     v.showQueueStatus();
     v.pump();
@@ -1971,12 +1976,25 @@ async function reopenView(old, error, { holdInbox = false, typed } = {}) {
 /** Open sub-sessions of id (all generations), deepest first; one being deleted is left to its delete. */
 const openDescendants = (id) => SessionTree.closeOrder(tree, id, (c) => views.has(c) && !views.get(c).deleting && !deleting.has(c));
 
-/** Close these views in this order after one question for the busy ones; nothing is closed if you cancel.
- *  question: the text for a single busy session instead of the count. */
+/** The question before closing these views (busy ones, and idle or dead ones with queued messages of yours that would
+ *  be lost), or null when there is nothing to ask. question: the text for a single busy session instead of the count. */
+function closeQuestion(ids, question) {
+  const list = ids.map((id) => views.get(id)).filter(Boolean);
+  const isBusy = (v) => v.busy && !v.dead;
+  const busy = list.filter(isBusy).length;
+  const queued = list.filter((v) => !isBusy(v) && v.queue.some((item) => item.kind === "app")).length;
+  if (!busy && !queued) return null;
+  if (!queued) return question ?? (busy === 1 ? "1 session is still working. Stop it and close?" : `${busy} sessions are still working. Stop them and close?`);
+  if (busy) return `${busy} session(s) are still working and ${queued} more have queued messages of yours that were not sent. Stop and close them?`;
+  const unsent = ids.length === 1 ? "This session has queued messages of yours that were not sent." : `${queued} session(s) have queued messages of yours that were not sent.`;
+  return `${unsent} Close and discard them?`;
+}
+
+/** Close these views in this order after one question for the busy ones (and those with queued messages of yours);
+ *  nothing is closed if you cancel. question: the text for a single busy session instead of the count. */
 async function closeViews(ids, question) {
-  const busy = ids.filter((id) => views.get(id)?.busy && !views.get(id).dead).length;
-  question ??= busy === 1 ? "1 session is still working. Stop it and close?" : `${busy} sessions are still working. Stop them and close?`;
-  if (busy && !confirm(question)) return;
+  const ask = closeQuestion(ids, question);
+  if (ask && !confirm(ask)) return;
   for (const id of ids) {
     const v = views.get(id);
     if (!v || v.deleting || deleting.has(id)) continue; // a running delete closes it, or restores it if the delete fails

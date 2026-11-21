@@ -147,3 +147,5 @@ Behaviour to implement (the spec's Delivery rules and "The turn as the app sees 
 5. Setting off: today's behaviour (own prompts refused while busy, relay messages after the turn).
 6. Reopen the session: delivered messages are normal bubbles in place (relay ones "from X", not editable); edit and delete on an own delivered message work.
 7. A queued `/context` waits until the turn ends.
+8. A long task that uses a subagent/`task` tool: nothing is delivered while the subagent runs (its outer call stays in flight).
+9. Stop with items queued → delete the last reply → the queue is still paused.

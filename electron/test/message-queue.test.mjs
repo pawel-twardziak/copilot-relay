@@ -106,3 +106,193 @@ test("statusText", () => {
   assert.equal(statusText({ dead: true }), "Copilot process ended");
   assert.equal(statusText({}), "");
 });
+
+test("tracker adopts an unknown id only on an explicit pending/in_progress status", () => {
+  const t = createToolTracker();
+  t.update({ sessionUpdate: "tool_call_update", toolCallId: "a" }); // content-only update, no status
+  assert.equal(t.size(), 0);
+  t.update(upd("b", "pending"));
+  assert.equal(t.size(), 1);
+  t.update({ sessionUpdate: "tool_call_update", toolCallId: "b" }); // a known one stays in flight
+  assert.equal(t.size(), 1);
+  assert.equal(t.update(upd("b", "completed")), true);
+});
+
+// --- the chain: overlapping prompts of one view (a mid-turn delivery interrupts the running prompt)
+
+const { createChain } = MQ;
+
+test("chain: A cancelled + B end_turn, A answers first: no Stopped. for A, the chain ends once", () => {
+  const c = createChain();
+  const a = c.start();
+  const b = c.start({ midTurn: true });
+  assert.equal(c.marker(ABORT_TEXT).record, b);
+  const ra = c.returned(a, "cancelled");
+  assert.deepEqual([ra.showStopped, ra.ended], [false, false]);
+  assert.equal(c.active(), true);
+  const rb = c.returned(b, "end_turn");
+  assert.deepEqual([rb.showStopped, rb.ended], [false, true]);
+  assert.equal(c.active(), false);
+});
+
+test("chain: A cancelled + B end_turn, B answers first: no Stopped. for A, the chain ends once", () => {
+  const c = createChain();
+  const a = c.start();
+  const b = c.start({ midTurn: true });
+  c.marker(ABORT_TEXT);
+  const rb = c.returned(b, "end_turn");
+  assert.deepEqual([rb.showStopped, rb.ended], [false, false]);
+  const ra = c.returned(a, "cancelled");
+  assert.deepEqual([ra.showStopped, ra.ended], [false, true]);
+});
+
+test("chain: a user Stop during B shows Stopped. for B only", () => {
+  const c = createChain();
+  const a = c.start();
+  const b = c.start({ midTurn: true });
+  c.marker(ABORT_TEXT);
+  c.stop();
+  assert.equal(c.returned(a, "cancelled").showStopped, false);
+  const rb = c.returned(b, "cancelled");
+  assert.deepEqual([rb.showStopped, rb.ended], [true, true]);
+});
+
+test("chain: a user Stop of a plain prompt shows Stopped.", () => {
+  const c = createChain();
+  const a = c.start();
+  c.stop();
+  const ra = c.returned(a, "cancelled");
+  assert.deepEqual([ra.showStopped, ra.ended], [true, true]);
+});
+
+test("chain: the marker is swallowed only while a switch is pending, once per mid-turn send", () => {
+  const c = createChain();
+  c.start();
+  assert.equal(c.marker(ABORT_TEXT), null); // no mid-turn send: a Stop of yours shows it
+  const b = c.start({ midTurn: true });
+  assert.equal(c.marker("Info: Operation cancelled by user."), null); // exact chunk only
+  assert.equal(c.marker(ABORT_TEXT).record, b);
+  assert.equal(c.marker(ABORT_TEXT), null); // once
+  const d = c.start({ midTurn: true });
+  assert.equal(c.marker(ABORT_TEXT).record, d); // again for the next send
+});
+
+test("chain: the switch point drops the tools in flight", () => {
+  const c = createChain();
+  c.start();
+  c.toolUpdate(call("t1", "pending"));
+  assert.equal(c.toolUpdate(upd("t1", "completed")), true);
+  c.start({ midTurn: true });
+  c.toolUpdate(call("t2", "pending")); // started just before the queued prompt arrived: killed
+  assert.equal(c.inFlight(), 1);
+  assert.deepEqual(c.marker(ABORT_TEXT).dropped, ["t2"]);
+  assert.equal(c.inFlight(), 0);
+});
+
+test("chain: tools of a chain without a mid-turn send are not dropped when it ends", () => {
+  const c = createChain();
+  const a = c.start();
+  c.toolUpdate(call("t1", "pending"));
+  assert.deepEqual(c.returned(a, "cancelled").dropped, []);
+});
+
+test("chain: tools still in flight when a chain with a mid-turn send ends (no marker came) are dropped", () => {
+  const c = createChain();
+  const a = c.start();
+  const b = c.start({ midTurn: true });
+  c.toolUpdate(call("t2", "pending"));
+  assert.equal(c.returned(a, "cancelled").ended, false);
+  assert.deepEqual(c.returned(b, "end_turn").dropped, ["t2"]);
+});
+
+test("chain: no tool tracking outside a chain; a new chain starts with no tools in flight", () => {
+  const c = createChain();
+  c.toolUpdate(call("x", "pending"));
+  assert.equal(c.inFlight(), 0);
+  const a = c.start();
+  c.toolUpdate(call("t1", "pending"));
+  c.returned(a, "end_turn");
+  c.start();
+  assert.equal(c.inFlight(), 0);
+});
+
+test("chain: a mid-turn send that fails before the marker restores A's interrupted flag", () => {
+  const c = createChain();
+  const a = c.start();
+  const b = c.start({ midTurn: true });
+  assert.equal(a.interrupted, true);
+  const rb = c.failed(b);
+  assert.equal(rb.ended, false);
+  assert.equal(a.interrupted, false);
+  assert.equal(c.midTurnBlocked(), false); // the switch is no longer pending
+  c.stop();
+  const ra = c.returned(a, "cancelled");
+  assert.deepEqual([ra.showStopped, ra.ended], [true, true]); // your Stop of A is reported again
+});
+
+test("chain: a mid-turn send that fails after the marker leaves A interrupted", () => {
+  const c = createChain();
+  const a = c.start();
+  const b = c.start({ midTurn: true });
+  c.marker(ABORT_TEXT);
+  c.failed(b);
+  assert.equal(a.interrupted, true);
+  assert.equal(c.returned(a, "cancelled").showStopped, false);
+});
+
+test("chain: a second mid-turn send interrupts only the prompts not interrupted yet", () => {
+  const c = createChain();
+  const a = c.start();
+  const b = c.start({ midTurn: true });
+  c.marker(ABORT_TEXT);
+  const d = c.start({ midTurn: true });
+  assert.deepEqual(d.interrupts, [b]);
+  c.failed(d);
+  assert.equal(a.interrupted, true);
+  assert.equal(b.interrupted, false);
+});
+
+test("chain: a Stop blocks mid-turn delivery until the chain ends", () => {
+  const c = createChain();
+  assert.equal(c.midTurnBlocked(), false);
+  c.stop(); // no chain: nothing to stop
+  const a0 = c.start();
+  assert.equal(c.midTurnBlocked(), false);
+  c.returned(a0, "end_turn");
+  const a = c.start();
+  c.stop();
+  assert.equal(c.midTurnBlocked(), true);
+  assert.equal(c.returned(a, "cancelled").ended, true);
+  assert.equal(c.midTurnBlocked(), false);
+  c.start();
+  assert.equal(c.midTurnBlocked(), false);
+});
+
+test("chain: a second mid-turn send is blocked while a switch is pending", () => {
+  const c = createChain();
+  const a = c.start();
+  assert.equal(c.midTurnBlocked(), false);
+  c.start({ midTurn: true });
+  assert.equal(c.midTurnBlocked(), true);
+  c.marker(ABORT_TEXT);
+  assert.equal(c.midTurnBlocked(), false);
+  c.returned(a, "cancelled");
+});
+
+test("chain: the mid-turn prompt keeps its delivery for the switch point", () => {
+  const c = createChain();
+  c.start();
+  const delivery = {};
+  c.start({ midTurn: true, delivery });
+  assert.equal(c.marker(ABORT_TEXT).record.delivery, delivery);
+});
+
+test("chain: finishing a record twice changes nothing", () => {
+  const c = createChain();
+  const a = c.start();
+  const b = c.start();
+  c.returned(a, "end_turn");
+  assert.equal(c.failed(a).ended, false);
+  assert.equal(c.active(), true);
+  assert.equal(c.returned(b, "end_turn").ended, true);
+});
