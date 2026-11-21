@@ -13,9 +13,10 @@ relay messages and the user's own prompts alike. After handling a queued message
 task it was doing, unless the message changes or cancels it. A setting turns the queue off and restores
 today's behaviour. Only the desktop app is in scope; the terminal extension is unchanged.
 
-## Findings (Copilot CLI 1.0.114, Windows, probes on branch `chore/probe-steer`)
+## Findings (Copilot CLI 1.0.114, Windows, measured with four throwaway ACP probe scripts)
 
-`scripts/probe-steer.mjs` … `probe-steer4.mjs`, results `scripts/probe*.txt` and the sessions' `events.jsonl`.
+The probe scripts and their results (logs, the sessions' `events.jsonl`) were not kept: they held data from the
+work PC. The findings below are their recorded outcome.
 
 - **Extensions don't load in ACP mode** at all: not from `~/.copilot/extensions`, a project's
   `.github/extensions`, or a `--plugin-dir` plugin, with or without `--experimental`, with `clientInfo` set
