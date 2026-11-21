@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A queued message is delivered as an answer prompt (reply visibly, end the response, no tools), and after the last answer of a series the app sends one fixed "continue the task" prompt.
+**Goal:** A queued message is delivered as an answer prompt (reply to it and end the response; tools allowed), and after the last answer of a series the app sends one fixed "continue the task" prompt.
 
 **Architecture:** Pure rules in `electron/renderer/message-queue.js` gain the answer-prompt ending, the continue prompt, and a small follow-up state (is an interrupted task waiting to be continued, and what to do when a turn ends). `SessionView` in `electron/renderer/app.js` wraps deliveries while a task is interrupted, sends the continue prompt at the end of the last answer turn, and shows the continue prompt as a "↻ continuing the task" line live and on replay.
 
@@ -12,8 +12,9 @@
 
 ## Global Constraints
 
-- Answer prompt = `MARKER + "\n" + <message> + "\n\n" + END` with MARKER `[queued message, delivered during your work]` and END exactly:
-  `[End of the queued message. Reply to it now and end your response there. Do not call tools, except relay-send_message to answer another session, and do not continue your earlier task yet: you will be asked to continue it next.]`
+- Answer prompt = `MARKER + "\n" + <message> + "\n\n" + ending` with MARKER `[queued message, delivered during your work]` and ending exactly END, or END_MORE when more items are still queued when it is sent:
+  END: `[End of the queued message. Reply to it (to another session: with relay-send_message) and end your response there.]`
+  END_MORE: `[End of the queued message. Reply to it (to another session: with relay-send_message) and end your response there. More queued messages follow; do not go back to your earlier task yet.]`
 - `unwrap` also accepts these earlier endings exactly:
   `[End of the queued message. Handle it now. Then go back to the task you were doing and finish it, unless this message changes or cancels that task.]`
   `[End of the queued message. If it asks you something, answer it now in a short visible reply to the user (your thinking is not shown to them), then go back to the task you were doing and finish it, unless this message changes or cancels that task. Repeat the answer in your final message if the task goes on after it.]`
@@ -21,6 +22,7 @@
   `[continue after queued messages]`
   `Continue the task you were working on before the queued message(s) above, taking them into account. If they changed the task, follow the change; if they cancelled it, do not continue and say so in one sentence.`
 - Continue line label: `↻ continuing the task`.
+- The answer prompt never mentions the coming continue prompt and never forbids tools.
 - The continue prompt is sent with source `"relay"` (no image attachments, does not re-open the relay budget); no main-process change.
 - Setting off (`queueMidTurn` false): behaviour unchanged (no mid-turn delivery → no interrupted task → no answer prompts, no continue prompt).
 - No new dependencies. Tests: `npm test`. Real Copilot can't run on the dev machine (403).
@@ -43,7 +45,7 @@
 
 **Interfaces:**
 - Produces:
-  - `END` = the new answer ending; `OLD_ENDS` = the two earlier endings; `unwrap` accepts `END` and every `OLD_ENDS` entry.
+  - `END`, `END_MORE` = the new answer endings; `wrap(text, { more = false } = {})` uses `END_MORE` when `more`; `OLD_ENDS` = the two earlier endings; `unwrap` accepts `END`, `END_MORE` and every `OLD_ENDS` entry.
   - `CONTINUE_PROMPT: string` (the two lines joined by `"\n"`), `CONTINUE_LABEL: string`, `isContinuePrompt(text) -> boolean` (`text === CONTINUE_PROMPT`).
   - `createChain()`: the object returned by `returned(...)` / `failed(...)` when the chain ends also carries `stopped: boolean` (the user stopped this chain, i.e. `stop()` was called on it). Not ended → `stopped: false`.
   - `createFollowUp() -> { interrupted(), answerDue() -> boolean, userPrompt(), afterTurn({ stopped, queued, paused, dead, deleting }) -> "continue" | "pump" | "none" }`:
@@ -53,7 +55,7 @@
     - `afterTurn(s)` at the end of a chain: not pending → `"none"`; `s.dead || s.deleting` → pending = false, `"none"`; `s.stopped` → if `s.queued > 0` keep pending, else pending = false; `"none"`; `s.queued > 0` → `"pump"` (pending kept: the next item goes as an answer prompt); `s.paused` → `"none"` (pending kept); otherwise pending = false and `"continue"`.
 
 - [ ] **Step 1: Write the failing tests** in `electron/test/message-queue.test.mjs` (import the new names):
-  - `answer ending`: `END` equals the exact Global Constraints string; `unwrap(wrap("x"))` is `"x"`; `unwrap` of `MARKER + "\nx\n\n" + e` is `"x"` for each `e` of `OLD_ENDS` (both exact strings from Global Constraints).
+  - `answer ending`: `END` and `END_MORE` equal the exact Global Constraints strings; `wrap("x")` ends with `END`, `wrap("x", { more: true })` ends with `END_MORE`; `unwrap` of both is `"x"`; `unwrap` of `MARKER + "\nx\n\n" + e` is `"x"` for each `e` of `OLD_ENDS` (both exact strings from Global Constraints).
   - `continue prompt`: `isContinuePrompt(CONTINUE_PROMPT)` true; false for `CONTINUE_PROMPT + " "`, for `"x\n" + CONTINUE_PROMPT`, and for `""`; `CONTINUE_LABEL === "↻ continuing the task"`.
   - `chain stopped flag`: `start()`, `stop()`, `returned(rec, "cancelled")` → `ended: true, stopped: true`; a chain without `stop()` ends with `stopped: false`.
   - `follow-up, one answer`: `interrupted()`; `answerDue()` true; `afterTurn({ queued: 0 })` → `"continue"`; then `answerDue()` false and `afterTurn({ queued: 0 })` → `"none"`.
@@ -74,9 +76,9 @@
 
 **Interfaces:**
 - Consumes: Task 1 (`END`, `wrap`, `unwrap`, `CONTINUE_PROMPT`, `CONTINUE_LABEL`, `isContinuePrompt`, `createFollowUp`, chain `stopped`).
-- Produces: `this.followUp = MessageQueue.createFollowUp()` per view; `runPrompt(text, bubble, source, delivery = null, { midTurn = false, answer = midTurn } = {})` — `answer` wraps with `MessageQueue.wrap` (after the `pendingNotes` prefix, as today); `sendContinue()`.
+- Produces: `this.followUp = MessageQueue.createFollowUp()` per view; `runPrompt(text, bubble, source, delivery = null, { midTurn = false, answer = midTurn, more = false } = {})` — `answer` wraps with `MessageQueue.wrap(sent, { more })` (after the `pendingNotes` prefix, as today); `sendContinue()`.
 
-- [ ] **Step 1: Delivery.** `deliverMidTurn()` calls `this.followUp.interrupted()` before sending, and sends with `{ midTurn: true }` (answer defaults to true). `pump()` sends the head item with `{ answer: this.followUp.answerDue() }`. The idle path of `send()` (an own prompt sent as a turn, not queued) calls `this.followUp.userPrompt()` first.
+- [ ] **Step 1: Delivery.** `deliverMidTurn()` calls `this.followUp.interrupted()` before sending, and sends with `{ midTurn: true, more }`; `pump()` sends the head item with `{ answer: this.followUp.answerDue(), more }`; in both, `more` is `this.queue.length > 0` after the item was taken off the queue. The idle path of `send()` (an own prompt sent as a turn, not queued) calls `this.followUp.userPrompt()` first.
 - [ ] **Step 2: Continue.** In `chainEnded()`, after the existing work and only when the view is still the open one and no new chain started: `const next = this.followUp.afterTurn({ stopped: end.stopped, queued: this.queue.length, paused: this.paused, dead: this.dead, deleting: this.deleting })` (pass `stopped` from the chain's end result into `chainEnded`); `"continue"` → `this.sendContinue()`; `"pump"` → nothing extra (`setBusy(false)` already pumps). `sendContinue()` builds a continue line element (class `msg user continue`, body text `MessageQueue.CONTINUE_LABEL`, `_matchText = () => MessageQueue.CONTINUE_PROMPT`, `_ownText = () => ""` so it is never editable or recalled) and calls `this.runPrompt(MessageQueue.CONTINUE_PROMPT, el, "relay")`.
 - [ ] **Step 3: Replay.** Add `ownUserText(raw) = MessageQueue.isContinuePrompt(raw) ? "" : shownUserText(raw)` and make `shownUserText` return `MessageQueue.CONTINUE_LABEL` for a continue prompt. Replayed user runs use `_ownText = () => ownUserText(run.text)`; `renderRun` adds the `continue` class to a user run whose text is a continue prompt. The copy/`_md` text of a continue line is the label.
 - [ ] **Step 4: Style.** `.msg.user.continue`: small, muted, no bubble background (like a system line).
@@ -87,6 +89,7 @@
 ## Manual checks (work PC, real Copilot; setting on)
 
 1. Long multi-tool task; queue "co robisz?": a visible answer, then "↻ continuing the task", and the task goes on to its final report.
+1a. A relay message from another session mid-task: the agent replies with `relay-send_message`, ends its response, then continues.
 2. Queue two messages: two answers, one continue line.
 3. Queue a message that cancels the task ("stop, nie rób tego"): the answer acknowledges it; the continue prompt's reply says the task was cancelled in one sentence.
 4. Press Stop during an answer with nothing queued: no continue line. With items queued: paused; ▶ → answers, then continue.

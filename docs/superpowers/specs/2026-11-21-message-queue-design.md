@@ -65,8 +65,8 @@ work PC. The findings below are their recorded outcome.
 - **One queue per session** in the renderer, in arrival order, for relay messages (today's `inbox`) and for
   prompts the user sends while the session works. Send stays enabled during a turn.
 - **Delivery at the first safe moment** (see Delivery rules), one queued item per delivery.
-- **Answer, then continue**: a delivered queued message asks for a visible answer that ends the response (no
-  tools); when the queue is empty the app sends one hidden "continue the task" prompt.
+- **Answer, then continue**: a delivered queued message asks the agent to reply to it and end its response
+  (tools are not forbidden); when the queue is empty the app sends one "continue the task" prompt.
 - **Queue strip** above the input box listing queued items: remove (✕) any item; click an own prompt to edit it.
 - **Esc / Stop pauses the queue**; a ▶ button in the strip resumes it.
 - **Setting** "Deliver queued messages during a turn", off by default (the user's choice); off restores today's behaviour exactly.
@@ -123,7 +123,11 @@ of the turn.
 ### Answer, then continue
 
 A queued message is delivered as an **answer prompt**; after the last one the app sends a **continue prompt**.
-This takes the queued message out of the agent's tool loop, so the answer is a turn-ending, visible reply.
+The mid-turn delivery already interrupts the running loop (`abort`, then the queued `user.message`), but the
+queued prompt starts a new loop; while it allowed going back to the task in the same response, the model did
+so at once and answered only in its reasoning. The answer prompt therefore asks for a reply that ends the
+response, and the continuation comes as its own prompt. It does not mention that continuation (the model might
+then continue right away), and it does not forbid tools (the reply may need some, e.g. `relay-send_message`).
 
 **Answer prompt** (`_matchText` returns what was sent, as for `pendingNotes`):
 
@@ -131,7 +135,13 @@ This takes the queued message out of the agent's tool loop, so the answer is a t
 [queued message, delivered during your work]
 <message>
 
-[End of the queued message. Reply to it now and end your response there. Do not call tools, except relay-send_message to answer another session, and do not continue your earlier task yet: you will be asked to continue it next.]
+[End of the queued message. Reply to it (to another session: with relay-send_message) and end your response there.]
+```
+
+When more items are still queued at the moment it is sent, the ending is instead:
+
+```
+[End of the queued message. Reply to it (to another session: with relay-send_message) and end your response there. More queued messages follow; do not go back to your earlier task yet.]
 ```
 
 **Continue prompt**, sent by the app itself:
@@ -161,8 +171,8 @@ relay message as the prompt the broker built (`m.prompt`, starting with its `[fr
 instructions), so replying with `relay-send_message` still works.
 
 **The formats are fixed** because the app must recognise them on replay. Answer prompt: first line exactly
-`[queued message, delivered during your work]`, last paragraph exactly the ending above. `unwrap(text)` also
-accepts the two earlier endings ("Handle it now. Then go back …" and "If it asks you something, answer it now
+`[queued message, delivered during your work]`, last paragraph exactly one of the two endings above.
+`unwrap(text)` also accepts the two earlier endings ("Handle it now. Then go back …" and "If it asks you something, answer it now
 … Repeat the answer in your final message …"), so messages recorded by earlier versions replay correctly.
 Continue prompt: the whole text is fixed; `isContinuePrompt(text)` recognises it exactly.
 
