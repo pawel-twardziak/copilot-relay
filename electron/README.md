@@ -9,7 +9,8 @@ It runs on Windows, macOS and Linux.
 - **Collapse** a folder in the list by clicking its name (▸ / ▾, the number is its session count). **Pin** a session
   with 📌 (on hover): pinned sessions are listed on top, above the folders. Both are remembered. While you filter the
   list every folder is shown expanded.
-- Chat with streamed answers, collapsible thinking and tool calls, file diffs and permission prompts.
+- Chat with streamed answers, file diffs and permission prompts. Tool calls and thinking collapse into groups, and each
+  subagent has its own collapsed group.
   Press **Stop** (or `Esc`) to cancel a turn.
 - Links are clickable. Web and `mailto:` links open in your browser or mail app. File links and file paths in
   tool calls and diffs open in the default app. Relative paths resolve against the session folder, and `:line` /

@@ -239,7 +239,6 @@ const shownUserText = (raw) => (MessageQueue.isContinuePrompt(raw) ? MessageQueu
 const ownUserText = (raw) => (MessageQueue.isContinuePrompt(raw) ? "" : shownUserText(raw));
 let queueItemSeq = 0; // ids of queued items (MessageQueue item shape)
 // a group's status mark in its header (Activity statuses; a work group is running while one of its tools runs)
-const GROUP_MARKS = { running: "●", completed: "✓", failed: "✗", interrupted: "⊘", quiet: "○" };
 api
   .getSettings()
   .then((s) => {
@@ -316,6 +315,7 @@ class SessionView {
     this.sendBtn = h("button", { class: "primary", onclick: () => this.send() }, "Send");
     this.stopBtn = h("button", { onclick: () => this.cancel(), disabled: true }, "Stop");
     this.statusEl = h("div", { class: "status-line" });
+    this.bgEl = h("span", { class: "bg-running", hidden: true }); // "N subagents running": only the log's groups, never busy
     this.closeChildrenBtn = h(
       "button",
       { class: "danger", hidden: true, title: "Close every sub-session of this one (they stay resumable)", onclick: () => closeViews(openDescendants(this.sessionId)) },
@@ -357,7 +357,12 @@ class SessionView {
       this.queueEl,
       h("div", { class: "composer" }, this.cmdPopup, this.input, this.agentPicker, h("div", { class: "btns" }, this.sendBtn, this.stopBtn)),
       this.statusEl,
+      this.bgEl,
     );
+    this.bgEl.onclick = () => {
+      const first = this.activity.running().map((id) => this.groupEls.get(id)).find(Boolean);
+      first?.scrollIntoView({ block: "nearest" });
+    };
     // Left Shift+Up/Down walks through your earlier messages, with the draft as the newest entry; registered first,
     // so it also works while the command popup is open. Right Shift+arrows still extend the text selection.
     this.input.addEventListener("keydown", (e) => {
@@ -1315,17 +1320,23 @@ class SessionView {
     const body = h("div", { class: "group-body" });
     const el = h("details", { class: `group ${kind}` }, h("summary", {}, mark, name), body);
     // (the kind is in _info: el._kind is the turn mark's "user"/"reply")
-    el._info = { kind, title, prompt, status: "running", tools: 0, thoughts: 0, running: new Map() }; // running: toolCallId -> title
+    el._info = { kind, title, prompt, status: "running", tools: 0, thoughts: 0, running: new Map(), failed: new Set(), unfinished: false, waiting: false, lastLine: "" }; // running: toolCallId -> title
     Object.assign(el, { _body: body, _runs: StreamRuns.create(), _anchored: anchored });
+    el._md = () => {
+      const i = el._info;
+      const items = [...body.children].map((c) => c._md?.()?.trim()).filter(Boolean);
+      if (kind === "work") return items.join("\n\n");
+      const quoted = i.prompt ? i.prompt.split("\n").map((l) => `> ${l}`).join("\n") : "";
+      return [`**Subagent: ${i.title}** (${i.status})`, quoted, ...items].filter(Boolean).join("\n\n");
+    };
     el._renderHeader = () => {
       const i = el._info;
-      const status = kind === "work" ? (i.running.size ? "running" : "completed") : i.status;
+      // work: ● while a tool runs, then ✗ if one failed, ○ if one never ended, else ✓
+      const status = kind === "work" ? (i.running.size ? "running" : i.failed.size ? "failed" : i.unfinished ? "quiet" : "completed") : i.status;
       mark.className = `mark ${status}`;
-      mark.textContent = GROUP_MARKS[status] ?? GROUP_MARKS.running;
-      const tools = i.tools ? `${i.tools} tool${i.tools === 1 ? "" : "s"}` : "";
-      const thoughts = i.thoughts ? `${i.thoughts} thought${i.thoughts === 1 ? "" : "s"}` : "";
-      const parts = kind === "work" ? [tools, thoughts, [...i.running.values()].pop()] : ["subagent", i.title, tools];
-      name.textContent = name.title = parts.filter(Boolean).join(" · ");
+      mark.textContent = Activity.MARKS[status] ?? Activity.MARKS.running;
+      const runningTitle = [...i.running.values()].pop();
+      name.textContent = name.title = Activity.headerText({ kind, title: i.title, tools: i.tools, thoughts: i.thoughts, runningTitle, lastLine: i.status === "running" ? i.lastLine : "", waiting: i.waiting });
     };
     el._renderHeader();
     return el;
@@ -1359,7 +1370,12 @@ class SessionView {
     const r = this.route(u);
     if (r.to === "main") return this.stream(type, text, u.messageId);
     const container = r.to === "work" ? this.workGroup() : this.groupEls.get(r.groupId);
-    if (container) this.stream(type, text, u.messageId, container);
+    if (!container) return;
+    if (type === "agent" && container._info.kind === "subagent") {
+      const line = text.split("\n").map((l) => l.trim()).filter(Boolean).pop();
+      if (line) container._info.lastLine = line.length > 60 ? line.slice(0, 59) + "…" : line;
+    }
+    this.stream(type, text, u.messageId, container);
   }
 
   /** The turn is over (chain end, replay end): background subagents with no news get ○ (Activity.settle), and the
@@ -1369,8 +1385,17 @@ class SessionView {
     for (const g of this.log.querySelectorAll(":scope > .group.work")) {
       if (!g._info.running.size) continue;
       g._info.running.clear();
+      g._info.unfinished = true;
       g._renderHeader();
     }
+    this.refreshBg();
+  }
+
+  /** "N subagent(s) running" after the status line; a click shows the first one. */
+  refreshBg() {
+    const n = this.activity.running().length;
+    this.bgEl.hidden = !n;
+    this.bgEl.textContent = n ? `${n} subagent${n === 1 ? "" : "s"} running` : "";
   }
 
   applyChanges(changes) {
@@ -1383,6 +1408,7 @@ class SessionView {
         el._renderHeader();
       } else if (c.type === "merged") this.mergeGroups(this.groupEls.get(c.from), this.groupEls.get(c.into), c.from);
     }
+    this.refreshBg();
   }
 
   /** A subagent group, appended at the log's end (a task's group stands for its badge: replacesTool removes it). */
@@ -1398,6 +1424,7 @@ class SessionView {
       const g = badge.group;
       g._info.tools--;
       g._info.running.delete(replacesTool);
+      g._info.failed.delete(replacesTool);
       if (g._body.childElementCount || g._turn) g._renderHeader();
       else g.remove();
     }
@@ -1417,6 +1444,7 @@ class SessionView {
     into._info.tools += from._info.tools;
     into._info.thoughts += from._info.thoughts;
     for (const [id, title] of from._info.running) into._info.running.set(id, title);
+    for (const id of from._info.failed) into._info.failed.add(id);
     for (const t of this.tools.values()) if (t.group === from) t.group = into;
     from.remove();
     into._renderHeader();
@@ -1542,6 +1570,8 @@ class SessionView {
     const { running } = t.group._info;
     if (status === "pending" || status === "in_progress") running.set(u.toolCallId, d.title ?? "tool");
     else running.delete(u.toolCallId);
+    if (status === "failed") t.group._info.failed.add(u.toolCallId);
+    else t.group._info.failed.delete(u.toolCallId);
     t.group._renderHeader();
     t.st.className = `st ${status}`;
     t.st.textContent = { completed: "✓", failed: "✗", in_progress: "●", pending: "○", interrupted: "⊘" }[status] ?? "●";
@@ -1577,7 +1607,10 @@ class SessionView {
   plan(entries) {
     const list = h("ul", {}, entries.map((e) => h("li", { class: e.status }, e.content)));
     const asMd = () => "**Plan:**\n" + entries.map((e) => `- [${e.status === "completed" ? "x" : " "}] ${e.content}`).join("\n");
-    if (this.planEl && this.log.lastElementChild === this.planEl) this.planEl.replaceChildren(h("b", {}, "Plan"), list);
+    // in place while only groups came after it (tool calls and thinking collapse into groups)
+    let after = this.planEl?.isConnected ? this.planEl.nextElementSibling : null;
+    while (after?.classList.contains("group")) after = after.nextElementSibling;
+    if (this.planEl?.isConnected && !after) this.planEl.replaceChildren(h("b", {}, "Plan"), list);
     else this.planEl = this.append(h("div", { class: "plan" }, h("b", {}, "Plan"), list));
     this.planEl._md = asMd;
   }
@@ -1599,6 +1632,11 @@ class SessionView {
     // a subagent's question (a background subagent runs on after the turn): see dismissPermissions
     card._agentId = ToolCalls.agentOf(toolCall) ?? ToolCalls.agentOf(this.tools.get(card._toolCallId)?.data);
     card._reqId = reqId; // ...and answers their requests
+    card._group = this.tools.get(card._toolCallId)?.group ?? null; // its header shows ⏸ while the card is open
+    if (card._group) {
+      card._group._info.waiting = true;
+      card._group._renderHeader();
+    }
     const opts = h(
       "div",
       { class: "opts" },
@@ -1750,6 +1788,11 @@ class SessionView {
 
   closeCard(card) {
     if (this.openCards.delete(card)) renderList();
+    const g = card._group;
+    if (g && ![...this.openCards].some((c) => c._group === g)) {
+      g._info.waiting = false;
+      g._renderHeader();
+    }
   }
 
   /** The turn is over (all: the process is gone): main no longer waits for its permission questions, except a

@@ -164,6 +164,10 @@ details.thought > div { white-space: pre-wrap; padding: 4px 0 0 14px; border-lef
 .group .mark.completed { color: var(--ok); }
 .group .mark.failed, .group .mark.interrupted { color: var(--err); }
 .group .mark.running { color: var(--warn); }
+.group .mark.quiet { color: var(--muted); }
+.bg-running { display: block; padding: 0 14px 6px; background: var(--panel); color: var(--muted); font-size: 12px; cursor: pointer; }
+.bg-running[hidden] { display: none; }
+.bg-running:hover { color: var(--fg, inherit); text-decoration: underline; }
 .group > summary .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .group:hover > summary .acts { opacity: 1; }
 .group-body { border-top: 1px solid var(--border); padding: 8px 10px; display: flex; flex-direction: column; gap: 8px; font-size: 14px; }

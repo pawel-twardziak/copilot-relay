@@ -173,3 +173,22 @@ test("running() lists running groups", () => {
   a.route(update("t1", { status: "completed" }));
   assert.deepEqual(a.running(), ["g2"]);
 });
+
+test("headerText: work group counts, running tool and singulars", () => {
+  assert.equal(Activity.headerText({ kind: "work", tools: 3, thoughts: 1 }), "3 tools · 1 thought");
+  assert.equal(Activity.headerText({ kind: "work", tools: 3, thoughts: 1, runningTitle: "grep" }), "3 tools · 1 thought · grep");
+  assert.equal(Activity.headerText({ kind: "work", tools: 1, thoughts: 2 }), "1 tool · 2 thoughts");
+  assert.equal(Activity.headerText({ kind: "work", tools: 0, thoughts: 1 }), "1 thought");
+});
+
+test("headerText: subagent title, tools, last line and the permission wait", () => {
+  const base = { kind: "subagent", title: "Summarize a.txt", tools: 2 };
+  assert.equal(Activity.headerText({ ...base, lastLine: "writing" }), "subagent · Summarize a.txt · 2 tools · writing");
+  assert.equal(Activity.headerText({ ...base, lastLine: "writing", waiting: true }), "subagent · Summarize a.txt · 2 tools · ⏸ permission");
+  assert.equal(Activity.headerText({ kind: "subagent", title: "subagent", tools: 1 }), "subagent · 1 tool");
+  assert.equal(Activity.headerText({ kind: "subagent", title: "x", tools: 0 }), "subagent · x");
+});
+
+test("MARKS", () => {
+  assert.deepEqual(Activity.MARKS, { running: "●", completed: "✓", failed: "✗", interrupted: "⊘", quiet: "○" });
+});
