@@ -235,6 +235,8 @@ dialog label { display: flex; flex-direction: column; gap: 6px; }
 .session-view.busy .act { pointer-events: none; opacity: .4; }
 .msg.agent { padding-right: 56px; }
 .msg.user, .msg.relay { padding-right: 56px; }
+/* the app's continue prompt after answers to queued messages: a system-style line, not a bubble */
+.msg.user.continue { align-self: flex-start; background: none; border: none; border-radius: 0; padding: 0 56px 0 0; color: var(--muted); font-size: 12.5px; font-style: italic; }
 .codewrap > pre { margin-top: 0; }
 .msg.agent .codewrap { margin: 0 0 1em; }
 .msg, .tool .body, .perm, .plan { user-select: text; }

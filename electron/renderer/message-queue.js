@@ -1,5 +1,6 @@
 // Pure rules for the per-session message queue (no DOM): the wrapper around a message delivered mid-turn,
-// tool-call tracking, the chain of overlapping prompts, and when the queue may deliver.
+// the answer ending and the continue prompt, tool-call tracking, the chain of overlapping prompts, the follow-up
+// state (a task waiting to be continued after the answers), and when the queue may deliver.
 // Loaded as a classic <script> (sets globalThis.MessageQueue) and via require() in tests.
 //
 // Queue item: { id, kind: "app" | "relay", text, prompt, from, human, fromCwd, deliveryId, command }
@@ -7,20 +8,33 @@
 "use strict";
 
 const MARKER = "[queued message, delivered during your work]";
-const END =
-  "[End of the queued message. If it asks you something, answer it now in a short visible reply to the user (your thinking is not shown to them), " +
-  "then go back to the task you were doing and finish it, unless this message changes or cancels that task. " +
-  "Repeat the answer in your final message if the task goes on after it.]";
+const END = "[End of the queued message. Reply to it (to another session: with relay-send_message) and end your response there.]";
+// used when more queued messages are still waiting behind this one
+const END_MORE =
+  "[End of the queued message. Reply to it (to another session: with relay-send_message) and end your response there. More queued messages follow; do not go back to your earlier task yet.]";
 // endings of earlier app versions: messages already recorded in a session's history still unwrap on replay
-const OLD_ENDS = ["[End of the queued message. Handle it now. Then go back to the task you were doing and finish it, unless this message changes or cancels that task.]"];
+const OLD_ENDS = [
+  "[End of the queued message. Handle it now. Then go back to the task you were doing and finish it, unless this message changes or cancels that task.]",
+  "[End of the queued message. If it asks you something, answer it now in a short visible reply to the user (your thinking is not shown to them), " +
+    "then go back to the task you were doing and finish it, unless this message changes or cancels that task. " +
+    "Repeat the answer in your final message if the task goes on after it.]",
+];
+// sent by the app after the last answer to queued messages, so the interrupted task goes on
+const CONTINUE_PROMPT =
+  "[continue after queued messages]\n" +
+  "Continue the task you were working on before the queued message(s) above, taking them into account. " +
+  "If they changed the task, follow the change; if they cancelled it, do not continue and say so in one sentence.";
+const CONTINUE_LABEL = "↻ continuing the task";
 const ABORT_TEXT = "Info: Operation cancelled by user";
 
-const wrap = (text) => `${MARKER}\n${text}\n\n${END}`;
+const wrap = (text, { more = false } = {}) => `${MARKER}\n${text}\n\n${more ? END_MORE : END}`;
+
+const isContinuePrompt = (text) => text === CONTINUE_PROMPT;
 
 /** The inner text of a wrapped message, or null when `text` is not one. */
 function unwrap(text) {
   const head = `${MARKER}\n`;
-  for (const end of [END, ...OLD_ENDS]) {
+  for (const end of [END, END_MORE, ...OLD_ENDS]) {
     const tail = `\n\n${end}`;
     if (text.length >= head.length + tail.length && text.startsWith(head) && text.endsWith(tail)) return text.slice(head.length, text.length - tail.length);
   }
@@ -76,8 +90,9 @@ function createChain() {
   let pendingSwitch = null; // the mid-turn record until its abort marker shows it took over
   let stopping = false; // you stopped the chain: nothing more goes out mid-turn until it has ended
   let midTurnSent = false; // a queued item was delivered during this chain
+  let failedAfterSwitch = false; // a prompt failed after its switch point: the chain ends as failed whichever prompt ends it
 
-  const none = { ended: false, dropped: [] };
+  const none = { ended: false, stopped: false, failed: false, dropped: [] };
   /** The record's prompt is over; the chain ends with the last one (tools still in flight then are returned when
    *  a mid-turn prompt may have killed them: no switch point told). */
   function finish(record) {
@@ -87,8 +102,11 @@ function createChain() {
     if (pendingSwitch === record) pendingSwitch = null;
     if (records.length) return none;
     pendingSwitch = null;
+    const stopped = stopping;
     stopping = false;
-    return { ended: true, dropped: midTurnSent ? tracker.drop() : [] };
+    const failed = failedAfterSwitch;
+    failedAfterSwitch = false;
+    return { ended: true, stopped, failed, dropped: midTurnSent ? tracker.drop() : [] };
   }
 
   return {
@@ -100,6 +118,7 @@ function createChain() {
         tracker = createToolTracker();
         midTurnSent = false;
         stopping = false;
+        failedAfterSwitch = false;
       }
       const record = { midTurn, delivery, interrupted: false, interrupts: [] };
       if (midTurn) {
@@ -130,14 +149,64 @@ function createChain() {
       return { showStopped, ...finish(record) };
     },
     /** The record's prompt failed. Before its switch point it never took over: the prompts it was to interrupt are
-     *  still running, and a Stop of them is reported again. */
+     *  still running, and a Stop of them is reported again. beforeSwitch: it failed before its switch point. */
     failed(record) {
-      if (pendingSwitch === record) for (const r of record.interrupts) r.interrupted = false;
-      return finish(record);
+      const beforeSwitch = pendingSwitch === record;
+      if (beforeSwitch) for (const r of record.interrupts) r.interrupted = false;
+      else failedAfterSwitch = true;
+      return { ...finish(record), beforeSwitch };
     },
     /** You stopped the turn (no effect outside a chain). */
     stop() {
       if (records.length) stopping = true;
+    },
+  };
+}
+
+/**
+ * A queued item delivered mid-turn interrupts the task; it is answered (the agent replies and ends its response),
+ * and after the last answer the app sends the continue prompt. Tracks whether such a task is waiting.
+ */
+function createFollowUp() {
+  let pending = false;
+  return {
+    /** A queued item was delivered mid-turn: a task waits to be continued. Returns an undo for a send that failed
+     *  before its switch point (it never interrupted the task, which runs on): the state before it comes back. */
+    interrupted() {
+      const before = pending;
+      pending = true;
+      return () => {
+        pending = before;
+      };
+    },
+    /** An item delivered now goes as an answer prompt. */
+    answerDue: () => pending,
+    /** You sent your own prompt while idle: the waiting task is dropped. */
+    userPrompt() {
+      pending = false;
+    },
+    /** The waiting task is dropped without a prompt of yours (e.g. you emptied a queue paused by your Stop). */
+    drop() {
+      pending = false;
+    },
+    /** The chain ended: "continue" (send the continue prompt), "pump" (the next queued item goes as an answer) or "none".
+     *  failed: the chain ended in an error (not a Stop): nothing is continued, the waiting task is dropped. */
+    afterTurn({ stopped, failed, queued = 0, paused, dead, deleting } = {}) {
+      if (!pending) return "none";
+      if (dead || deleting || failed) {
+        pending = false;
+        return "none";
+      }
+      if (stopped) {
+        // kept only when this Stop paused the queue: ▶ answers the items, then continues. An item queued while
+        // Copilot winds down (not paused) must not be answered with the stopped task still pending.
+        if (!paused) pending = false;
+        return "none";
+      }
+      if (queued > 0) return "pump";
+      if (paused) return "none";
+      pending = false;
+      return "continue";
     },
   };
 }
@@ -169,6 +238,6 @@ function takeBack(queue, draft) {
   return { text: draft.trim() ? `${taken}\n${draft}` : taken, caret: taken.length, rest: queue.filter((item) => item.kind !== "app") };
 }
 
-const MessageQueue = { MARKER, END, ABORT_TEXT, wrap, unwrap, isAbortChunk, createToolTracker, createChain, canDeliverMidTurn, canDeliverIdle, pauseOnStop, statusText, takeBack };
+const MessageQueue = { MARKER, END, END_MORE, OLD_ENDS, CONTINUE_PROMPT, CONTINUE_LABEL, ABORT_TEXT, wrap, unwrap, isContinuePrompt, isAbortChunk, createToolTracker, createChain, createFollowUp, canDeliverMidTurn, canDeliverIdle, pauseOnStop, statusText, takeBack };
 globalThis.MessageQueue = MessageQueue;
 if (typeof module !== "undefined") module.exports = MessageQueue;

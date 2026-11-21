@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { test } from "node:test";
 
 const MQ = createRequire(import.meta.url)("../renderer/message-queue.js");
-const { MARKER, END, ABORT_TEXT, wrap, unwrap, isAbortChunk, createToolTracker, canDeliverMidTurn, canDeliverIdle, pauseOnStop, statusText, takeBack } = MQ;
+const { MARKER, END, END_MORE, OLD_ENDS, CONTINUE_PROMPT, CONTINUE_LABEL, isContinuePrompt, createFollowUp, ABORT_TEXT, wrap, unwrap, isAbortChunk, createToolTracker, canDeliverMidTurn, canDeliverIdle, pauseOnStop, statusText, takeBack } = MQ;
 
 test("wrap/unwrap round trip", () => {
   assert.equal(unwrap(wrap("hi")), "hi");
@@ -319,12 +319,175 @@ test("takeBack: null when nothing of yours is queued", () => {
   assert.equal(takeBack([{ kind: "relay", text: "hi", from: "b" }], ""), null);
 });
 
-test("the wrapper asks for a visible answer to a question, and repeating it at the end", () => {
-  assert.match(END, /answer it now in a short visible reply to the user \(your thinking is not shown to them\)/);
-  assert.match(END, /Repeat the answer in your final message/);
+const ENDING = "[End of the queued message. Reply to it (to another session: with relay-send_message) and end your response there.]";
+const ENDING_MORE = "[End of the queued message. Reply to it (to another session: with relay-send_message) and end your response there. More queued messages follow; do not go back to your earlier task yet.]";
+const EARLIER = [
+  "[End of the queued message. Handle it now. Then go back to the task you were doing and finish it, unless this message changes or cancels that task.]",
+  "[End of the queued message. If it asks you something, answer it now in a short visible reply to the user (your thinking is not shown to them), then go back to the task you were doing and finish it, unless this message changes or cancels that task. Repeat the answer in your final message if the task goes on after it.]",
+];
+
+test("answer ending", () => {
+  assert.equal(END, ENDING);
+  assert.equal(END_MORE, ENDING_MORE);
+  assert.ok(wrap("x").endsWith("\n\n" + END));
+  assert.ok(wrap("x", { more: true }).endsWith("\n\n" + END_MORE));
+  assert.equal(unwrap(wrap("x")), "x");
+  assert.equal(unwrap(wrap("x", { more: true })), "x");
+  assert.deepEqual(OLD_ENDS, EARLIER);
+  for (const e of OLD_ENDS) assert.equal(unwrap(MARKER + "\nx\n\n" + e), "x");
 });
 
-test("unwrap still recognises messages recorded with the first wrapper ending", () => {
-  const old = MARKER + "\nco robisz?\n\n[End of the queued message. Handle it now. Then go back to the task you were doing and finish it, unless this message changes or cancels that task.]";
-  assert.equal(unwrap(old), "co robisz?");
+test("continue prompt", () => {
+  assert.equal(
+    CONTINUE_PROMPT,
+    "[continue after queued messages]\nContinue the task you were working on before the queued message(s) above, taking them into account. If they changed the task, follow the change; if they cancelled it, do not continue and say so in one sentence.",
+  );
+  assert.equal(isContinuePrompt(CONTINUE_PROMPT), true);
+  assert.equal(isContinuePrompt(CONTINUE_PROMPT + " "), false);
+  assert.equal(isContinuePrompt("x\n" + CONTINUE_PROMPT), false);
+  assert.equal(isContinuePrompt(""), false);
+  assert.equal(CONTINUE_LABEL, "↻ continuing the task");
+});
+
+test("chain stopped flag", () => {
+  const c = createChain();
+  const rec = c.start();
+  c.stop();
+  const end = c.returned(rec, "cancelled");
+  assert.equal(end.ended, true);
+  assert.equal(end.stopped, true);
+  const rec2 = c.start();
+  const end2 = c.returned(rec2, "end_turn");
+  assert.equal(end2.ended, true);
+  assert.equal(end2.stopped, false);
+  const a = c.start();
+  const b = c.start({ midTurn: true });
+  assert.equal(c.returned(a, "cancelled").stopped, false);
+  assert.equal(c.returned(b, "end_turn").stopped, false);
+});
+
+test("follow-up, one answer", () => {
+  const f = createFollowUp();
+  f.interrupted();
+  assert.equal(f.answerDue(), true);
+  assert.equal(f.afterTurn({ queued: 0 }), "continue");
+  assert.equal(f.answerDue(), false);
+  assert.equal(f.afterTurn({ queued: 0 }), "none");
+});
+
+test("follow-up, two answers", () => {
+  const f = createFollowUp();
+  f.interrupted();
+  assert.equal(f.afterTurn({ queued: 1 }), "pump");
+  assert.equal(f.answerDue(), true);
+  assert.equal(f.afterTurn({ queued: 0 }), "continue");
+});
+
+test("follow-up, Stop", () => {
+  const f = createFollowUp();
+  f.interrupted();
+  assert.equal(f.afterTurn({ stopped: true, queued: 0 }), "none");
+  assert.equal(f.answerDue(), false);
+  f.interrupted();
+  assert.equal(f.afterTurn({ stopped: true, queued: 2, paused: true }), "none");
+  assert.equal(f.answerDue(), true);
+  assert.equal(f.afterTurn({ queued: 0 }), "continue");
+  // an item queued while Copilot winds down after the Stop (queue not paused): the stopped task is dropped
+  f.interrupted();
+  assert.equal(f.afterTurn({ stopped: true, queued: 1, paused: false }), "none");
+  assert.equal(f.answerDue(), false);
+});
+
+test("follow-up, paused / dead", () => {
+  const f = createFollowUp();
+  f.interrupted();
+  assert.equal(f.afterTurn({ queued: 0, paused: true }), "none");
+  assert.equal(f.answerDue(), true);
+  assert.equal(f.afterTurn({ dead: true }), "none");
+  assert.equal(f.answerDue(), false);
+});
+
+test("follow-up, own prompt", () => {
+  const f = createFollowUp();
+  f.interrupted();
+  f.userPrompt();
+  assert.equal(f.answerDue(), false);
+  assert.equal(f.afterTurn({ queued: 0 }), "none");
+});
+
+test("follow-up, normal turn", () => {
+  const f = createFollowUp();
+  assert.equal(f.answerDue(), false);
+  assert.equal(f.afterTurn({ queued: 1 }), "none");
+});
+
+test("follow-up, undo of a send that failed before its switch point", () => {
+  const f = createFollowUp();
+  const undo = f.interrupted();
+  undo();
+  assert.equal(f.answerDue(), false);
+  assert.equal(f.afterTurn({ queued: 0 }), "none");
+  // a task already waiting stays waiting
+  f.interrupted();
+  const undo2 = f.interrupted();
+  undo2();
+  assert.equal(f.answerDue(), true);
+});
+
+test("follow-up, drop", () => {
+  const f = createFollowUp();
+  f.interrupted();
+  f.drop();
+  assert.equal(f.answerDue(), false);
+  assert.equal(f.afterTurn({ queued: 0 }), "none");
+});
+
+test("follow-up, a chain that failed sends no continue prompt and drops the task", () => {
+  const f = createFollowUp();
+  f.interrupted();
+  assert.equal(f.afterTurn({ failed: true, queued: 0 }), "none");
+  assert.equal(f.answerDue(), false);
+  f.interrupted();
+  assert.equal(f.afterTurn({ failed: true, queued: 2 }), "none");
+  assert.equal(f.answerDue(), false);
+});
+
+test("chain: failed tells whether it was before the switch point", () => {
+  const c = MQ.createChain();
+  const a = c.start();
+  const b = c.start({ midTurn: true });
+  assert.equal(c.failed(b).beforeSwitch, true);
+  const d = c.start({ midTurn: true });
+  assert.ok(c.marker(ABORT_TEXT));
+  const end = c.failed(d);
+  assert.equal(end.beforeSwitch, false);
+  assert.equal(end.ended, false);
+  const last = c.returned(a, "cancelled");
+  assert.equal(last.ended, true);
+  assert.equal(c.failed(a).ended, false); // already finished
+});
+
+test("chain: a prompt that failed after its switch point marks the chain failed, in either return order", () => {
+  for (const failedFirst of [true, false]) {
+    const c = MQ.createChain();
+    const a = c.start();
+    const b = c.start({ midTurn: true });
+    assert.ok(c.marker(ABORT_TEXT));
+    let end;
+    if (failedFirst) {
+      assert.equal(c.failed(b).ended, false);
+      end = c.returned(a, "cancelled");
+    } else {
+      assert.equal(c.returned(a, "cancelled").ended, false);
+      end = c.failed(b);
+    }
+    assert.equal(end.ended, true);
+    assert.equal(end.failed, true);
+  }
+  // a failure before the switch point does not count, and a new chain starts clean
+  const c = MQ.createChain();
+  const a = c.start();
+  const b = c.start({ midTurn: true });
+  assert.equal(c.failed(b).failed, false);
+  assert.equal(c.returned(a, "end_turn").failed, false);
 });

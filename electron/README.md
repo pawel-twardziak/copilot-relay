@@ -83,9 +83,11 @@ identity it has in a terminal (`cli:<sessionId>`), so it keeps its relay name. I
   session is idle.
 - Queue: off by default (**⚙ Settings → Deliver queued messages during a turn**). When on, messages and your own
   prompts sent while the session works are queued and delivered after the current tool step (never while a tool
-  runs); the agent is told to return to its task. The queue strip shows them: ✕ removes one, click edits your own,
-  ▶ resumes. Up in the first line of the message box takes all your queued messages back into it, one per line in
-  front of what you typed (relay messages stay queued). Stop pauses a non-empty queue.
+  runs). A queued message is answered first (the agent replies and stops); after the last answer the app sends one
+  "↻ continuing the task" prompt, so the agent goes back to its task. Stop with nothing queued cancels that continuation; with items queued it pauses, and ▶ answers them and then continues. The queue
+  strip shows them: ✕ removes one, click edits your own, ▶ resumes. Up in the first line of the message box takes
+  all your queued messages back into it, one per line in front of what you typed (relay messages stay queued).
+  Stop pauses a non-empty queue.
 - Your own prompts reset the relay's agent-to-agent message budget, as in a terminal.
 - Broker address and autostart are read from the installed extension's `config.json` (`npm run install-extension`).
   Without that file the app uses `http://127.0.0.1:7777`, or `COPILOT_RELAY_URL` / `COPILOT_RELAY_PORT` if set,
