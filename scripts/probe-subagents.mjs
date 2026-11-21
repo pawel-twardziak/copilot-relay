@@ -29,7 +29,7 @@ const PROMPTS = [
     n: 1,
     name: "sync subagent",
     text:
-      "Use your task tool to start ONE subagent (agent type: explore) and wait for its result. Its job: list the files " +
+      "Use your task tool to start ONE subagent (agent type: explore) and wait for its result. Pass model \"auto\" to the task tool if it has a model parameter. Its job: list the files " +
       "in the current folder and read notes.txt. Do not read the files yourself. When it is done, tell me in one " +
       "sentence what it found.",
   },
@@ -37,7 +37,7 @@ const PROMPTS = [
     n: 2,
     name: "background subagent",
     text:
-      "Start ONE subagent (agent type: explore) in BACKGROUND mode: it should read a.txt and b.txt and summarize them. " +
+      "Start ONE subagent (agent type: explore, model \"auto\") in BACKGROUND mode: it should read a.txt and b.txt and summarize them. " +
       "Do not wait for it. Right after starting it, reply with the single word STARTED and end your turn.",
   },
   {
@@ -49,7 +49,7 @@ const PROMPTS = [
     n: 4,
     name: "two parallel subagents",
     text:
-      "Start THREE subagents (agent type: explore) in BACKGROUND mode at once: they read a.txt, b.txt and notes.txt, " +
+      "Start THREE subagents (agent type: explore, model \"auto\") in BACKGROUND mode at once: they read a.txt, b.txt and notes.txt, " +
       "one file each. Tell each to answer with a numbered list of 15 points (about 300 words) about its file. Then wait " +
       "for all three (sleep about 40 seconds in the shell if needed) and reply with one sentence per subagent.",
   },
