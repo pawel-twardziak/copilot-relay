@@ -80,7 +80,11 @@ identity it has in a terminal (`cli:<sessionId>`), so it keeps its relay name. I
 
 - The header shows the session's relay name (e.g. `relay: swift-otter`). Click it to rename the session.
 - Messages from other sessions appear as purple "from …" bubbles. Each becomes a new turn as soon as the
-  session is idle. Messages that arrive while it is working wait in a queue.
+  session is idle.
+- Queue: off by default (**⚙ Settings → Deliver queued messages during a turn**). When on, messages and your own
+  prompts sent while the session works are queued and delivered after the current tool step (never while a tool
+  runs); the agent is told to return to its task. The queue strip shows them: ✕ removes one, click edits your own,
+  ▶ resumes. Stop pauses a non-empty queue.
 - Your own prompts reset the relay's agent-to-agent message budget, as in a terminal.
 - Broker address and autostart are read from the installed extension's `config.json` (`npm run install-extension`).
   Without that file the app uses `http://127.0.0.1:7777`, or `COPILOT_RELAY_URL` / `COPILOT_RELAY_PORT` if set,

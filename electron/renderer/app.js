@@ -232,6 +232,8 @@ let tree = SessionTree.index(links); // parent/child index over `links` (bare se
 const views = new Map(); // sessionId -> SessionView
 let activeId = null;
 let queueMidTurn = false; // setting: deliver queued messages while a turn runs
+/** Text of a replayed user message as the user sees it: a mid-turn delivery comes back wrapped. */
+const shownUserText = (raw) => MessageQueue.unwrap(raw) ?? raw;
 let queueItemSeq = 0; // ids of queued items (MessageQueue item shape)
 api.getSettings().then((s) => (queueMidTurn = s.queueMidTurn === true)).catch(() => {});
 
@@ -1165,13 +1167,16 @@ class SessionView {
       this.flush();
       const body = h("div", { class: type === "agent" ? "md" : "body" });
       const run = { type, body, text: "", messageId };
-      const shown = () => FileLinks.parseRelayHeader(run.text).display; // a replayed relay message hides its [folder "..."] line
+      const shown = () => FileLinks.parseRelayHeader(shownUserText(run.text)).display; // a replayed relay message hides its [folder "..."] line
       let el;
       if (type === "thought") el = h("details", { class: "thought" }, h("summary", {}, "Thinking"), body);
       else {
         el = h("div", { class: `msg ${type}` }, body, copyBtn(() => shown()));
         el._md = () => (!shown().trim() ? null : type === "user" ? `**You:**\n\n${shown()}` : shown());
-        if (type === "user") el._matchText = () => run.text; // replayed text arrives after append
+        if (type === "user") {
+          el._matchText = () => run.text; // replayed text arrives after append; what was sent (wrapped if delivered mid-turn)
+          el._ownText = () => shownUserText(run.text);
+        }
       }
       run.el = el;
       this.append(el);
@@ -1203,7 +1208,7 @@ class SessionView {
     else if (r?.type === "user") this.mentionThumbs(r.el, r.text);
     if (r?.type === "agent") this.linkPaths(r.body, this.cwd);
     else if (r?.type === "user") {
-      const head = FileLinks.parseRelayHeader(r.text);
+      const head = FileLinks.parseRelayHeader(shownUserText(r.text));
       this.linkPaths(r.body, head.from ? head.folder : this.cwd);
     }
     this.run = null;
@@ -1686,7 +1691,7 @@ class SessionView {
     }
     if (this.historyOp) return;
     const { ordinal, matchText, ownText, draft } = this.edit;
-    const prefix = EditMessage.notesPrefix(matchText, ownText);
+    const prefix = EditMessage.notesPrefix(MessageQueue.unwrap(matchText) ?? matchText, ownText);
     const { sessionId } = this;
     this.historyOp = Symbol("edit"); // the view is replaced below, so the flag never needs releasing
     this.setBusy(true);
@@ -1852,7 +1857,7 @@ function renderRun(r, final = false) {
     decoratePres(r.body);
     if (final) linkify(r.body, { codeOnly: true }); // marked already links plain URLs in Markdown text
   } else {
-    r.body.textContent = r.type === "user" ? FileLinks.parseRelayHeader(r.text).display : r.text;
+    r.body.textContent = r.type === "user" ? FileLinks.parseRelayHeader(shownUserText(r.text)).display : r.text;
     if (final && r.type === "user") linkify(r.body); // a prompt replayed from the history (live ones are bubbles)
   }
   if (r.type === "user") {
