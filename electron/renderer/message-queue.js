@@ -45,7 +45,10 @@ const isAbortChunk = (text) => text === ABORT_TEXT;
 
 const isTerminal = (status) => status === "completed" || status === "failed";
 
-/** Tools in flight: from `tool_call` until a `tool_call_update` with status completed or failed. */
+/**
+ * Main agent's tools in flight: from `tool_call` until a `tool_call_update` with status completed or failed.
+ * Subagent tools are ignored (they survive an interruption, so they are no boundary and nothing to drop).
+ */
 function createToolTracker() {
   const ids = new Set();
   return {
@@ -53,6 +56,7 @@ function createToolTracker() {
     update(u) {
       const id = u?.toolCallId;
       if (id == null) return false;
+      if (u._meta?.["github.com/copilot"]?.agentId) return false;
       if (u.sessionUpdate === "tool_call") {
         if (!isTerminal(u.status)) ids.add(id);
         return false;

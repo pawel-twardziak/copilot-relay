@@ -73,6 +73,17 @@ test("tracker reset clears", () => {
   assert.equal(t.size(), 0);
 });
 
+test("the tracker ignores subagent tools", () => {
+  const t = createToolTracker();
+  const sub = (u) => ({ ...u, _meta: { "github.com/copilot": { agentId: "sub-1" } } });
+  assert.equal(t.update(sub(call("s", "pending"))), false);
+  assert.equal(t.update(call("m", "pending")), false);
+  assert.equal(t.update(upd("m", "completed")), true);
+  assert.equal(t.size(), 0);
+  t.update(sub(call("s2", "pending")));
+  assert.deepEqual(t.drop(), []);
+});
+
 const mid = { enabled: true, paused: false, prompting: true, edit: null, historyOp: false, holdInbox: false, deleting: false, dead: false, inFlight: 0, head: { command: false } };
 
 test("canDeliverMidTurn", () => {
