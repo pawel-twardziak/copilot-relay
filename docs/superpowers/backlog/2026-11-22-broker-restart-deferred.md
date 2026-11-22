@@ -54,6 +54,15 @@ are left out on purpose: the fix waves moved them; the symbol or test name is gi
 
 - `broker-shutdown.test.mjs`: `startedAt` is only checked to be recent and `acpSessions` to be 0; a second `/health`
   read with an equal `startedAt` would pin "taken once at start".
+- `broker-shutdown.test.mjs`, "POST /api/shutdown answers with the pid and the broker exits": flaky on Windows.
+  Seen on 2026-11-22 on `windows-latest` in both "Test" runs of v0.18.0 (`main` and the tag): the `post(b)` call
+  rejected with `TypeError: fetch failed`. A rerun of each passed, Ubuntu passed, and so had the three Windows runs
+  since v0.17.0; the v0.18.0 change touched neither `server.mjs` nor this test. Likely cause, not verified:
+  `server.mjs` answers with `res.end(body, shutdown)` and `shutdown` calls `process.exit(0)`, so on Windows the
+  connection can be reset before the client has read the answer. The app is not affected: the Stop step in
+  `electron/broker-restart.mjs` catches a dropped answer and lets its `/health` polling decide. Proposal: either
+  the test does the same (a rejected POST is allowed; exit code 0 and an unreachable `/health` still asserted, the
+  answer's body only when it arrived), or the broker exits only after the request's socket has closed.
 - `broker-helper.mjs`: `startBroker` waits without a limit for the "copilot-relay broker:" line; a stand-in script
   that does not print it hangs until the runner's timeout.
 - `relay-client.test.mjs`: the stub's teardown lacks `server.closeAllConnections()` (the file lingers about 3 s);
