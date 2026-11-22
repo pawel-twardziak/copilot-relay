@@ -129,7 +129,10 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberat
 .msg.agent code { background: var(--panel-2); padding: 1px 4px; border-radius: 4px; }
 .msg.agent pre code { background: none; padding: 0; }
 .msg.agent a { color: var(--accent); }
-.msg.agent table { border-collapse: collapse; }
+/* a table wider than the message scrolls inside it, an image shrinks to it: neither runs into the right padding,
+   where the message's time is */
+.msg.agent table { border-collapse: collapse; display: block; width: max-content; max-width: 100%; overflow-x: auto; }
+:where(.msg.agent) img { max-width: 100%; height: auto; }
 .msg.agent th, .msg.agent td { border: 1px solid var(--border); padding: 4px 8px; }
 .msg.system { color: var(--muted); font-size: 12.5px; font-style: italic; }
 .msg.error { color: var(--err); white-space: pre-wrap; font-size: 13px; }

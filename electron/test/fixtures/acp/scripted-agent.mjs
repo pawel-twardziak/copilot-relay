@@ -10,6 +10,8 @@
 // Every prompt (as a user_message_chunk, as Copilot replays it) and every update sent is recorded in
 // <cwd>/.scripted-agent.json; session/load sends them again, in order, before its answer. The scenario's optional
 // load: { delay: ms, error: message } holds that answer back for delay ms, and makes it that error (after the replay).
+// The session id is scripted-<folder name>, or $SCRIPTED_SESSION_ID (a UUID, for checks that need a session Copilot's
+// history files can belong to).
 // Unknown arguments (--acp --stdio, the context tier…) are ignored.
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -20,7 +22,7 @@ const { prompts = [], load = {} } = process.env.SCRIPTED_SCENARIO ? (await impor
 
 const send = (msg) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...msg }) + "\n");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const sessionIdOf = (cwd) => `scripted-${path.basename(cwd)}`;
+const sessionIdOf = (cwd) => process.env.SCRIPTED_SESSION_ID || `scripted-${path.basename(cwd)}`;
 
 let session = null; // { id, file, updates }
 let nextId = 0;

@@ -25,7 +25,7 @@ for (const check of checks.filter((c) => (!names.length || names.includes(c.name
     const started = Date.now();
     let app = null;
     try {
-      app = await launch({ scenario: check.scenario ?? PANEL_SCENARIO, settings: check.settings });
+      app = await launch({ scenario: check.scenario ?? PANEL_SCENARIO, settings: check.settings, sessionId: check.sessionId });
       await app.setMode(mode);
       await check.run(app);
       console.log(`ok    ${label}${record ? " (recorded)" : ""} ${Date.now() - started} ms`);
