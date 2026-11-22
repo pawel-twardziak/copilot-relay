@@ -149,7 +149,7 @@ test("commits and diff: an unrecorded root and a bad rel reject", async (t) => {
   const { store, changes } = setup(t);
   await assert.rejects(changes.commits(SID, r.repo, "README.md"), /not listed for this session/);
   await assert.rejects(changes.diff(SID, r.repo, "README.md", "uncommitted"), /not listed for this session/);
-  await assert.rejects(async () => changes.remove(SID, r.repo), /not listed for this session/);
+  await assert.rejects(changes.remove(SID, r.repo), /not listed for this session/);
   store.addRepo(SID, rec(r.repo));
   for (const bad of ["../x", "/etc/passwd", "", "a/../../x"]) {
     await assert.rejects(changes.commits(SID, r.repo, bad), /Invalid path/);
@@ -237,7 +237,78 @@ test("remove: drops the record; list no longer has it", async (t) => {
   const { store, changes } = setup(t);
   store.addRepo(SID, rec(r.repo));
   assert.equal((await changes.list(SID)).repos.length, 1);
-  changes.remove(SID, r.repo);
+  await changes.remove(SID, r.repo);
   assert.equal(store.repo(SID, r.repo), null);
   assert.deepEqual((await changes.list(SID)).repos, []);
+});
+
+const MADE_UP = "0123456789abcdef0123456789abcdef01234567";
+
+test("commits and diff: a base that no longer exists gives no commits and Unknown version", async (t) => {
+  const r = await repoWithRemote(t);
+  write(r.repo, "README.md", "edited");
+  const { store, changes } = setup(t);
+  store.addRepo(SID, rec(r.repo, { base: MADE_UP }));
+  assert.deepEqual(await changes.commits(SID, r.repo, "README.md"), []);
+  assert.match((await changes.diff(SID, r.repo, "README.md", "uncommitted")).text, /\+edited/);
+  await assert.rejects(changes.diff(SID, r.repo, "README.md", MADE_UP), /Unknown version/);
+});
+
+test("list: unreadable commits keep the uncommitted files and give a note", async (t) => {
+  const a = await repoWithRemote(t, "a");
+  const b = await repoWithRemote(t, "b");
+  write(b.repo, "u.txt", "u");
+  const broken = { ...git, commitFiles: (root, base) => (root === b.repo ? Promise.reject(new Error("boom")) : git.commitFiles(root, base)) };
+  const { store, changes } = setup(t, { git: broken });
+  store.addRepo(SID, rec(a.repo, { base: await headOf(a) }));
+  store.addRepo(SID, rec(b.repo, { base: await headOf(b) }));
+  const { repos } = await changes.list(SID);
+  assert.equal(repos[0].note, null);
+  assert.equal(repos[1].error, null);
+  assert.equal(repos[1].note, "The commits since the start point could not be read: boom");
+  assert.deepEqual(repos[1].files.map((f) => f.path), ["u.txt"]);
+});
+
+test("list: the state is the status state when uncommitted, else the commit state", async (t) => {
+  const r = await repoWithRemote(t);
+  const base = await headOf(r);
+  await commit(r, { "added.txt": "a", "edited.txt": "e" }, "add");
+  write(r.repo, "edited.txt", "e2");
+  const { store, changes } = setup(t);
+  store.addRepo(SID, rec(r.repo, { base, at: "2026-03-04T00:00:00.000Z" }));
+  store.addLoose(SID, "/tmp/loose.txt");
+  const { repos, loose } = await changes.list(SID);
+  const f = byPath(repos[0]);
+  assert.equal(f["added.txt"].state, "A");
+  assert.equal(f["edited.txt"].state, "M");
+  assert.equal(repos[0].source, "auto");
+  assert.equal(repos[0].at, "2026-03-04T00:00:00.000Z");
+  assert.deepEqual(loose, ["/tmp/loose.txt"]);
+});
+
+test("checkRel: Windows and odd paths are rejected", () => {
+  for (const bad of ["C:\\x", "..\\x", "a\0b", undefined, 5, null]) assert.throws(() => checkRel(bad), /Invalid path/);
+});
+
+test("add: a bad folder is refused before any call; git's real error is not hidden", async (t) => {
+  let calls = 0;
+  const spy = { where: () => (calls++, null), head: () => (calls++, null), headAt: () => (calls++, null) };
+  const guarded = setup(t, { git: spy, opts: { allow: () => (calls++, true) } });
+  for (const bad of [undefined, "", "rel/dir"]) await assert.rejects(guarded.changes.add(SID, bad), /Invalid folder/);
+  assert.equal(calls, 0);
+
+  const dubious = Object.assign(new Error("fatal: detected dubious ownership"), { code: "EGIT" });
+  const failing = setup(t, { git: { ...spy, where: () => Promise.reject(dubious) } });
+  await assert.rejects(failing.changes.add(SID, path.resolve("x")), /dubious ownership/);
+});
+
+test("add: a listed root is detected before the start point is read", async (t) => {
+  const r = await repoWithRemote(t);
+  let reads = 0;
+  const counting = { ...git, head: (root) => (reads++, git.head(root)), headAt: (...a) => (reads++, git.headAt(...a)) };
+  const { store, changes } = setup(t, { git: counting });
+  store.addRepo(SID, rec(r.repo));
+  const res = await changes.add(SID, r.repo);
+  assert.equal(res.message, "repo is already listed.");
+  assert.equal(reads, 0);
 });

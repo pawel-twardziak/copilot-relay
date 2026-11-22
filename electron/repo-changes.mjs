@@ -35,22 +35,22 @@ export function createChanges({ store, git, createdAt, allow, now = () => new Da
       try {
         committed = await git.commitFiles(rec.root, rec.base);
       } catch (err) {
-        if (err?.code !== "NOBASE") throw err;
-        note = NOBASE_NOTE;
+        note = err?.code === "NOBASE" ? NOBASE_NOTE : `The commits since the start point could not be read: ${err?.message ?? err}`;
       }
       const dirty = new Map(status.map((f) => [f.path, f.state]));
       const done = new Map(committed.map((f) => [f.path, f.state]));
-      const files = [...new Set([...dirty.keys(), ...done.keys()])].sort().map((p) => ({
+      const all = [...new Set([...dirty.keys(), ...done.keys()])].sort();
+      const touched = new Set(rec.touched);
+      const dirtyAtStart = new Set(rec.dirtyAtStart);
+      const files = all.slice(0, FILE_LIMIT).map((p) => ({
         path: p,
         state: dirty.get(p) ?? done.get(p),
         uncommitted: dirty.has(p),
         committed: done.has(p),
-        touched: rec.touched.includes(p),
-        dirtyAtStart: rec.dirtyAtStart.includes(p),
+        touched: touched.has(p),
+        dirtyAtStart: dirtyAtStart.has(p),
       }));
-      return {
-        ...base, noCommits: head === null, note, truncated: files.length > FILE_LIMIT, files: files.slice(0, FILE_LIMIT),
-      };
+      return { ...base, noCommits: head === null, note, truncated: all.length > FILE_LIMIT, files };
     } catch (err) {
       return { ...base, error: err?.message ?? String(err), files: [] };
     }
@@ -64,7 +64,12 @@ export function createChanges({ store, git, createdAt, allow, now = () => new Da
 
     async commits(sessionId, root, rel) {
       const rec = record(sessionId, root);
-      return git.fileCommits(rec.root, rec.base, checkRel(rel));
+      try {
+        return await git.fileCommits(rec.root, rec.base, checkRel(rel));
+      } catch (err) {
+        if (err?.code === "NOBASE") return [];
+        throw err;
+      }
     },
 
     async diff(sessionId, root, rel, version) {
@@ -75,7 +80,10 @@ export function createChanges({ store, git, createdAt, allow, now = () => new Da
         if ((await git.head(rec.root)) === null) return { added: true };
         res = await git.diffUncommitted(rec.root, rel);
       } else {
-        const known = typeof version === "string" && (await git.fileCommits(rec.root, rec.base, rel)).some((c) => c.sha === version);
+        const list = typeof version === "string"
+          ? await git.fileCommits(rec.root, rec.base, rel).catch((err) => { if (err?.code === "NOBASE") return []; throw err; })
+          : [];
+        const known = list.some((c) => c.sha === version);
         if (!known) throw new Error("Unknown version");
         res = await git.diffCommit(rec.root, version, rel);
       }
@@ -83,10 +91,15 @@ export function createChanges({ store, git, createdAt, allow, now = () => new Da
     },
 
     async add(sessionId, dir) {
+      if (typeof dir !== "string" || !path.isAbsolute(dir)) throw new Error("Invalid folder");
       if (!(await allow(dir))) return { message: "Network folders are not read." };
-      const found = await git.where(dir).catch(() => null);
+      const found = await git.where(dir).catch((err) => {
+        if (err?.code === "NOCWD") return null;
+        throw err;
+      });
       if (!found) return { message: `${dir} is not inside a git repository.` };
       const { root } = found;
+      if (store.repo(sessionId, root)) return { message: `${folderName(root)} is already listed.` };
       const created = createdAt(sessionId);
       const base = (created && (await git.headAt(root, created))) ?? (await git.head(root));
       const added = store.addRepo(sessionId, {
@@ -95,7 +108,7 @@ export function createChanges({ store, git, createdAt, allow, now = () => new Da
       return added ? { root } : { message: `${folderName(root)} is already listed.` };
     },
 
-    remove(sessionId, root) {
+    async remove(sessionId, root) {
       record(sessionId, root);
       store.removeRepo(sessionId, root);
     },
