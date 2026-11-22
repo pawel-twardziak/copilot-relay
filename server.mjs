@@ -311,7 +311,14 @@ const server = http.createServer(async (req, res) => {
         // only the desktop app registers with an app:<uuid> alias; it alone can show reopen cards
         const app = /^app:/.test(q.get("alias") ?? "");
         sse(res);
-        const write = (event, data) => !res.destroyed && res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+        // true once the event is handed to the stream. res.write() answers false when its buffer is over the limit
+        // (16 KiB on Windows): the event is sent all the same, so that is not "not delivered" (Registry would keep a
+        // second copy in the inbox and send it again on the session's next registration)
+        const write = (event, data) => {
+          if (res.destroyed) return false;
+          res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+          return true;
+        };
         // unlike `write`, `control` must throw on a dead stream: Delegation treats only a throw as "not delivered"
         const control = (event, data) => {
           if (res.destroyed) throw new Error("stream closed");
