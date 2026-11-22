@@ -25,6 +25,7 @@ test("on main with local changes: stashed, then pulled", async (t) => {
   assert.deepEqual(out.stash, { branch: "main", message });
   assert.equal(out.after, head);
   assert.notEqual(out.before, out.after);
+  assert.equal(out.from, null);
   assert.equal((await r.git("status", "--porcelain")).trim(), "");
   assert.match(await r.git("stash", "list"), /copilot-sessions restart 2026-11-22T12:00:00\.000Z/);
 });
@@ -52,6 +53,7 @@ test("on a branch, clean: ends on main, pulled", async (t) => {
   assert.equal((await r.git("rev-parse", "--abbrev-ref", "HEAD")).trim(), "main");
   assert.equal(out.after, head);
   assert.equal(out.stash, null);
+  assert.equal(out.from, "feature");
 });
 
 test("on a branch with changes: stashed from that branch, ends on main, clean", async (t) => {
@@ -71,6 +73,7 @@ test("detached HEAD: ends on main, pulled", async (t) => {
   const out = await update(r.repo);
   assert.equal((await r.git("rev-parse", "--abbrev-ref", "HEAD")).trim(), "main");
   assert.equal(out.after, head);
+  assert.equal(out.from, "a detached HEAD");
 });
 
 async function diverge(r) {
@@ -143,9 +146,19 @@ test("every git call has the repo as cwd, no prompts and the timeout", async (t)
   assert.deepEqual(calls[2].args, ["status", "--porcelain", "-z", "--untracked-files=all"]);
   assert.deepEqual(calls[3].args, ["-c", "user.name=Copilot Sessions", "-c", "user.email=copilot-sessions@localhost",
     "stash", "push", "--include-untracked", "-m", message]);
-  assert.deepEqual(calls[5].args, ["pull", "--ff-only", "origin", "main"]);
+  assert.deepEqual(calls[5].args, ["pull", "--ff-only", "--no-rebase", "origin", "main"]);
   for (const c of calls.filter((_, i) => i !== 3)) assert.ok(!c.args.includes("-c"));
-  for (const c of calls) {
+  // A failed stash call is followed by one read of the top stash entry, with the same options.
+  const failCalls = [];
+  const failing = async (program, args, opts) => {
+    failCalls.push({ program, args, opts });
+    if (args.includes("stash")) throw new Error("git stash failed (exit 1): boom");
+    return fake(program, args, opts);
+  };
+  await assert.rejects(updateRepo({ repo: r.repo, run: failing, now }), /boom/);
+  assert.deepEqual(failCalls.slice(3).map((c) => c.args.filter((a) => !a.startsWith("user.") && a !== "-c").slice(0, 2).join(" ")), ["stash push", "log -1"]);
+  assert.deepEqual(failCalls[4].args, ["log", "-1", "--format=%s", "refs/stash"]);
+  for (const c of [...calls, ...failCalls]) {
     assert.equal(c.program, "git");
     assert.equal(c.opts.cwd, r.repo);
     assert.equal(c.opts.env.GIT_TERMINAL_PROMPT, "0");
@@ -189,6 +202,10 @@ test("describeUpdate", () => {
   assert.equal(describeUpdate({ before: "abc1234", after: "def5678", stash: null }), "abc1234 → def5678");
   assert.equal(describeUpdate({ before: "abc1234", after: "def5678", stash: { branch: "feature", message } }),
     "abc1234 → def5678; changes stashed from feature");
+  assert.equal(describeUpdate({ before: "abc1234", after: "def5678", stash: { branch: "feature", message }, from: "feature" }),
+    "abc1234 → def5678 (was on feature); changes stashed from feature");
+  assert.equal(describeUpdate({ before: "abc1234", after: "def5678", stash: null, from: "a detached HEAD" }),
+    "abc1234 → def5678 (was on a detached HEAD)");
 });
 
 test("a failed stash is reported as git stash", async (t) => {
@@ -198,6 +215,37 @@ test("a failed stash is reported as git stash", async (t) => {
     ? isolatedRun(process.execPath, ["-e", "process.exit(1)"], opts)
     : isolatedRun(program, args, opts);
   await assert.rejects(updateRepo({ repo: r.repo, run: failStash, now }), /^Error: git stash failed/);
+});
+
+test("a stash command that fails after storing its entry: the entry is named, the work tree may be partly cleaned", async (t) => {
+  const r = await repoWithRemote(t);
+  dirty(r.repo);
+  const storeThenFail = async (program, args, opts) => {
+    const out = await isolatedRun(program, args, opts);
+    if (args.includes("stash")) throw new Error("git stash failed (exit 1): cannot remove a file");
+    return out;
+  };
+  await assert.rejects(updateRepo({ repo: r.repo, run: storeThenFail, now }), (e) => {
+    assert.deepEqual(e.stash, { branch: "main", message });
+    assert.equal(e.message, "git stash failed (exit 1): cannot remove a file The work tree may be partly cleaned.");
+    return true;
+  });
+  assert.equal((await r.git("stash", "list")).trim().split("\n").length, 1);
+});
+
+test("a stash command that fails without storing anything: no stash named, message unchanged", async (t) => {
+  const r = await repoWithRemote(t);
+  dirty(r.repo);
+  const failStash = async (program, args, opts) => {
+    if (args.includes("stash")) throw new Error("git stash failed (exit 1): nothing stored");
+    return isolatedRun(program, args, opts);
+  };
+  await assert.rejects(updateRepo({ repo: r.repo, run: failStash, now }), (e) => {
+    assert.equal(e.stash, undefined);
+    assert.equal(e.message, "git stash failed (exit 1): nothing stored");
+    return true;
+  });
+  assert.equal((await r.git("stash", "list")).trim(), "");
 });
 
 test("the stash call is labelled git stash", async () => {

@@ -24,20 +24,36 @@ export async function updateRepo({ repo, run, now = () => new Date(), timeoutMs 
   try {
     if (await hasStashable()) {
       const message = `copilot-sessions restart ${now().toISOString()}`;
-      await call([...STASH_IDENTITY, "stash", "push", "--include-untracked", "-m", message], { label: "git stash" });
+      try {
+        await call([...STASH_IDENTITY, "stash", "push", "--include-untracked", "-m", message], { label: "git stash" });
+      } catch (err) {
+        // `stash push -u` stores the entry before it cleans and resets the work tree, so a failure (a file it cannot
+        // remove, the timeout) can come after the work is already in the stash: name it when it is there.
+        const top = await git("log", "-1", "--format=%s", "refs/stash").catch(() => "");
+        if (top.includes(message)) {
+          stash = { branch, message };
+          err.message += " The work tree may be partly cleaned.";
+        }
+        throw err;
+      }
       stash = { branch, message };
     }
-    if (branch !== "main") await git("checkout", "main");
-    await git("pull", "--ff-only", "origin", "main");
+    let from = null;
+    if (branch !== "main") {
+      await git("checkout", "main");
+      from = branch === "HEAD" ? "a detached HEAD" : branch;
+    }
+    await git("pull", "--ff-only", "--no-rebase", "origin", "main");
     const after = await git("rev-parse", "--short", "HEAD");
-    return { before, after, stash };
+    return { before, after, stash, from };
   } catch (err) {
     if (stash) err.stash = stash;
     throw err;
   }
 }
 
-export function describeUpdate({ before, after, stash }) {
-  const head = before === after ? `already up to date (${after})` : `${before} → ${after}`;
+export function describeUpdate({ before, after, stash, from = null }) {
+  const hashes = before === after ? `already up to date (${after})` : `${before} → ${after}`;
+  const head = from ? `${hashes} (was on ${from})` : hashes;
   return stash ? `${head}; changes stashed from ${stash.branch}` : head;
 }
