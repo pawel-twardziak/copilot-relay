@@ -10,7 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { AcpConnection } from "./acp.mjs";
-import { countUserMessages, deleteSession, describeCut, forkSession, isSessionId, purgeDeleted, sessionDir, truncateSession } from "./history.mjs";
+import { countUserMessages, deleteSession, describeCut, forkSession, isSessionId, messageTimes, purgeDeleted, sessionDir, truncateSession } from "./history.mjs";
 import { createUsagePusher } from "./usage.mjs";
 import { JobScheduler } from "./scheduler.mjs";
 import { scheduleInfo } from "./jobs.mjs";
@@ -679,6 +679,9 @@ handle("sessions:prompt", async (sessionId, text, source = "relay") => {
 
 // Count of user messages Copilot recorded in events.jsonl (0 before the first turn).
 handle("sessions:userMessages", async (sessionId) => countUserMessages(sessionId));
+
+// Times of the recorded messages, for the chat's message times after a replay (never fails: no history, no times).
+handle("sessions:messageTimes", async (sessionId) => messageTimes(sessionId));
 
 // Copilot's own /rename command: it runs no model turn and isn't stored in the history, so turn numbers
 // used by fork/delete stay right. Copilot saves the name in workspace.yaml (user_named: true).

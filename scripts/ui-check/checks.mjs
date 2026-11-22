@@ -1,7 +1,7 @@
 // The UI checks run by scripts/ui-check/run.mjs: { name, scenario?, modes?, run(app) }, each throwing on failure.
 // app is a driver (driver.mjs) launched with the check's scenario (default panel-scenario.mjs), its mode already set.
 import assert from "node:assert/strict";
-import { existsSync, readdirSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -41,6 +41,7 @@ async function playScenario(app) {
 }
 
 const V = `views.get("scripted-work")`; // the view of the scenario's session (driver.mjs: newSession)
+const HISTORY_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"; // a session Copilot's history files can belong to (a UUID)
 const WAIT_SCENARIO = path.join(FIXTURES, "panel-wait-scenario.mjs");
 const SPLIT_SCENARIO = path.join(FIXTURES, "tool-split-scenario.mjs");
 const PANEL_MODES = ["subagents", "all"];
@@ -328,6 +329,183 @@ export const checks = [
       await playScenario(app);
       await app.reload();
       baseline("replay", await app.dump());
+    },
+  },
+  {
+    // every top-level user/relay/agent message shows HH:MM inside its right padding, clear of its text; one date line
+    name: "message-times-live",
+    modes: ["off"],
+    async run(app) {
+      await playScenario(app);
+      const r = await app.ev(`(() => {
+        const v = ${V};
+        const rect = (e) => e.getBoundingClientRect();
+        const timed = [...v.log.querySelectorAll(":scope > .msg.user, :scope > .msg.relay, :scope > .msg.agent")].filter((e) => !e.hidden);
+        const seps = [...v.log.querySelectorAll(":scope > .day-sep")];
+        const bad = (e) => {
+          const t = e.querySelector(":scope > .time"), b = e.querySelector(":scope > .body, :scope > .md");
+          return !t || !b || rect(t).left < rect(b).right || rect(t).right > rect(e).right || rect(t).top < rect(e).top || rect(t).width === 0;
+        };
+        return {
+          timed: timed.length,
+          clocks: timed.map((e) => e.querySelector(":scope > .time")?.textContent ?? null),
+          bad: timed.filter(bad).length,
+          seps: seps.length,
+          sepFirst: seps[0]?.nextElementSibling === timed[0],
+          sepText: seps[0]?.textContent === MessageTimes.dayLabel(Date.now()),
+          elsewhere: v.el.querySelectorAll(".time").length - timed.length,
+        };
+      })()`);
+      assert.ok(r.timed > 3, "the scenario's three prompts and their answers");
+      assert.ok(r.clocks.every((c) => /^\d\d:\d\d$/.test(c ?? "")), JSON.stringify(r.clocks));
+      assert.deepEqual({ bad: r.bad, seps: r.seps, sepFirst: r.sepFirst, sepText: r.sepText, elsewhere: r.elsewhere }, { bad: 0, seps: 1, sepFirst: true, sepText: true, elsewhere: 0 });
+      // nothing of a message lies under its time: one word, wrapping and unbroken text, relay bubbles, the continue
+      // line, and answers that start with a table, an image or code wider than the message
+      await app.ev(`(() => {
+        const v = ${V};
+        const add = (el, name) => { v.flush(); v.append(el); el.dataset.probe = name; };
+        add(v.userBubble("ok"), "one word");
+        add(v.userBubble("word ".repeat(400)), "wrapping");
+        add(v.userBubble("x".repeat(900)), "unbroken");
+        add(bubble("relay", "hi", "other"), "relay");
+        add(bubble("relay", "relay text ".repeat(200), "a-very-long-session-name-".repeat(12)), "relay, long from");
+        add(h("div", { class: "msg user continue" }, h("div", { class: "body" }, MessageQueue.CONTINUE_LABEL)), "continue line");
+        const answer = (text, id, name) => { v.stream("agent", text, id); v.flush(); [...v.log.querySelectorAll(":scope > .msg.agent")].at(-1).dataset.probe = name; };
+        const cols = Array.from({ length: 40 }, (_, i) => "column_" + i);
+        const row = (cells) => "| " + cells.join(" | ") + " |";
+        answer([row(cols), row(cols.map(() => "---")), row(cols.map((c) => c + "_value"))].join("\\n"), "probe-table", "wide table first");
+        answer("<img src='data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%222000%22 height=%2250%22/>' width='2000' height='50'>", "probe-img", "wide image first");
+        answer("~~~\\n" + "c".repeat(500) + "\\n~~~", "probe-code", "long code first");
+      })()`);
+      await app.idle();
+      const under = await app.ev(`(() => {
+        const v = ${V};
+        const hit = (a, b) => a.left < b.right - 0.5 && a.right > b.left + 0.5 && a.top < b.bottom - 0.5 && a.bottom > b.top + 0.5;
+        const own = (n) => n.closest(".time, .acts, .copy");
+        // what of a rectangle shows: clipped by every scrolling box between its node and the message
+        const shown = (q, node, msg) => {
+          let r = { left: q.left, right: q.right, top: q.top, bottom: q.bottom };
+          for (let p = node; p && p !== msg; p = p.parentElement) {
+            if (getComputedStyle(p).overflowX === "visible") continue;
+            const c = p.getBoundingClientRect();
+            r = { left: Math.max(r.left, c.left), right: Math.min(r.right, c.right), top: Math.max(r.top, c.top), bottom: Math.min(r.bottom, c.bottom) };
+          }
+          return r;
+        };
+        const bad = [];
+        const probes = [...v.log.querySelectorAll(":scope > [data-probe]")];
+        for (const el of probes) {
+          const t = el.querySelector(":scope > .time");
+          if (!t) { bad.push(el.dataset.probe + ": no time"); continue; }
+          const tr = t.getBoundingClientRect();
+          let covered = false;
+          const tw = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+          for (let n = tw.nextNode(); n && !covered; n = tw.nextNode()) {
+            if (!n.data.trim() || own(n.parentElement)) continue;
+            const range = document.createRange();
+            range.selectNodeContents(n);
+            covered = [...range.getClientRects()].some((q) => hit(shown(q, n.parentElement, el), tr));
+          }
+          for (const d of el.querySelectorAll("table, img, pre")) if (!own(d) && hit(shown(d.getBoundingClientRect(), d.parentElement, el), tr)) covered = true;
+          if (covered) bad.push(el.dataset.probe);
+        }
+        return { probes: probes.length, bad };
+      })()`);
+      assert.deepEqual(under, { probes: 9, bad: [] });
+      // the first message of the next day gets its own date line
+      const next = await app.ev(`(() => {
+        const v = ${V};
+        const el = bubble("user", "after midnight");
+        v.log.append(el);
+        const d = new Date();
+        d.setDate(d.getDate() + 1);
+        v.stamp(el, d.getTime());
+        v.stamp(el, 0); // a second stamp changes nothing
+        return { seps: v.log.querySelectorAll(":scope > .day-sep").length, before: el.previousElementSibling?.className, times: el.querySelectorAll(".time").length };
+      })()`);
+      assert.deepEqual(next, { seps: 2, before: "day-sep", times: 1 });
+    },
+  },
+  {
+    // replayed messages take the times of the history: users by ordinal, agents by messageId; never a shifted time
+    name: "message-times-replay",
+    modes: ["off"],
+    async run(app) {
+      await playScenario(app);
+      await app.reload();
+      const SETUP = `const v = ${V};
+        const day = (d, h, m) => new Date(2026, 10, d, h, m).getTime();
+        const users = [...v.log.querySelectorAll(":scope > .msg.user")];
+        const agents = [...v.log.querySelectorAll(":scope > .msg.agent")].filter((e) => typeof e._messageId === "string");
+        const clock = (e) => e.querySelector(":scope > .time")?.textContent ?? null;`;
+      const r = await app.ev(`(() => {
+        ${SETUP}
+        const before = v.el.querySelectorAll(".time, .day-sep").length; // the scripted session has no events.jsonl
+        users[1].hidden = true; // an empty replayed prompt: counted, not stamped
+        const last = agents.at(-1);
+        v.applyTimes({ users: [day(21, 20, 22), day(21, 20, 30), day(22, 9, 5)], agents: Object.fromEntries(agents.map((e) => [e._messageId, e === last ? day(22, 9, 6) : day(21, 20, 23)])) });
+        const seps = [...v.log.querySelectorAll(":scope > .day-sep")];
+        return {
+          before, users: users.length, agents: agents.length > 1,
+          userClocks: users.map(clock), agentClocks: [...new Set(agents.map(clock))],
+          seps: seps.map((s) => [s.textContent === MessageTimes.dayLabel(day(21, 12, 0)), s.textContent === MessageTimes.dayLabel(day(22, 12, 0)), users.indexOf(s.nextElementSibling)]),
+        };
+      })()`);
+      assert.deepEqual(r, {
+        before: 0, users: 3, agents: true,
+        userClocks: ["20:22", null, "09:05"], agentClocks: ["20:23", "09:06"],
+        seps: [[true, false, 0], [false, true, 2]],
+      });
+      // one user time too few: no user message is stamped, the agent ones are; a late block of the history keeps its time
+      await app.reload();
+      const m = await app.ev(`(() => {
+        ${SETUP}
+        v.applyTimes({ users: [day(21, 20, 22), day(21, 20, 30)], agents: { ...Object.fromEntries(agents.map((e) => [e._messageId, day(21, 20, 23)])), "late-1": day(21, 20, 40) } });
+        v.stream("agent", "late", "late-1");
+        v.flush();
+        const late = [...v.log.querySelectorAll(":scope > .msg.agent")].at(-1);
+        return { userClocks: users.map(clock), agentClocks: [...new Set(agents.map(clock))], late: clock(late), seps: v.log.querySelectorAll(":scope > .day-sep").length };
+      })()`);
+      assert.deepEqual(m, { userClocks: [null, null, null], agentClocks: ["20:23"], late: "20:40", seps: 1 });
+    },
+  },
+  {
+    // the real open path: the reopened session's events.jsonl is read (api.messageTimes) and its times are shown
+    name: "message-times-history",
+    modes: ["off"],
+    sessionId: HISTORY_ID,
+    async run(app) {
+      const v = `views.get(${JSON.stringify(HISTORY_ID)})`;
+      await playScenario(app);
+      const ids = await app.ev(`[...${v}.log.querySelectorAll(":scope > .msg.agent")].map((e) => e._messageId)`);
+      assert.ok(ids.length > 1 && ids.every((id) => typeof id === "string"), JSON.stringify(ids));
+      const iso = (d, h, m) => new Date(2026, 10, d, h, m, 30).toISOString();
+      const user = (d, h, m) => ({ type: "user.message", data: { content: "x" }, timestamp: iso(d, h, m) });
+      const answer = (id, d, h, m) => ({ type: "assistant.message", data: { messageId: id, content: "x" }, timestamp: iso(d, h, m) });
+      const dir = path.join(app.dir, "copilot-home", "session-state", HISTORY_ID);
+      mkdirSync(dir, { recursive: true });
+      const events = [
+        { type: "session.start", data: {}, timestamp: iso(21, 9, 0) },
+        user(21, 20, 22),
+        ...ids.slice(0, -1).map((id) => answer(id, 21, 20, 23)),
+        user(21, 23, 58),
+        user(22, 9, 5),
+        answer(ids.at(-1), 22, 9, 6),
+      ];
+      writeFileSync(path.join(dir, "events.jsonl"), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
+      await app.reload();
+      const r = await app.ev(`(() => {
+        const v = ${v};
+        const clock = (e) => e.querySelector(":scope > .time")?.textContent ?? null;
+        const users = [...v.log.querySelectorAll(":scope > .msg.user")];
+        const agents = [...v.log.querySelectorAll(":scope > .msg.agent")];
+        return {
+          userClocks: users.map(clock),
+          agentClocks: [...new Set(agents.map(clock))],
+          sepsBeforeUser: [...v.log.querySelectorAll(":scope > .day-sep")].map((s) => users.indexOf(s.nextElementSibling)),
+        };
+      })()`);
+      assert.deepEqual(r, { userClocks: ["20:22", "23:58", "09:05"], agentClocks: ["20:23", "09:06"], sepsBeforeUser: [0, 2] });
     },
   },
   {

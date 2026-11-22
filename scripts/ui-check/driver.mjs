@@ -77,10 +77,12 @@ async function attach(port) {
 }
 
 /**
- * Starts the app. scenario: the scripted agent's scenario module (path); settings: more fields for settings.json.
+ * Starts the app. scenario: the scripted agent's scenario module (path); settings: more fields for settings.json;
+ * sessionId: the id the scripted agent gives its session instead of scripted-work (a UUID: the app reads Copilot's
+ * history files only for those; they go in <dir>/copilot-home/session-state/<id>/).
  * @returns the driver; every method that waits throws after 20 s.
  */
-export async function launch({ scenario, settings = {}, width = 1280, height = 800, dir = null }) {
+export async function launch({ scenario, settings = {}, width = 1280, height = 800, dir = null, sessionId: scriptedId = null }) {
   // dir: the folder of an earlier launch kept with close({ keep: true }); this launch uses its settings and stored UI
   // state, and removes it
   const tmp = dir ?? mkdtempSync(path.join(os.tmpdir(), "ui-check-"));
@@ -102,7 +104,7 @@ export async function launch({ scenario, settings = {}, width = 1280, height = 8
   const { WAYLAND_DISPLAY, COPILOT_RELAY_URL, ...env } = process.env; // an inherited COPILOT_RELAY_URL would beat COPILOT_RELAY_PORT
   const proc = spawn("xvfb-run", ["-a", ELECTRON, "electron", "--ozone-platform=x11", `--remote-debugging-port=${port}`], {
     cwd: ROOT,
-    env: { ...env, XDG_SESSION_TYPE: "x11", XDG_CONFIG_HOME: config, COPILOT_HOME: path.join(tmp, "copilot-home"), COPILOT_RELAY_PORT: String(relayPort), SCRIPTED_SCENARIO: path.resolve(scenario) },
+    env: { ...env, XDG_SESSION_TYPE: "x11", XDG_CONFIG_HOME: config, COPILOT_HOME: path.join(tmp, "copilot-home"), COPILOT_RELAY_PORT: String(relayPort), SCRIPTED_SCENARIO: path.resolve(scenario), ...(scriptedId ? { SCRIPTED_SESSION_ID: scriptedId } : {}) },
     detached: true,
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -165,9 +167,9 @@ export async function launch({ scenario, settings = {}, width = 1280, height = 8
       ev,
       check,
       resize,
-      /** A new session in the work folder (scripted-work); later calls act on it. */
+      /** A new session in the work folder (scripted-work, or the launch's sessionId); later calls act on it. */
       async newSession() {
-        sessionId = `scripted-${path.basename(work)}`;
+        sessionId = scriptedId ?? `scripted-${path.basename(work)}`;
         await ev(`newSession(${JSON.stringify(work)})`);
         await check(`${view()} && !${view()}.busy`, "the new session");
         return sessionId;
@@ -209,12 +211,13 @@ export async function launch({ scenario, settings = {}, width = 1280, height = 8
         await check(`!document.querySelector("#settings").open`, "the Settings dialog to close");
         await check(`api.getSettings().then((s) => s.activityPanel === ${JSON.stringify(mode)})`, "the mode to be saved");
       },
-      /** thread: what Copy thread builds, without its two header lines; log: one row per log child. */
+      /** thread: what Copy thread builds, without its two header lines; log: one row per log child (date lines left out). */
       async dump() {
         return ev(`(() => {
           const v = ${view()};
-          const thread = [...v.log.children].map((e) => e._md?.()?.trim()).filter(Boolean).join("\\n\\n");
-          const log = [...v.log.children].map((e) => [e.className.replace(/\\s*\\bin-panel\\b/, ""), e._turn ?? null, e._kind ?? null, !!e.querySelector(".acts")]);
+          const rows = [...v.log.children].filter((e) => !e.classList.contains("day-sep"));
+          const thread = rows.map((e) => e._md?.()?.trim()).filter(Boolean).join("\\n\\n");
+          const log = rows.map((e) => [e.className.replace(/\\s*\\bin-panel\\b/, ""), e._turn ?? null, e._kind ?? null, !!e.querySelector(".acts")]);
           return { thread, log };
         })()`);
       },

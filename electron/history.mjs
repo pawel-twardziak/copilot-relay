@@ -102,6 +102,36 @@ export function countUserMessages(id) {
   }
 }
 
+/** Times (ms since epoch) of the messages recorded for session `id`: the user messages in order (null where the
+ *  timestamp can't be read), the assistant messages by messageId. Times are decoration: no history, an unreadable
+ *  file, a broken line or an invalid id give fewer or no times, never an error. */
+export async function messageTimes(id) {
+  const users = [];
+  const agents = {};
+  let text;
+  try {
+    text = await fs.promises.readFile(path.join(sessionDir(id), "events.jsonl"), "utf8");
+  } catch {
+    return { users, agents };
+  }
+  for (const line of text.split("\n")) {
+    if (!line.includes('"user.message"') && !line.includes('"assistant.message"')) continue; // most lines are neither
+    let e;
+    try {
+      e = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const t = Date.parse(e?.timestamp);
+    if (e?.type === "user.message") users.push(Number.isFinite(t) ? t : null);
+    else if (e?.type === "assistant.message") {
+      const mid = e.data?.messageId;
+      if (typeof mid === "string" && Number.isFinite(t) && !Object.hasOwn(agents, mid)) agents[mid] = t;
+    }
+  }
+  return { users, agents };
+}
+
 /** What cutting session `id` at `target` would remove, for the confirm dialog. */
 export function describeCut(id, target) {
   const { events } = readEvents(sessionDir(id));

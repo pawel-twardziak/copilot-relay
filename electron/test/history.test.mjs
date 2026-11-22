@@ -14,6 +14,7 @@ import {
   forgetInStore,
   purgeDeleted,
   forkSession,
+  messageTimes,
   readEvents,
   sessionDir,
   sessionStateDir,
@@ -569,5 +570,45 @@ describe("deleteSession", () => {
     await assert.rejects(deleteSession("../etc"), /Invalid session id/);
     await assert.rejects(deleteSession(randomUUID()), (err) => err.code === "ENOSESSION" && /Session not found/.test(err.message));
     await assert.rejects(forgetInStore("x' OR 1=1 --"), /Invalid session id/);
+  });
+});
+
+describe("messageTimes", () => {
+  const writeEvents = (id, lines) => {
+    const dir = path.join(home, "session-state", id);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "events.jsonl"), lines.map((l) => (typeof l === "string" ? l : JSON.stringify(l))).join("\n") + "\n");
+  };
+  const T = (s) => Date.parse(s);
+
+  test("messageTimes: user times in order, agent times by messageId", async () => {
+    const id = randomUUID();
+    writeEvents(id, [
+      { type: "session.start", data: {}, timestamp: "2026-11-21T19:00:00.000Z" },
+      { type: "user.message", data: { content: "a" }, timestamp: "2026-11-21T19:22:58.000Z" },
+      { type: "assistant.message", data: { messageId: "m1", content: "x" }, timestamp: "2026-11-21T19:23:05.000Z" },
+      { type: "tool.execution_start", data: { note: 'mentions "user.message"' }, timestamp: "2026-11-21T19:23:06.000Z" },
+      { type: "user.message", data: { content: "b" }, timestamp: "not a date" },
+      { type: "assistant.message", data: { content: "no id" }, timestamp: "2026-11-21T19:24:00.000Z" },
+      { type: "assistant.message", data: { messageId: "m1", content: "again" }, timestamp: "2026-11-21T19:30:00.000Z" },
+      { type: "assistant.message", data: { messageId: "m2", content: "y" }, timestamp: "2026-11-22T08:05:00.000Z" },
+    ]);
+    assert.deepEqual(await messageTimes(id), {
+      users: [T("2026-11-21T19:22:58.000Z"), null],
+      agents: { m1: T("2026-11-21T19:23:05.000Z"), m2: T("2026-11-22T08:05:00.000Z") },
+    });
+  });
+
+  test("messageTimes: no history, a broken line, an invalid id: fewer or no times, never a throw", async () => {
+    const empty = { users: [], agents: {} };
+    assert.deepEqual(await messageTimes(randomUUID()), empty);
+    assert.deepEqual(await messageTimes("../outside"), empty);
+    const id = randomUUID();
+    writeEvents(id, [
+      { type: "session.start", data: {}, timestamp: "2026-11-21T19:00:00.000Z" },
+      '{"type":"user.message","data":{"content":"cut off',
+      { type: "user.message", data: { content: "b" }, timestamp: "2026-11-21T19:22:58.000Z" },
+    ]);
+    assert.deepEqual(await messageTimes(id), { users: [T("2026-11-21T19:22:58.000Z")], agents: {} });
   });
 });

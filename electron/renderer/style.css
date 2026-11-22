@@ -129,7 +129,10 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberat
 .msg.agent code { background: var(--panel-2); padding: 1px 4px; border-radius: 4px; }
 .msg.agent pre code { background: none; padding: 0; }
 .msg.agent a { color: var(--accent); }
-.msg.agent table { border-collapse: collapse; }
+/* a table wider than the message scrolls inside it, an image shrinks to it: neither runs into the right padding,
+   where the message's time is */
+.msg.agent table { border-collapse: collapse; display: block; width: max-content; max-width: 100%; overflow-x: auto; }
+:where(.msg.agent) img { max-width: 100%; height: auto; }
 .msg.agent th, .msg.agent td { border: 1px solid var(--border); padding: 4px 8px; }
 .msg.system { color: var(--muted); font-size: 12.5px; font-style: italic; }
 .msg.error { color: var(--err); white-space: pre-wrap; font-size: 13px; }
@@ -285,6 +288,19 @@ dialog label { display: flex; flex-direction: column; gap: 6px; }
 .session-view.busy .act { pointer-events: none; opacity: .4; }
 .msg.agent { padding-right: 56px; }
 .msg.user, .msg.relay { padding-right: 56px; }
+/* ---------- message times ---------- */
+/* in the right padding the Copy button reserves (56px), so a time never covers the message's text */
+.msg > .time {
+  position: absolute; top: 1px; right: 8px; font-size: 11px; line-height: 1.5; font-style: normal;
+  color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; user-select: none; transition: opacity .1s;
+}
+/* on the first text line: below a bubble's padding, below the top margin of an answer's first paragraph */
+.msg.user:not(.continue) > .time, .msg.relay > .time { top: 10px; }
+.msg.agent > .time { top: 16px; }
+/* a bare Copy button (no fork/delete bar) appears in the same corner: the time gives way while hovered */
+.msg:has(> .copy):hover > .time { opacity: 0; }
+.day-sep { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 11.5px; user-select: none; }
+.day-sep::before, .day-sep::after { content: ""; flex: 1; border-top: 1px solid var(--border); }
 /* the app's continue prompt after answers to queued messages: a system-style line, not a bubble */
 .msg.user.continue { align-self: flex-start; background: none; border: none; border-radius: 0; padding: 0 56px 0 0; color: var(--muted); font-size: 12.5px; font-style: italic; }
 .codewrap > pre { margin-top: 0; }
