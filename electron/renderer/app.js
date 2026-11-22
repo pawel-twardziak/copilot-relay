@@ -3218,6 +3218,7 @@ async function openSettings() {
     : "relay-client.mjs is missing from this build, so the relay is not available.";
   brokerRepoDefault = s.brokerRepoDefault;
   $("#set-broker-repo").value = s.brokerRepo || s.brokerRepoDefault;
+  $("#set-broker-repo").placeholder = s.brokerRepoDefault;
   renderBroker(await api.brokerStatus().catch(() => null));
   $("#settings").showModal();
 }

@@ -1123,7 +1123,8 @@ export const checks = [
   },
   {
     // Settings > Relay broker: the question before a restart, and the run's rows. The repository folder does not
-    // exist, so the run stops at its first step: the button is never clicked with a real folder in the field.
+    // exist (or, last, the field is empty), so the run stops at its first step: the button is never clicked with a
+    // real folder in the field.
     name: "broker-restart",
     modes: ["off"],
     scenario: LONG_WAIT_SCENARIO,
@@ -1167,6 +1168,18 @@ export const checks = [
       await app.ev(`document.querySelector("#settings").close()`);
       await openSettings();
       assert.deepStrictEqual(await rows(), stopped, "the rows after reopening");
+      assert.equal(await app.ev(`document.querySelector("#broker-summary").textContent`), "Stopped at Check. The broker was not restarted.");
+      // an emptied field is refused by Check: no fallback to the default folder
+      const emptied = "Check: Set the copilot-relay repository folder first (an absolute path).";
+      await app.ev(`document.querySelector("#set-broker-repo").value = ""`);
+      // safety: the only other state in which the button is clicked is an empty field
+      assert.equal(await app.ev(`document.querySelector("#set-broker-repo").value`), "", "the emptied repository field");
+      await app.ev(`(() => { window.confirm = () => false; document.querySelector("#broker-restart").click(); })()`);
+      await app.check(`(() => { const li = document.querySelector("#broker-steps li"); return !!li && li.textContent.includes(${JSON.stringify(emptied)}) && !document.querySelector("#broker-restart").disabled; })()`, "the run on an empty field to stop");
+      const refused = await rows();
+      assert.equal(refused[0].cls, "failed");
+      assert.ok(refused[0].text.includes(emptied), refused[0].text);
+      assert.deepStrictEqual(refused.slice(1).map((r) => r.cls), ["pending", "pending", "pending", "pending", "pending"]);
       assert.equal(await app.ev(`document.querySelector("#broker-summary").textContent`), "Stopped at Check. The broker was not restarted.");
     },
   },

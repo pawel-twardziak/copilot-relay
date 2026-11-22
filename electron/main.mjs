@@ -1078,8 +1078,10 @@ handle("broker:status", async () => {
   } catch {}
   return { ...restarter.snapshot(), working, acpSessions };
 });
+// The folder in the field, as shown: no fallback to the default here (the window fills the field with it), so an empty
+// field is refused by Check instead of running in a folder the field does not show.
 handle("broker:restart", async (repo) =>
-  restarter.start({ repo: String(repo ?? "").trim() || defaultBrokerRepo(), url: relayConfig().url, copilotHome: process.env.COPILOT_HOME || undefined }),
+  restarter.start({ repo: String(repo ?? "").trim(), url: relayConfig().url, copilotHome: process.env.COPILOT_HOME || undefined }),
 );
 
 // ---------- links ----------

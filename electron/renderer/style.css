@@ -303,7 +303,7 @@ dialog h3 { font-size: 13px; margin: 16px 0 8px; color: var(--muted); text-trans
 .field-row { display: flex; gap: 8px; margin-top: 4px; }
 .field-row input { flex: 1; min-width: 0; }
 #broker-steps { list-style: none; margin: 8px 0 0; padding: 0; font-size: 12px; }
-#broker-steps li { display: flex; gap: 8px; padding: 1px 0; }
+#broker-steps li { display: flex; gap: 8px; padding: 1px 0; overflow-wrap: anywhere; }
 #broker-steps .mark { flex: none; width: 1.2em; text-align: center; }
 #broker-steps li.failed { color: var(--err); }
 #broker-steps li.warning, #broker-steps li.running { color: var(--warn); }

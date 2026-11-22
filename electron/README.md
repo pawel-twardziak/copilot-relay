@@ -114,7 +114,7 @@ identity it has in a terminal (`cli:<sessionId>`), so it keeps its relay name. I
   1. **Check** – the folder is a copilot-relay repository.
   2. **Update** – uncommitted changes go to a stash named `copilot-sessions restart <time>` (only when there
      is something `git stash` can take); then `git checkout main` when another branch is checked out, then
-     `git pull --ff-only origin main`. The stash is kept, never applied or dropped, and the result names it.
+     `git pull --ff-only --no-rebase origin main`. The stash is kept, never applied or dropped, and the result names it.
   3. **Install** – `npm ci`, then the extension installer (`install-extension`).
   4. **Stop** – the old broker is asked to shut down.
   5. **Start** – the new broker starts from the folder.
@@ -122,8 +122,12 @@ identity it has in a terminal (`cli:<sessionId>`), so it keeps its relay name. I
 
   If a step fails, the later steps are not run and the summary says where it stopped. The app asks first when a
   session is working or when sessions started from the broker's web page would end. Sessions in terminals reconnect
-  on their own. A broker started before this version cannot be stopped by the button: stop it by hand once, then the
-  button works.
+  on their own. A broker started before this version cannot be stopped by the button: stop it by hand once, then
+  press the button again (Stop is then skipped and Start runs). To stop it by hand, find the process listening on
+  the broker port and end it:
+  - Windows: `netstat -ano | findstr :7777`, then `taskkill /PID <pid> /F`
+  - Linux: `ss -ltnp | grep :7777`, then `kill <pid>`
+  - macOS: `lsof -nP -iTCP:7777 -sTCP:LISTEN`, then `kill <pid>`
 
 ## File links and preview
 
