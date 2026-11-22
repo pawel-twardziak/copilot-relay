@@ -15,7 +15,9 @@ const tmp = (t) => {
 };
 
 // script: { toplevel, branch, dirty, update: { before, after }, pullError, errors: { node, npm, installer },
-//   health: [state | null, ...] (one per read, the last repeats), shutdownStatus, spawnError, reconnect,
+//   health: [state | null | "timeout" | "json-null", ...] (one per read, the last repeats; null: the connection is
+//   refused, "timeout": the read times out, "json-null": an HTTP answer whose body is JSON null), shutdownStatus,
+//   spawnError, reconnect,
 //   installed: { brokerScript, nodePath }, noServer, url, nodePath }
 function fakeFx(t, script = {}) {
   const repo = tmp(t);
@@ -70,7 +72,9 @@ function fakeFx(t, script = {}) {
       if (url.endsWith("/health")) {
         const list = script.health ?? [null];
         const state = list[Math.min(healthReads++, list.length - 1)];
-        if (state === null) throw new TypeError("fetch failed");
+        if (state === null) throw refused();
+        if (state === "timeout") throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+        if (state === "json-null") return { ok: true, status: 200, json: async () => null };
         const body = JSON.parse(JSON.stringify(state).replaceAll("<repo>", repo.replaceAll("\\", "\\\\")));
         return { ok: true, status: 200, json: async () => body };
       }
@@ -95,6 +99,8 @@ function fakeFx(t, script = {}) {
   return { fx, calls, repo, copilotHome, input: { repo, url: script.url ?? "http://127.0.0.1:7777", copilotHome } };
 }
 
+// What fetch throws when nothing listens on the port.
+const refused = () => new TypeError("fetch failed", { cause: Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:7777"), { code: "ECONNREFUSED" }) });
 const relay = (extra) => ({ app: "copilot-relay", ...extra });
 const okHealth = (pid1, pid2) => [relay({ pid: pid1 }), null, relay({ pid: pid2, root: "<repo>" })];
 const noLater = (calls, ...kinds) => { for (const k of kinds) assert.ok(!calls.order.includes(k), `${k} must not run`); };
@@ -256,14 +262,16 @@ test("createRestarter ends a run started without input and accepts the next one"
 test("shutdown POST aborted, broker gone: stop is done", async (t) => {
   const { fx, input } = fakeFx(t, { health: [relay({ pid: 100 }), null, relay({ pid: 200, root: "<repo>" })] });
   const inner = fx.fetch;
+  let shutdownInit;
   fx.fetch = async (url, init) => {
     if (url.endsWith("/api/shutdown")) {
-      assert.ok(init.signal);
+      shutdownInit = init;
       throw new DOMException("aborted", "AbortError");
     }
     return inner(url, init);
   };
   const out = await runRestart(input, fx);
+  assert.ok(shutdownInit.signal instanceof AbortSignal, "the shutdown request has a time limit");
   assert.equal(out.steps[3].status, "done");
   assert.equal(out.steps[3].detail, "stopped pid 100");
   assert.equal(out.ok, true);
@@ -286,8 +294,18 @@ test("install fails: nothing is stopped", async (t) => {
   const out = await runRestart(input, fx);
   assert.equal(out.steps[2].status, "failed");
   assert.equal(out.steps[2].detail, "install-extension failed (exit 1): boom");
+  assert.doesNotMatch(out.steps[2].detail, /Dependencies may now be incomplete/);
   assert.equal(out.summary, "Stopped at Install. The broker was not restarted.");
   noLater(calls, "shutdown", "spawn");
+});
+
+test("npm ci fails: the detail says the dependencies may be incomplete, nothing later runs", async (t) => {
+  const { fx, calls, input } = fakeFx(t, { errors: { npm: new Error("npm ci failed (exit 1): ECONNRESET") } });
+  const out = await runRestart(input, fx);
+  assert.deepEqual(out.steps.map((s) => s.status), ["done", "done", "failed", "pending", "pending", "pending"]);
+  assert.equal(out.steps[2].detail, "npm ci failed (exit 1): ECONNRESET Dependencies may now be incomplete. The running broker is not affected, but it will not start again until this step succeeds.");
+  assert.equal(out.summary, "Stopped at Install. The broker was not restarted.");
+  noLater(calls, "installer", "shutdown", "spawn");
 });
 
 test("no broker running: stop is skipped and any pid starts", async (t) => {
@@ -303,7 +321,7 @@ test("no broker running: stop is skipped and any pid starts", async (t) => {
 test("an old broker: the shutdown answers 404", async (t) => {
   const { fx, calls, input } = fakeFx(t, { health: [relay({}) ], shutdownStatus: 404 });
   const out = await runRestart(input, fx);
-  assert.equal(out.steps[3].detail, "This broker is older than the restart button. Stop it by hand once; it will then run the updated files.");
+  assert.equal(out.steps[3].detail, "This broker is older than the restart button. Stop it by hand once, then press the button again.");
   assert.equal(out.summary, "Stopped at Stop. The old broker is still running.");
   noLater(calls, "spawn");
 });
@@ -320,6 +338,38 @@ test("something else on the port is left alone", async (t) => {
   assert.equal(out.steps[3].status, "failed");
   assert.equal(out.steps[3].detail, "Something else answers at http://127.0.0.1:7777; it is not a copilot-relay broker.");
   noLater(calls, "shutdown", "spawn");
+});
+
+test("a first /health read that times out: Stop fails as something else answering, nothing is stopped", async (t) => {
+  const { fx, calls, input } = fakeFx(t, { health: ["timeout"] });
+  const out = await runRestart(input, fx);
+  assert.equal(out.steps[3].status, "failed");
+  assert.equal(out.steps[3].detail, "Something else answers at http://127.0.0.1:7777; it is not a copilot-relay broker.");
+  assert.equal(out.summary, "Stopped at Stop. The old broker is still running.");
+  noLater(calls, "shutdown", "spawn");
+});
+
+test("a first /health answer whose body is JSON null: Stop fails as something else answering", async (t) => {
+  const { fx, calls, input } = fakeFx(t, { health: ["json-null"] });
+  const out = await runRestart(input, fx);
+  assert.equal(out.steps[3].status, "failed");
+  assert.equal(out.steps[3].detail, "Something else answers at http://127.0.0.1:7777; it is not a copilot-relay broker.");
+  noLater(calls, "shutdown", "spawn");
+});
+
+test("an unreadable /health while Stop polls counts as still there", async (t) => {
+  const { fx, calls, input } = fakeFx(t, { health: [relay({ pid: 9 }), "timeout"] });
+  const out = await runRestart(input, fx);
+  assert.equal(out.steps[3].detail, "The broker did not stop within 10 s.");
+  noLater(calls, "spawn");
+});
+
+test("Start does not accept the stopped pid answering again", async (t) => {
+  const { fx, input } = fakeFx(t, { health: [relay({ pid: 100 }), null, relay({ pid: 100, root: "<repo>" }), "timeout", relay({ pid: 200, root: "<repo>" })] });
+  const out = await runRestart(input, fx);
+  assert.equal(out.steps[4].status, "done");
+  assert.equal(out.steps[4].detail, "pid 200");
+  assert.equal(out.ok, true);
 });
 
 test("a broker that keeps answering with the same pid: fails after 10 s of virtual time", async (t) => {
@@ -350,7 +400,7 @@ test("a start that never answers: fails after 15 s of virtual time", async (t) =
   const { fx, input } = fakeFx(t, { health: [null] });
   const out = await runRestart(input, fx);
   assert.equal(out.steps[4].detail, "The broker did not answer within 15 s.");
-  assert.equal(out.summary, "Stopped at Start. No broker is running; opening a session starts it.");
+  assert.equal(out.summary, "Stopped at Start. No broker is running; press the button again to retry.");
   assert.ok(fx.now() >= LIMITS.startMs);
 });
 
@@ -374,7 +424,7 @@ test("no sessions: reconnect is skipped", async (t) => {
   const { fx, input } = fakeFx(t, { health: okHealth(1, 2), reconnect: { total: 0, back: 0 } });
   const out = await runRestart(input, fx);
   assert.equal(out.steps[5].status, "skipped");
-  assert.equal(out.steps[5].detail, "no open sessions");
+  assert.equal(out.steps[5].detail, "no sessions to reconnect");
 });
 
 test("a reconnect that throws becomes a warning", async (t) => {

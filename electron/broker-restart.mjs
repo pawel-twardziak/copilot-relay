@@ -11,13 +11,14 @@ export const LIMITS = { npmMs: 300_000, installMs: 30_000, stopMs: 10_000, start
 export const STEP_IDS = ["check", "update", "install", "stop", "start", "reconnect"];
 export const STEP_LABELS = { check: "Check", update: "Update", install: "Install", stop: "Stop", start: "Start", reconnect: "Reconnect" };
 
-/** Same folder after resolve + realpath (when it exists), ignoring a trailing separator; case-insensitive on Windows. */
+/** Same folder after resolve + the system's realpath (when it exists: it also expands Windows short names and fixes the
+ * letter case), ignoring a trailing separator; case-insensitive on Windows. */
 export function sameFolder(a, b, platform = process.platform) {
   const p = platform === "win32" ? path.win32 : path.posix;
   const norm = (x) => {
     let r = p.resolve(x);
     if (platform === process.platform) {
-      try { r = realpathSync(r); } catch { /* does not exist: compare as given */ }
+      try { r = realpathSync.native(r); } catch { /* does not exist: compare as given */ }
     }
     return platform === "win32" ? r.toLowerCase() : r;
   };
@@ -70,12 +71,15 @@ export async function runRestart(input, fx, onStep = () => {}) {
     return s.status !== "failed";
   };
 
+  // One /health read: "absent" (the connection is refused), "broker" (an HTTP answer whose JSON body is an object, in
+  // `body`) or "unreadable" (anything else: a timeout, a reset, a body that is not a JSON object).
   const health = async () => {
     try {
       const res = await fx.fetch(`${url}/health`, { signal: AbortSignal.timeout(LIMITS.healthMs) });
-      return await res.json().catch(() => ({}));
-    } catch {
-      return null;
+      const body = await res.json();
+      return body !== null && typeof body === "object" && !Array.isArray(body) ? { kind: "broker", body } : { kind: "unreadable" };
+    } catch (err) {
+      return { kind: err?.cause?.code === "ECONNREFUSED" ? "absent" : "unreadable" };
     }
   };
   // Polls `probe` until it returns something other than undefined, for at most `ms` of fx time.
@@ -118,7 +122,12 @@ export async function runRestart(input, fx, onStep = () => {}) {
 
   const install = async () => {
     const npm = npmCommand(ctx.node);
-    await fx.run(npm.program, npm.args, { cwd: repo, shell: npm.shell, timeoutMs: LIMITS.npmMs, label: "npm ci" });
+    try {
+      await fx.run(npm.program, npm.args, { cwd: repo, shell: npm.shell, timeoutMs: LIMITS.npmMs, label: "npm ci" });
+    } catch (err) {
+      // npm ci empties node_modules before it installs
+      throw new Error(`${err?.message ?? err} Dependencies may now be incomplete. The running broker is not affected, but it will not start again until this step succeeds.`);
+    }
     const env = { COPILOT_RELAY_PORT: ctx.port, ...(copilotHome ? { COPILOT_HOME: copilotHome } : {}) };
     const args = [path.join(repo, "scripts", "install-extension.mjs"), ...(ctx.noAutostart ? ["--no-autostart"] : [])];
     await fx.run(ctx.node, args, { cwd: repo, env, timeoutMs: LIMITS.installMs, label: "install-extension" });
@@ -126,18 +135,19 @@ export async function runRestart(input, fx, onStep = () => {}) {
   };
 
   const stop = async () => {
-    const old = await health();
-    if (!old) return { status: "skipped", detail: "no broker was running" };
-    if (old.app !== "copilot-relay") throw new Error(`Something else answers at ${url}; it is not a copilot-relay broker.`);
+    const first = await health();
+    if (first.kind === "absent") return { status: "skipped", detail: "no broker was running" };
+    if (first.kind !== "broker" || first.body.app !== "copilot-relay") throw new Error(`Something else answers at ${url}; it is not a copilot-relay broker.`);
+    const old = first.body;
     let res = null;
     try {
       res = await fx.fetch(`${url}/api/shutdown`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}", signal: AbortSignal.timeout(LIMITS.healthMs) });
     } catch { /* aborted or dropped: the broker may have exited while answering; the polling below decides */ }
-    if (res?.status === 404) throw new Error("This broker is older than the restart button. Stop it by hand once; it will then run the updated files.");
+    if (res?.status === 404) throw new Error("This broker is older than the restart button. Stop it by hand once, then press the button again.");
     if (res && !res.ok) throw new Error(`The broker refused to stop: HTTP ${res.status}.`);
     const gone = await poll(LIMITS.stopMs, async () => {
-      const h = await health();
-      return h === null || h.pid !== old.pid ? true : undefined;
+      const h = await health(); // unreadable: still there
+      return h.kind === "absent" || (h.kind === "broker" && h.body.pid !== old.pid) ? true : undefined;
     });
     if (!gone) throw new Error(`The broker did not stop within ${LIMITS.stopMs / 1000} s.`);
     ctx.stoppedPid = old.pid;
@@ -147,8 +157,8 @@ export async function runRestart(input, fx, onStep = () => {}) {
   const start = async () => {
     await fx.spawnBroker(ctx.node, path.join(repo, "server.mjs"), { cwd: repo, env: { COPILOT_RELAY_PORT: ctx.port } });
     const up = await poll(LIMITS.startMs, async () => {
-      const h = await health();
-      return h && h.pid !== ctx.stoppedPid ? h : undefined;
+      const h = await health(); // absent or unreadable: not up yet
+      return h.kind === "broker" && h.body.pid !== ctx.stoppedPid ? h.body : undefined;
     });
     if (!up) throw new Error(`The broker did not answer within ${LIMITS.startMs / 1000} s.`);
     if (!up.root || !sameFolder(up.root, repo)) throw Object.assign(new Error(`A broker from another folder answers: ${up.root || "unknown folder"}.`), { other: true });
@@ -159,7 +169,7 @@ export async function runRestart(input, fx, onStep = () => {}) {
   const reconnect = async () => {
     try {
       const { total, back } = await fx.reconnect(LIMITS.reconnectMs);
-      if (total === 0) return { status: "skipped", detail: "no open sessions" };
+      if (total === 0) return { status: "skipped", detail: "no sessions to reconnect" };
       return { detail: `${back} of ${total} sessions reconnected`, ...(back < total ? { warning: true } : {}) };
     } catch (err) {
       return { detail: err?.message ?? String(err), warning: true };
@@ -178,7 +188,7 @@ export async function runRestart(input, fx, onStep = () => {}) {
   else if (failed === "start") {
     summary = byId.start.detail.startsWith("A broker from another folder")
       ? "Stopped at Start. A different broker is running."
-      : "Stopped at Start. No broker is running; opening a session starts it.";
+      : "Stopped at Start. No broker is running; press the button again to retry.";
   } else summary = `Stopped at ${STEP_LABELS[failed]}. The broker was not restarted.`;
   return { ok: !failed, steps, summary: summary + stashNote() };
 }
