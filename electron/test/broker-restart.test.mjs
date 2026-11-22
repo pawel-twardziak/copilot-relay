@@ -185,9 +185,11 @@ test("npm ci runs on every run, in the repo, also when nothing was pulled", asyn
 });
 
 test("installer arguments and env", async (t) => {
+  const realNode = path.join(tmp(t), "node");
+  writeFileSync(realNode, "");
   const cases = [
-    [{ installed: { brokerScript: "/x/server.mjs", nodePath: "/opt/node" } }, false, "/opt/node"],
-    [{ installed: { brokerScript: null, nodePath: "/opt/node" } }, true, "/opt/node"],
+    [{ installed: { brokerScript: "/x/server.mjs", nodePath: realNode } }, false, realNode],
+    [{ installed: { brokerScript: null, nodePath: realNode } }, true, realNode],
     [{}, false, "/fake/bin/node"],
   ];
   for (const [script, noAuto, node] of cases) {
@@ -202,6 +204,69 @@ test("installer arguments and env", async (t) => {
     assert.equal(inst.opts.label, "install-extension");
     assert.equal(calls.runs.some((r) => r.kind === "node"), script.installed !== undefined ? false : true);
   }
+});
+
+test("a recorded nodePath that no longer exists falls back to the node lookup", async (t) => {
+  const { fx, calls, input } = fakeFx(t, { installed: { brokerScript: "/x/server.mjs", nodePath: "/gone/node" } });
+  await runRestart(input, fx);
+  assert.equal(calls.runs.find((r) => r.kind === "installer").program, "/fake/bin/node");
+  assert.ok(calls.runs.some((r) => r.kind === "node"));
+});
+
+test("a throwing onStep does not change the outcome", async (t) => {
+  const a = fakeFx(t, { health: okHealth(1, 2) });
+  const b = fakeFx(t, { health: okHealth(1, 2) });
+  const plain = await runRestart(a.input, a.fx);
+  const noisy = await runRestart(b.input, b.fx, () => { throw new Error("listener"); });
+  assert.equal(noisy.ok, true);
+  assert.deepEqual(noisy.steps.map((s) => s.status), plain.steps.map((s) => s.status));
+  assert.equal(noisy.summary, plain.summary);
+});
+
+test("runRestart without input resolves with a failed check", async (t) => {
+  const { fx } = fakeFx(t);
+  const out = await runRestart(undefined, fx);
+  assert.equal(out.ok, false);
+  assert.equal(out.steps[0].status, "failed");
+  assert.equal(out.summary, "Stopped at Check. The broker was not restarted.");
+});
+
+test("createRestarter ends a run started without input and accepts the next one", async (t) => {
+  const good = fakeFx(t, { health: okHealth(1, 2) });
+  const r = createRestarter({ fx: good.fx, notify: () => {} });
+  assert.equal(r.start(undefined), true);
+  while (r.snapshot().running) await new Promise((res) => setImmediate(res));
+  assert.equal(r.snapshot().ok, false);
+  assert.ok(r.snapshot().summary);
+  assert.equal(r.start(good.input), true);
+});
+
+test("shutdown POST aborted, broker gone: stop is done", async (t) => {
+  const { fx, input } = fakeFx(t, { health: [relay({ pid: 100 }), null, relay({ pid: 200, root: "<repo>" })] });
+  const inner = fx.fetch;
+  fx.fetch = async (url, init) => {
+    if (url.endsWith("/api/shutdown")) {
+      assert.ok(init.signal);
+      throw new DOMException("aborted", "AbortError");
+    }
+    return inner(url, init);
+  };
+  const out = await runRestart(input, fx);
+  assert.equal(out.steps[3].status, "done");
+  assert.equal(out.steps[3].detail, "stopped pid 100");
+  assert.equal(out.ok, true);
+});
+
+test("shutdown POST fails, broker still answers the old pid: the 10 s failure", async (t) => {
+  const { fx, calls, input } = fakeFx(t, { health: [relay({ pid: 9 })] });
+  const inner = fx.fetch;
+  fx.fetch = async (url, init) => {
+    if (url.endsWith("/api/shutdown")) throw new TypeError("fetch failed");
+    return inner(url, init);
+  };
+  const out = await runRestart(input, fx);
+  assert.equal(out.steps[3].detail, "The broker did not stop within 10 s.");
+  noLater(calls, "spawn");
 });
 
 test("install fails: nothing is stopped", async (t) => {

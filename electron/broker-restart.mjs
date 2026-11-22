@@ -45,7 +45,8 @@ export function npmCommand(nodeExe, { platform = process.platform, exists = exis
   return { program: "npm", args: ["ci"], shell: win };
 }
 
-export async function runRestart({ repo, url, copilotHome }, fx, onStep = () => {}) {
+export async function runRestart(input, fx, onStep = () => {}) {
+  const { repo, url, copilotHome } = input ?? {};
   const steps = STEP_IDS.map((id) => ({ id, label: STEP_LABELS[id], status: "pending", detail: "" }));
   const byId = Object.fromEntries(steps.map((s) => [s.id, s]));
   const ctx = { node: null, port: "80", noAutostart: false, update: null, stash: null, stoppedPid: null, pid: null };
@@ -54,15 +55,18 @@ export async function runRestart({ repo, url, copilotHome }, fx, onStep = () => 
   // Runs one step: `fn` returns { detail, status?, warning? } or throws; a throw fails the step with its message.
   const step = async (id, fn) => {
     const s = byId[id];
+    const tell = () => {
+      try { onStep({ ...s }); } catch { /* a listener must not change the run */ }
+    };
     s.status = "running";
-    onStep({ ...s });
+    tell();
     try {
       Object.assign(s, { status: "done" }, await fn());
     } catch (err) {
       s.status = "failed";
       s.detail = err?.message ?? String(err);
     }
-    onStep({ ...s });
+    tell();
     return s.status !== "failed";
   };
 
@@ -96,7 +100,7 @@ export async function runRestart({ repo, url, copilotHome }, fx, onStep = () => 
     ctx.port = parsed.port || "80";
     const installed = readInstalled(copilotHome);
     ctx.noAutostart = installed.installed && installed.brokerScript === null;
-    ctx.node = installed.nodePath ?? (await fx.run("node", ["-p", "process.execPath"], { timeoutMs: 10_000 })).stdout.trim();
+    ctx.node = installed.nodePath && existsSync(installed.nodePath) ? installed.nodePath : (await fx.run("node", ["-p", "process.execPath"], { timeoutMs: 10_000 })).stdout.trim();
     return { detail: repo };
   };
 
@@ -124,9 +128,12 @@ export async function runRestart({ repo, url, copilotHome }, fx, onStep = () => 
     const old = await health();
     if (!old) return { status: "skipped", detail: "no broker was running" };
     if (old.app !== "copilot-relay") throw new Error(`Something else answers at ${url}; it is not a copilot-relay broker.`);
-    const res = await fx.fetch(`${url}/api/shutdown`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
-    if (res.status === 404) throw new Error("This broker is older than the restart button. Stop it by hand once; it will then run the updated files.");
-    if (!res.ok) throw new Error(`The broker refused to stop: HTTP ${res.status}.`);
+    let res = null;
+    try {
+      res = await fx.fetch(`${url}/api/shutdown`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}", signal: AbortSignal.timeout(LIMITS.healthMs) });
+    } catch { /* aborted or dropped: the broker may have exited while answering; the polling below decides */ }
+    if (res?.status === 404) throw new Error("This broker is older than the restart button. Stop it by hand once; it will then run the updated files.");
+    if (res && !res.ok) throw new Error(`The broker refused to stop: HTTP ${res.status}.`);
     const gone = await poll(LIMITS.stopMs, async () => {
       const h = await health();
       return h === null || h.pid !== old.pid ? true : undefined;
@@ -203,6 +210,9 @@ export function createRestarter({ fx, notify }) {
         push();
       }).then((out) => {
         state = { running: false, steps: out.steps, summary: out.summary, ok: out.ok };
+        push();
+      }, (err) => { // runRestart does not reject; if it ever does, the holder must not stay "running"
+        state = { ...state, running: false, ok: false, summary: `The restart failed unexpectedly: ${err?.message ?? err}` };
         push();
       });
       return true;
