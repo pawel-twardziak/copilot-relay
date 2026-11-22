@@ -48,7 +48,11 @@ contextBridge.exposeInMainWorld("api", {
   reportMissing: (keys) => call("links:missing", keys),
   // the user's answer to a reopen card; reason "missing" when the target session no longer exists
   answerReopen: (sessionId, requestId, approved, reason) => call("reopen:answer", sessionId, requestId, approved, reason),
-  pickDir: () => call("dialog:pickDir"),
+  pickDir: (title) => call("dialog:pickDir", title),
+  // the Settings "Relay broker" section: status = the restart snapshot + working sessions + broker-web sessions
+  brokerStatus: () => call("broker:status"),
+  brokerRestart: (repo) => call("broker:restart", repo),
+  onBrokerRestart: on("broker:restart"),
   getSettings: () => call("settings:get"),
   setSettings: (s) => call("settings:set", s),
   openPath: (p) => call("shell:openPath", p),

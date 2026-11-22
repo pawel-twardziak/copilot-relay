@@ -220,6 +220,8 @@ default 12), refilled by a human prompt in either of the two. `report_result` an
 
 | call | purpose |
 |---|---|
+| `GET /health` | `{ ok, app, peers, pid, startedAt (epoch ms), root (the broker's folder), acpSessions }` |
+| `POST /api/shutdown` | stops the broker (answers `{ ok, pid }` first); local processes only, like every route |
 | `GET /api/sessions` | all peers |
 | `POST /api/sessions` `{ name, role?, cwd?, model? }` | spawn an ACP session |
 | `DELETE /api/sessions?name=x` | close an ACP session or forget a peer |

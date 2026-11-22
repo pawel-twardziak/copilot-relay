@@ -83,6 +83,7 @@ for (const t of ["peer_added", "peer_removed", "peer_renamed", "peer_updated", "
 // ---------- Broker-owned ACP sessions ----------
 /** @type {Map<string, AcpAgent>} key -> agent */
 const acpAgents = new Map();
+const STARTED_AT = Date.now();
 
 function introPrompt(meta) {
   return (
@@ -250,7 +251,20 @@ const server = http.createServer(async (req, res) => {
         return res.end(await readFile(path.join(ROOT, "public/index.html")));
 
       case "GET /health":
-        return json(res, 200, { ok: true, app: "copilot-relay", peers: registry.list().length });
+        return json(res, 200, {
+          ok: true,
+          app: "copilot-relay",
+          peers: registry.list().length,
+          pid: process.pid,
+          startedAt: STARTED_AT,
+          root: ROOT,
+          acpSessions: acpAgents.size,
+        });
+
+      // The desktop app's "Update and restart broker": the answer is flushed before the process exits.
+      case "POST /api/shutdown":
+        res.writeHead(200, { "content-type": "application/json" });
+        return res.end(JSON.stringify({ ok: true, pid: process.pid }), shutdown);
 
       // ----- GUI -----
       case "GET /events":

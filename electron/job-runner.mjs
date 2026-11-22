@@ -53,7 +53,7 @@ const isWin = process.platform === "win32";
 
 // POSIX signals the process group. Windows has no groups: taskkill walks the tree from the leader, and only while the
 // leader is alive (its PID could be reused afterwards). `sync` waits for taskkill, for when the app is quitting.
-function killTree(child, signal, sync = false) {
+export function killTree(child, signal, sync = false) {
   if (child.pid == null) return;
   try {
     if (isWin) {
