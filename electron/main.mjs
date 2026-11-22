@@ -10,7 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { AcpConnection } from "./acp.mjs";
-import { countUserMessages, deleteSession, describeCut, forkSession, isSessionId, messageTimes, purgeDeleted, sessionDir, truncateSession } from "./history.mjs";
+import { countUserMessages, deleteSession, describeCut, forkSession, isSessionId, messageTimes, purgeDeleted, sessionCreatedAt, sessionDir, truncateSession } from "./history.mjs";
 import { createUsagePusher } from "./usage.mjs";
 import { JobScheduler } from "./scheduler.mjs";
 import { scheduleInfo } from "./jobs.mjs";
@@ -21,6 +21,11 @@ import { beginPrompt, endPrompt } from "./prompt-count.mjs";
 import { normalizePanelMode } from "./activity-panel.mjs";
 import { createTierStore, effectiveTier, normalizeTier, switchTier, tierArgs, withContextOption } from "./context-tier.mjs";
 import { createRestarter, realEffects, reconnectClients } from "./broker-restart.mjs";
+import { runProgram } from "./run-program.mjs";
+import { createGit } from "./repo-git.mjs";
+import { createRecordStore } from "./repo-records.mjs";
+import { createRepoTracker } from "./repo-track.mjs";
+import { createChanges } from "./repo-changes.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 let win = null;
@@ -78,6 +83,12 @@ const tiers = createTierStore(path.join(app.getPath("userData"), "context-tiers.
 const sessionTier = (sessionId) => effectiveTier(tiers.get(sessionId), loadSettings().contextTier);
 /** The config options as the window gets them: Copilot's own plus the Context select. */
 const viewConfig = (sessionId, configOptions) => withContextOption(configOptions, tiers.get(sessionId), loadSettings().contextTier);
+
+// Changes browser: the repositories each session worked in, recorded from its live tool calls (see repo-track.mjs),
+// and what the window reads of them (repo-changes.mjs). Git is read-only; the trigger's calls get 5 s, the window's 10 s.
+const records = createRecordStore(path.join(app.getPath("userData"), "session-repos.json"));
+const tracker = createRepoTracker({ store: records, git: createGit(runProgram, { timeoutMs: 5000 }), allow: allowAutomatic });
+const changes = createChanges({ store: records, git: createGit(runProgram), createdAt: sessionCreatedAt, allow: allowAutomatic });
 
 // Sign-in problems are recognized by ACP's auth_required error code, not by guessing from the wording (Copilot
 // uses other codes for other errors: -32002 resource not found, -32602 invalid params…).
@@ -296,11 +307,13 @@ function attach(sessionId, conn, cwd, relay, link) {
     // /rename answers with a chat line ("Session renamed to: …"); the new title arrives as session_info_update
     if (entry.renaming && u?.sessionUpdate === "agent_message_chunk") return;
     send("acp:update", { sessionId, update: u });
+    if (!entry.replaying) tracker.update(sessionId, cwd, u); // a replayed history is not new work
   };
   conn.on("notification", (method, params) => {
     if (method === "session/update" && params?.sessionId === sessionId) entry.update(params.update);
   });
   conn.on("request:session/request_permission", (rpcId, params) => {
+    if (!entry.replaying) tracker.permission(sessionId, cwd, params.toolCall); // the start point before the edit runs
     // the relay's own tools run without asking, as with the terminal extension. The tool_call update carries
     // the server-prefixed name ("relay-send_message"), the permission request only the bare tool name.
     const title = entry.toolTitles.get(params.toolCall?.toolCallId) ?? params.toolCall?.title;
@@ -314,6 +327,7 @@ function attach(sessionId, conn, cwd, relay, link) {
     send("acp:permission", { sessionId, reqId, toolCall: params.toolCall, options: params.options });
   });
   conn.on("exit", ({ code, signal, stderr }) => {
+    tracker.closed(sessionId); // every exit, also of a session the app closed
     // a session closed by the app is no longer in `open` here: only an exit while it is still open is a death
     if (open.get(sessionId)?.conn !== conn) return entry.relay?.stop();
     entry.relay?.died(); // before stop(): the broker notifies the parent of an unreported child
@@ -443,8 +457,9 @@ async function openSession(sessionId, cwd) {
   const relay = relayPrepare();
   // the agent replays the history as session/update notifications before answering session/load
   const entry = attach(sessionId, conn, cwd, relay);
+  entry.replaying = true; // until session/load settles, also when it fails (see attach: the changes tracker)
   try {
-    const res = await conn.request("session/load", { sessionId, cwd, mcpServers: relay.mcpServers });
+    const res = await conn.request("session/load", { sessionId, cwd, mcpServers: relay.mcpServers }).finally(() => (entry.replaying = false));
     entry.configOptions = res?.configOptions ?? entry.configOptions;
     if (open.get(sessionId) === entry) usage.refresh(sessionId);
     return { sessionId, cwd, configOptions: viewConfig(sessionId, res?.configOptions) };
@@ -983,6 +998,7 @@ handle("sessions:delete", async (sessionId) => {
     // missingOk: a session that never wrote its dir (or is already gone) just has its store rows removed
     const res = await deleteSession(sessionId, { missingOk: true });
     tiers.delete(sessionId);
+    records.forget(sessionId);
     if (res.leftover) console.warn(`[delete] could not remove ${res.leftover}`);
     if (res.store.error) console.warn(`[delete] session-store.db: ${res.store.error}`);
     return res;
@@ -1157,9 +1173,9 @@ const isNetwork = async (real) => {
   return table ? isNetworkLocation(real, table) : false;
 };
 
-// Which file mentions of a message exist? Agent text decides the paths, so nothing is looked at on disk unless the
-// path is local and (without a location table) inside the home or a session folder.
-handle("files:check", async (base, candidates) => {
+/** Where a path the agent decides may be looked at on disk without a click: a local path and (without a location
+ *  table) one inside the home or a session folder. Resolves the rule as a predicate for the current table. */
+async function automaticCheckRule() {
   const home = os.homedir();
   const table = await locations.get();
   // real paths too, so a symlinked home is not refused at its first hop. Only needed without a table, where just home
@@ -1169,10 +1185,33 @@ handle("files:check", async (base, candidates) => {
     const real = await localRealpath(home).catch(() => null);
     if (real) trustedRoots.add(real);
   }
-  const allow = (p) => allowsAutomaticCheck(p, { table, trustedRoots: [...trustedRoots], platform: process.platform });
+  return (p) => allowsAutomaticCheck(p, { table, trustedRoots: [...trustedRoots], platform: process.platform });
+}
+
+/** One path against that rule: the changes browser's trigger and its added repositories. */
+async function allowAutomatic(abs) {
+  return (await automaticCheckRule())(abs);
+}
+
+// Which file mentions of a message exist? Agent text decides the paths, so nothing is looked at on disk unless the
+// rule above allows it.
+handle("files:check", async (base, candidates) => {
+  const allow = await automaticCheckRule();
   const list = (Array.isArray(candidates) ? candidates : []).map(String);
-  return checkCandidates(list, { base: base ? String(base) : null, home, allow, platform: process.platform });
+  return checkCandidates(list, { base: base ? String(base) : null, home: os.homedir(), allow, platform: process.platform });
 });
+
+// ---------- changes browser ----------
+
+handle("changes:list", async (sessionId) => changes.list(sessionId));
+handle("changes:commits", async (sessionId, root, rel) => changes.commits(sessionId, root, rel));
+handle("changes:diff", async (sessionId, root, rel, version) => changes.diff(sessionId, root, rel, version));
+// null when the dialog is cancelled, else { root } or { message }
+handle("changes:add", async (sessionId) => {
+  const r = await dialog.showOpenDialog(win, { title: "Repository to add", properties: ["openDirectory"] });
+  return r.canceled ? null : changes.add(sessionId, r.filePaths[0]);
+});
+handle("changes:remove", async (sessionId, root) => changes.remove(sessionId, root));
 
 // Real paths files:read has returned in this run: the only ones files:watch accepts.
 const readablePaths = new Set();

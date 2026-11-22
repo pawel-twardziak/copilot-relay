@@ -1,13 +1,14 @@
 // The UI checks run by scripts/ui-check/run.mjs: { name, scenario?, modes?, run(app) }, each throwing on failure.
 // app is a driver (driver.mjs) launched with the check's scenario (default panel-scenario.mjs), its mode already set.
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { LATE_TEXT } from "../../electron/test/fixtures/acp/late-group-scenario.mjs";
 import { PARTS } from "../../electron/test/fixtures/acp/panel-scroll-scenario.mjs";
 import { RUNNING_TITLE } from "../../electron/test/fixtures/acp/tool-split-scenario.mjs";
+import { gitIn } from "../../electron/test/git-helper.mjs";
 import { launch } from "./driver.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -44,6 +45,7 @@ const V = `views.get("scripted-work")`; // the view of the scenario's session (d
 const HISTORY_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"; // a session Copilot's history files can belong to (a UUID)
 const WAIT_SCENARIO = path.join(FIXTURES, "panel-wait-scenario.mjs");
 const SPLIT_SCENARIO = path.join(FIXTURES, "tool-split-scenario.mjs");
+const CHANGES_SCENARIO = path.join(FIXTURES, "changes-scenario.mjs");
 const PANEL_MODES = ["subagents", "all"];
 const savedMode = (app) => app.ev(`api.getSettings().then((s) => s.activityPanel)`);
 
@@ -1359,6 +1361,43 @@ export const checks = [
       assert.ok(refused[0].text.includes(emptied), refused[0].text);
       assert.deepStrictEqual(refused.slice(1).map((r) => r.cls), ["pending", "pending", "pending", "pending", "pending"]);
       assert.equal(await app.ev(`document.querySelector("#broker-summary").textContent`), "Stopped at Check. The broker was not restarted.");
+    },
+  },
+  {
+    // the agent's first tool call records the session folder's repository (start point, the edited file touched) and
+    // api.changesList serves it; the replay of a reopen records nothing: the record keeps its time, and a removed
+    // repository stays removed. git runs only in the launch's work folder, isolated and with a test identity.
+    name: "changes-records",
+    modes: ["off"],
+    scenario: CHANGES_SCENARIO,
+    async run(app) {
+      const work = path.join(app.dir, "work");
+      writeFileSync(path.join(work, "README.md"), "# work\n");
+      writeFileSync(path.join(work, ".gitignore"), ".scripted-agent.json\n");
+      await gitIn(work, ["init", "-q", "-b", "main"]);
+      await gitIn(work, ["add", "README.md", ".gitignore"]);
+      await gitIn(work, ["commit", "-q", "-m", "first"]);
+      const id = await app.newSession();
+      const list = `api.changesList(${JSON.stringify(id)})`;
+      await app.send("Write the notes.");
+      await app.idle();
+      // written after the turn: it did not exist at the start point
+      writeFileSync(path.join(work, "notes.txt"), "hello\n");
+      await app.check(`${list}.then((l) => l.repos[0]?.files.some((f) => f.path === "notes.txt" && f.touched))`, "the edit to be recorded");
+      const live = await app.ev(list);
+      assert.equal(live.repos.length, 1, "one repository");
+      const [repo] = live.repos;
+      assert.equal(repo.root, realpathSync(work), "the session folder's repository");
+      assert.equal(repo.source, "auto");
+      assert.equal(repo.error, null);
+      assert.deepStrictEqual(repo.files, [{ path: "notes.txt", state: "?", uncommitted: true, committed: false, touched: true, dirtyAtStart: false }]);
+      await app.reload();
+      const replayed = await app.ev(list);
+      assert.equal(replayed.repos.length, 1, "one repository after the replay");
+      assert.equal(replayed.repos[0].at, repo.at, "the start point's time after the replay");
+      await app.ev(`api.changesRemove(${JSON.stringify(id)}, ${JSON.stringify(repo.root)})`);
+      await app.reload();
+      assert.deepStrictEqual((await app.ev(list)).repos, [], "a removed repository after another replay");
     },
   },
 ];
