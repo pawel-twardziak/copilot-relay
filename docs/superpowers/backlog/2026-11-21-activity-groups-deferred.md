@@ -74,6 +74,8 @@ with the app afterwards.
   history.
 - A mode switch during a replay, and with a permission card open.
 - The panel and the drawer on Windows (fonts, the ⏸ glyph, the drag).
+- A `task` that replaces its badge when the emptied work group is the turn's reply (`replacesTool`): the scripted
+  scenario does not exercise it.
 
 ## Phase 2: left over
 The side panel shipped (`docs/superpowers/specs/2026-11-21-activity-panel-design.md`). Left:
@@ -85,10 +87,11 @@ The side panel shipped (`docs/superpowers/specs/2026-11-21-activity-panel-design
 - **Drag:** no pointer capture and no buttons check (a lost `pointerup` keeps resizing). The 7 px grab area overlaps
   the log's scrollbar by 3 px.
 - **Follow:** scroll anchoring within 80 px of the bottom can turn the panel's follow back on without a scroll of
-  yours. During a replay `finishRuns` brings the log to its bottom once per finished block.
+  yours.
 - **Replay marker:** its counter restarts at 0 after a window reload, so an old window's marker could end a new open's
   wait.
 - **Code:** `group._entry` stays set after a group goes back inline, and `showInPanel` uses it unguarded.
-- **Checks:** the "panel after the replay" assertion of `forced-scroll` is likely vacuous; some checks depend on fixed
+- **Checks:** the "panel after the replay" assertion of `forced-scroll` is likely vacuous (`replay-ends-at-bottom`
+  asserts it with an overflowing panel); some checks depend on fixed
   pauses (500 ms, 3 s) and pass vacuously on a slow machine; no check fails when only the panel's `ResizeObserver` is
   removed.

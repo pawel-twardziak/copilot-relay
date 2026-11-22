@@ -111,6 +111,32 @@ async function untilSubagent(app) {
   await app.send("Explain the files.");
   await app.check(`!!${SUB_GROUP}`, "the subagent's group");
 }
+/** A recorded history (the scripted agent's .scripted-agent.json updates) of n turns, each a question, a work group
+ *  (a thought, a tool), a sync task with its subagent's message (a subagent group) and a two-paragraph answer. */
+function longHistory(n) {
+  const para = words(3, "The answer goes on about the folder, its files and what each of them holds.");
+  return Array.from({ length: n }, (_, i) => {
+    const agentId = `66666666-6666-4666-8666-${String(i).padStart(12, "0")}`;
+    const text = (messageId, t, meta) => ({ sessionUpdate: "agent_message_chunk", messageId, content: { type: "text", text: t }, ...meta });
+    return [
+      { sessionUpdate: "user_message_chunk", content: { type: "text", text: `Question ${i}` } },
+      { sessionUpdate: "agent_thought_chunk", messageId: `th${i}`, content: { type: "text", text: `Thinking ${i}` } },
+      { sessionUpdate: "tool_call", toolCallId: `ls${i}`, title: "ls", kind: "execute", status: "completed", rawInput: { command: "ls" } },
+      {
+        sessionUpdate: "tool_call",
+        toolCallId: `task${i}`,
+        title: "Explain the files",
+        kind: "other",
+        status: "pending",
+        rawInput: { agent_type: "explore", name: `explain-${i}`, description: "Explain the files", prompt: "Explain the files.", mode: "sync" },
+      },
+      text(`s${i}`, `Subagent ${i}. ${para}`, { _meta: { "github.com/copilot": { agentId } } }),
+      { sessionUpdate: "tool_call_update", toolCallId: `task${i}`, status: "completed", content: [{ type: "content", content: { type: "text", text: "Explained." } }], rawOutput: { content: "Explained." } },
+      text(`m${i}`, `Answer ${i}. ${para}\n\n${para}`),
+    ];
+  }).flat();
+}
+const words = (n, line) => Array.from({ length: n }, () => line).join(" ");
 /** Opens the subagent's entry as a mode switch carries an open group over: not a click, which stops the follow. */
 const openSubEntry = (app) => app.ev(`${SUB_GROUP}._entry.open = true`);
 /** In a panel mode (the subagent's body is in the panel): its entry open, the panel scrolled to its end, following. */
@@ -825,6 +851,13 @@ export const checks = [
       assert.equal(await shown(app, `${V}.el.querySelector(".perm:not(.done)")`), true, "the card shows");
       await app.answerPermission();
       await app.idle();
+      // a delegation card ("New session requested") closes it too (as main would send one: no session is created)
+      await headerClick(app);
+      assert.equal(await shown(app, `${V}.panel`), true, "the drawer open again");
+      await app.ev(`${V}.delegationCard({ requestId: "ui-check", name: "child", task: "A task.", agent: "", model: "", cwd: ${V}.cwd })`);
+      await frames(app);
+      assert.equal(await shown(app, `${V}.panel`), false, "the delegation card closed the drawer");
+      assert.equal(await shown(app, `${V}.el.querySelector(".perm.delegation")`), true, "the delegation card shows");
     },
   },
   {
@@ -899,6 +932,29 @@ export const checks = [
       await assertAtBottom(app, PANEL, "the panel after the replay");
     },
   },
+  ...[
+    ["replay-ends-at-bottom", PANEL_SCENARIO],
+    ["failed-replay-ends-at-bottom", path.join(FIXTURES, "failing-load-scenario.mjs")],
+  ].map(([name, scenario]) => ({
+    // a long history opened (a replay, nothing scrolls during it): the log, and in a panel mode the panel, end at
+    // their bottoms and follow; also when the load fails after the replay (the dead view's error line is the last)
+    name,
+    scenario,
+    async run(app) {
+      const panel = (await savedMode(app)) !== "off";
+      await app.resize(1280, 500);
+      await app.newSession();
+      writeFileSync(path.join(app.dir, "work", ".scripted-agent.json"), JSON.stringify({ sessionId: "scripted-work", updates: longHistory(30) }));
+      await app.reload();
+      await frames(app);
+      const failed = scenario !== PANEL_SCENARIO;
+      assert.equal(await app.ev(`${V}.dead`), failed, failed ? "the load failed" : "the load succeeded");
+      if (failed) assert.equal(await app.ev(`${LOG}.lastElementChild.className`), "msg error", "the error line is the last");
+      assert.deepStrictEqual(await app.ev(`({ follow: ${V}.follow, panelFollow: ${V}.panelFollow })`), { follow: true, panelFollow: true }, "both follow");
+      assert.ok((await assertAtBottom(app, LOG, "the log after the replay")).over > 100, "the log overflows");
+      if (panel) assert.ok((await assertAtBottom(app, PANEL, "the panel after the replay")).over > 100, "the panel overflows");
+    },
+  })),
   {
     // editing the second message dims the panel entries of the groups after it, as the log dims those groups; a
     // group created meanwhile is dimmed, a mode switch keeps the rule, cancelling the edit undims everything

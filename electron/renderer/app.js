@@ -771,8 +771,10 @@ class SessionView {
     this.panelFollow = true;
     this.panelBody.scrollTop = this.panelBody.scrollHeight;
   }
-  /** After new content or a size change: the log and the panel, each at its bottom if it follows. */
+  /** After new content or a size change: the log and the panel, each at its bottom if it follows. Nothing during a
+   *  replay: the end of the replay takes both to their bottoms once (a layout per replayed block slowed every open). */
   followBottom() {
+    if (this.resuming) return;
     if (this.follow) this.toBottom();
     if (this.panelFollow) this.panelToBottom();
   }
@@ -1559,8 +1561,8 @@ class SessionView {
   // --- the activity panel: a group's body inside the group (inline) or inside its entry in the panel
   /** Put the group's body where the mode says (Activity.inPanel, read here only): inside the group, or inside the
    *  group's entry in the panel, the entries in the order of their groups in the log. Only what changes place is
-   *  moved; the open state goes with the body. */
-  place(group) {
+   *  moved; the open state goes with the body. dim false: the caller dims the entries (placeAll, once for all). */
+  place(group, dim = true) {
     const inPanel = Activity.inPanel(activityPanel, group._info.kind);
     if (inPanel && !group._entry) {
       const mark = h("span", { class: "mark" });
@@ -1595,13 +1597,14 @@ class SessionView {
     }
     if (!inPanel) group._entry?.remove();
     group.classList.toggle("in-panel", inPanel);
-    if (this.edit) this.dimEntries(); // a group created or moved during an edit (none is dimmed otherwise)
+    if (dim && this.edit) this.dimEntries(); // a group created or moved during an edit (none is dimmed otherwise)
     this.updatePanelShown();
   }
 
   /** place() for every group of the log, in log order (the mode changed). */
   placeAll() {
-    for (const g of this.log.querySelectorAll(":scope > .group")) this.place(g);
+    for (const g of this.log.querySelectorAll(":scope > .group")) this.place(g, false);
+    if (this.edit) this.dimEntries(); // once for all the groups, not once per group
     this.followBottom(); // bodies that moved changed the content of the log and the panel, not always their size
   }
 
@@ -1879,7 +1882,6 @@ class SessionView {
 
   permission({ reqId, toolCall, options }) {
     this.flush();
-    this.setDrawer(false); // the question must be visible
     const card = h(
       "div",
       { class: "perm" },
@@ -2045,6 +2047,7 @@ class SessionView {
   }
 
   openCard(card) {
+    this.setDrawer(false); // the question must be visible (permission, delegation and reopen cards)
     this.openCards.add(card);
     renderList();
   }
