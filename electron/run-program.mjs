@@ -20,13 +20,17 @@ function defaultLabel(program, args) {
   return first == null ? name : `${name} ${/[\\/]/.test(first) ? path.basename(first) : first}`;
 }
 
+// After the program exits, how long its pipes may stay open (held by a descendant) before the result is taken as is.
+const CLOSE_GRACE_MS = 1000;
+
 export function runProgram(program, args, { cwd, env, timeoutMs, shell = false, label } = {}) {
   const name = label ?? defaultLabel(program, args);
   return new Promise((resolve, reject) => {
     let stdout = "";
     let stderr = "";
-    let timedOut = false;
     let timer;
+    let grace;
+    let settled = false;
     const cap = (s) => (s.length > CAP ? s.slice(-CAP) : s);
     const spawnFailed = (e) => {
       // Node reports a nonexistent cwd as ENOENT on the spawn too.
@@ -43,22 +47,42 @@ export function runProgram(program, args, { cwd, env, timeoutMs, shell = false, 
       reject(spawnFailed(e));
       return;
     }
+    // Settles the promise once; later events (a close after the timeout, the grace after a close) change nothing.
+    const settle = (err, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(grace);
+      if (err) reject(err);
+      else resolve(value);
+    };
+    const dropPipes = () => {
+      child.stdout.destroy();
+      child.stderr.destroy();
+    };
+    const finish = (code, signal) => {
+      if (settled) return;
+      if (!isWin) killTree(child, "SIGKILL"); // sweep stragglers in the group
+      if (code === 0) return settle(null, { stdout, stderr });
+      const tail = (stderr.trim() ? stderr : stdout).slice(-400).trim();
+      settle(fail(`${name} failed (exit ${code ?? signal}): ${tail}`, "EXIT", stdout, stderr));
+    };
     child.stdout.setEncoding("utf8").on("data", (d) => { stdout = cap(stdout + d); });
     child.stderr.setEncoding("utf8").on("data", (d) => { stderr = cap(stderr + d); });
-    child.on("error", (e) => {
-      clearTimeout(timer);
-      reject(spawnFailed(e));
+    child.on("error", (e) => settle(spawnFailed(e)));
+    // A descendant that holds the pipes keeps "close" from coming: after the exit, wait for it only so long.
+    child.on("exit", (code, signal) => {
+      if (settled) return;
+      clearTimeout(timer); // the program has finished: from here the grace bounds the wait
+      grace = setTimeout(() => { dropPipes(); finish(code, signal); }, CLOSE_GRACE_MS);
     });
-    child.on("close", (code, signal) => {
-      clearTimeout(timer);
-      if (!isWin) killTree(child, "SIGKILL"); // sweep stragglers in the group
-      if (timedOut) return reject(fail(`${name} did not finish in ${timeoutMs / 1000} s`, "TIMEOUT", stdout, stderr));
-      if (code === 0) return resolve({ stdout, stderr });
-      const tail = (stderr.trim() ? stderr : stdout).slice(-400).trim();
-      reject(fail(`${name} failed (exit ${code ?? signal}): ${tail}`, "EXIT", stdout, stderr));
-    });
+    child.on("close", finish);
     if (timeoutMs != null) {
-      timer = setTimeout(() => { timedOut = true; killTree(child, "SIGKILL"); }, timeoutMs);
+      timer = setTimeout(() => {
+        killTree(child, "SIGKILL");
+        dropPipes();
+        settle(fail(`${name} did not finish in ${timeoutMs / 1000} s`, "TIMEOUT", stdout, stderr));
+      }, timeoutMs);
     }
   });
 }

@@ -60,3 +60,20 @@ test("a missing cwd is reported as a missing folder, not a missing program", asy
     return true;
   });
 });
+// A detached grandchild that keeps the program's stdout and stderr open for 4 s, then exits on its own.
+const holdPipes = `require("child_process").spawn(process.execPath, ["-e", "setTimeout(() => {}, 4000)"], { detached: true, stdio: ["ignore", "inherit", "inherit"] }).unref();`;
+test("a program that exits while a descendant holds its pipes settles after the 1 s grace", async () => {
+  const t0 = Date.now();
+  const r = await runProgram(node, ["-e", `${holdPipes} console.log("done")`], { timeoutMs: 10_000 });
+  assert.ok(Date.now() - t0 < 2500, `took ${Date.now() - t0} ms`);
+  assert.equal(r.stdout, "done\n");
+});
+test("the timeout rejects at once, also when a descendant holds the pipes", async () => {
+  const t0 = Date.now();
+  await assert.rejects(runProgram(node, ["-e", `${holdPipes} setTimeout(() => {}, 60000)`], { timeoutMs: 300 }), (e) => {
+    assert.equal(e.code, "TIMEOUT");
+    assert.match(e.message, /did not finish in 0\.3 s/);
+    return true;
+  });
+  assert.ok(Date.now() - t0 < 2000, `took ${Date.now() - t0} ms`);
+});
