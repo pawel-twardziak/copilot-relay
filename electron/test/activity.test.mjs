@@ -203,6 +203,26 @@ test("headerText: subagent title, tools, last line and the permission wait", () 
   assert.equal(Activity.headerText({ kind: "subagent", title: "x", tools: 0 }), "subagent · x");
 });
 
+test("toolSplit: a finished work group's tools by outcome, only when the outcomes differ", () => {
+  assert.deepEqual(Activity.toolSplit({ tools: 26, failed: 1 }), [["completed", 25], ["failed", 1]]);
+  assert.deepEqual(Activity.toolSplit({ tools: 26, failed: 1, leftover: 1 }), [["completed", 24], ["failed", 1], ["quiet", 1]]);
+  assert.deepEqual(Activity.toolSplit({ tools: 3, failed: 2, leftover: 1 }), [["failed", 2], ["quiet", 1]]);
+  assert.equal(Activity.toolSplit({ tools: 26 }), null, "all completed");
+  assert.equal(Activity.toolSplit({ tools: 2, failed: 2 }), null, "all failed");
+  assert.equal(Activity.toolSplit({ tools: 2, leftover: 2 }), null, "none ended");
+  assert.equal(Activity.toolSplit({ tools: 26, failed: 1, running: 1 }), null, "a tool still runs");
+  assert.equal(Activity.toolSplit({ tools: 0 }), null);
+  assert.equal(Activity.toolSplit({ tools: 1, failed: 2 }), null, "a count that went wrong gives no negative part");
+});
+
+test("headerText: a split work group lists its counts, each after the first with its mark", () => {
+  const split = [["completed", 25], ["failed", 1]];
+  assert.equal(Activity.headerText({ kind: "work", tools: 26, thoughts: 5, split }), "25 · ✗ 1 · 5 thoughts");
+  assert.equal(Activity.headerText({ kind: "work", tools: 26, split: [["completed", 24], ["failed", 1], ["quiet", 1]] }), "24 · ✗ 1 · ○ 1");
+  assert.equal(Activity.headerText({ kind: "work", tools: 3, thoughts: 1, split: [["failed", 2], ["quiet", 1]], waiting: true }), "2 · ○ 1 · 1 thought · ⏸ permission");
+  assert.equal(Activity.headerText({ kind: "subagent", title: "x", tools: 3, split }), "subagent · x · 3 tools", "a subagent's header takes no split");
+});
+
 test("MARKS", () => {
   assert.deepEqual(Activity.MARKS, { running: "●", completed: "✓", failed: "✗", interrupted: "⊘", quiet: "○" });
 });

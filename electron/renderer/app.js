@@ -1427,16 +1427,26 @@ class SessionView {
     };
     el._renderHeader = () => {
       const i = el._info;
-      // work: ● while a tool runs, then ✗ if one failed, ○ if one never ended or was interrupted, else ✓
-      const status = kind === "work" ? (i.running.size ? "running" : i.failed.size ? "failed" : i.leftover.size ? "quiet" : "completed") : i.status;
+      // work: ● while a tool runs, then ✗ if one failed, ○ if one never ended or was interrupted, else ✓; when its
+      // tools ended in different ways, a count per outcome ("✓ 25 · ✗ 1"), the first one behind the header's mark
+      const split = kind === "work" ? Activity.toolSplit({ tools: i.tools, running: i.running.size, failed: i.failed.size, leftover: i.leftover.size }) : null;
+      const status = kind !== "work" ? i.status : split ? split[0][0] : i.running.size ? "running" : i.failed.size ? "failed" : i.leftover.size ? "quiet" : "completed";
       const runningTitle = [...i.running.values()].pop();
-      const text = Activity.headerText({ kind, title: i.title, tools: i.tools, thoughts: i.thoughts, runningTitle, lastLine: i.status === "running" ? i.lastLine : "", waiting: i.waiting });
+      const args = { kind, title: i.title, tools: i.tools, thoughts: i.thoughts, runningTitle, lastLine: i.status === "running" ? i.lastLine : "", waiting: i.waiting };
+      const text = Activity.headerText({ ...args, split });
+      const rest = split ? Activity.headerText({ ...args, tools: 0 }) : ""; // what follows the counts
       // the group's summary in the chat, and its entry's in the panel once it has one
       for (const [m, n] of el._entry ? [[mark, name], [el._entry._mark, el._entry._name]] : [[mark, name]]) {
         m.className = `mark ${status}`;
         m.textContent = Activity.MARKS[status] ?? Activity.MARKS.running;
         m.title = MARK_TITLES[status] ?? MARK_TITLES.running;
-        n.textContent = n.title = text;
+        n.title = text;
+        if (!split) n.textContent = text;
+        else {
+          // the counts after the first get their own coloured mark
+          const more = split.slice(1).flatMap(([s, count]) => [" · ", h("span", { class: `mark ${s}`, title: MARK_TITLES[s] }, Activity.MARKS[s]), ` ${count}`]);
+          n.replaceChildren(String(split[0][1]), ...more, rest ? ` · ${rest}` : "");
+        }
       }
     };
     el._renderHeader();
@@ -1530,6 +1540,7 @@ class SessionView {
       g._info.tools--;
       g._info.running.delete(replacesTool);
       g._info.failed.delete(replacesTool);
+      g._info.leftover.delete(replacesTool);
       if (g._body.childElementCount || g._turn) g._renderHeader();
       else this.removeGroup(g);
     }

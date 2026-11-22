@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { LATE_TEXT } from "../../electron/test/fixtures/acp/late-group-scenario.mjs";
 import { PARTS } from "../../electron/test/fixtures/acp/panel-scroll-scenario.mjs";
+import { RUNNING_TITLE } from "../../electron/test/fixtures/acp/tool-split-scenario.mjs";
 import { launch } from "./driver.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -40,6 +41,7 @@ async function playScenario(app) {
 
 const V = `views.get("scripted-work")`; // the view of the scenario's session (driver.mjs: newSession)
 const WAIT_SCENARIO = path.join(FIXTURES, "panel-wait-scenario.mjs");
+const SPLIT_SCENARIO = path.join(FIXTURES, "tool-split-scenario.mjs");
 const PANEL_MODES = ["subagents", "all"];
 const savedMode = (app) => app.ev(`api.getSettings().then((s) => s.activityPanel)`);
 
@@ -294,6 +296,15 @@ const turnActs = (app) => app.ev(`(() => {
 /** The marks of panel-wait-scenario's groups after a Stop halfway through the sync subagent, as mode off shows them:
  *  the two work groups (before and after the plan) ✓, their tools ended; the subagent ⊘, stopped before its task
  *  ended. */
+/** Every work group's header as shown: the leading mark and its class, the title's text and tooltip, the classes of
+ *  the marks inside the title; the same for its panel entry (null when its body is not in the panel). */
+const workHeaders = (app) => app.ev(`[...${V}.log.querySelectorAll(":scope > .group.work")].map((g) => {
+  const head = (s) => {
+    const title = s.querySelector(".title");
+    return { mark: s.querySelector(".mark").textContent, cls: s.querySelector(".mark").className, text: title.textContent, tip: title.title, inner: [...title.querySelectorAll(".mark")].map((m) => m.className) };
+  };
+  return { chat: head(g.querySelector(":scope > summary")), entry: g.classList.contains("in-panel") ? head(g._entry.querySelector(":scope > summary")) : null };
+})`);
 const STOP_MARKS = [
   { kind: "work", chat: "✓" },
   { kind: "work", chat: "✓" },
@@ -1077,6 +1088,34 @@ export const checks = [
       assert.deepStrictEqual(await turnActs(app), { counts: [1, 1, 1], doubles: [] }, "live");
       await app.reload();
       assert.deepStrictEqual(await turnActs(app), { counts: [1, 1, 1], doubles: [] }, "after the replay");
+    },
+  },
+  {
+    // a work group whose tools ended in different ways shows a count per outcome, each after the first with its own
+    // coloured mark; while a tool runs, and when all ended the same way, one mark and "N tools"; the same after a replay
+    name: "split-header",
+    scenario: SPLIT_SCENARIO,
+    async run(app) {
+      const tip = "2 · ✗ 1 · ○ 1 · 1 thought";
+      const split = { mark: "✓", cls: "mark completed", text: tip, tip, inner: ["mark failed", "mark quiet"] };
+      const plain = { mark: "✓", cls: "mark completed", text: "2 tools", tip: "2 tools", inner: [] };
+      const all = (await app.ev(`api.getSettings().then((s) => s.activityPanel)`)) === "all"; // the work groups are in the panel
+      const assertHeaders = async (what) => {
+        const headers = await workHeaders(app);
+        assert.deepStrictEqual(headers.map((h) => h.chat), [split, plain], `the two work groups' headers (${what})`);
+        for (const h of headers) assert.deepStrictEqual(h.entry, all ? h.chat : null, `the entry's header (${what})`);
+      };
+      await app.newSession();
+      await app.send("Edit both.");
+      await app.check(`${V}.log.querySelector(":scope > .group.work > summary .title")?.textContent.includes(${JSON.stringify(RUNNING_TITLE)})`, "the last tool to run");
+      const running = `4 tools · 1 thought · ${RUNNING_TITLE}`;
+      assert.deepStrictEqual((await workHeaders(app))[0].chat, { mark: "●", cls: "mark running", text: running, tip: running, inner: [] }, "no split while a tool runs");
+      await app.idle();
+      await app.send("Check them.");
+      await app.idle();
+      await assertHeaders("live");
+      await app.reload();
+      await assertHeaders("after the replay");
     },
   },
 ];
