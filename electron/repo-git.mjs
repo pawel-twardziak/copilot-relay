@@ -10,13 +10,13 @@ export function parseStatus(text) {
     const x = entry[0];
     const y = entry[1];
     const path = entry.slice(3);
-    if (x === "R" || x === "C") i++; // the old path of a rename or copy
+    if (x === "R" || x === "C" || y === "R" || y === "C") i++; // the old path of a rename or copy
     if (x === "!" && y === "!") continue;
     if (path.endsWith("/")) continue;
     let state = "M";
     if (x === "?" && y === "?") state = "?";
     else if (x === "D" || y === "D") state = "D";
-    else if (x === "R") state = "R";
+    else if (x === "R" || y === "R") state = "R";
     else if (x === "A") state = "A";
     out.push({ path, state });
   }
@@ -35,6 +35,7 @@ export function parseNameStatus(text) {
     const twoPaths = kind === "R" || kind === "C";
     const path = twoPaths ? parts[i + 2] : parts[i + 1];
     i += twoPaths ? 2 : 1;
+    if (kind === "R" && parts[i - 1]) seen.add(parts[i - 1]); // the file appears under its new name only
     if (path == null || path === "" || seen.has(path)) continue;
     seen.add(path);
     out.push({ path, state: kind === "C" ? "A" : kind });
@@ -45,8 +46,11 @@ export function parseNameStatus(text) {
 export const COMMIT_FORMAT = "%H%x1f%s%x1f%cI%x1f%an%x1e";
 
 export function parseCommits(text) {
-  return text.split("\x1e").map((r) => r.replace(/^\n/, "")).filter((r) => r !== "").map((r) => {
-    const [sha, subject, date, author] = r.split("\x1f");
-    return { sha, subject, date, author };
-  });
+  const out = [];
+  for (const record of text.split("\x1e")) {
+    const [sha, subject, date, author, ...extra] = record.replace(/^\n/, "").split("\x1f");
+    if (author === undefined || extra.length > 0) continue; // empty, or cut by the output limit
+    out.push({ sha, subject, date, author });
+  }
+  return out;
 }
