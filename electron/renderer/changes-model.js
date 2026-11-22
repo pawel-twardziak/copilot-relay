@@ -1,6 +1,7 @@
 // Pure list model of the changes browser: keys, selection, versions of a file, path location (no DOM).
 // Loaded as a classic <script> (sets globalThis.ChangesModel) and via require() in tests.
 "use strict";
+(function () {
 
 /** A file's key in the list: root null for a loose file (rel is then its absolute path). */
 const key = (root, rel) => JSON.stringify([root, rel]);
@@ -44,9 +45,18 @@ function locate(data, abs, platform) {
       best = { root: r.root, rel: path.slice(root.length + 1), len: root.length };
     }
   }
-  return best && { root: best.root, rel: best.rel };
+  if (!best) return null;
+  let rel = best.rel;
+  if (win) {
+    // the spelling the list holds, so key(root, rel) matches the list's key
+    const files = data.repos.find((r) => r.root === best.root)?.files ?? [];
+    const listed = files.find((f) => f.path.toLowerCase() === rel.toLowerCase());
+    if (listed) rel = listed.path;
+  }
+  return { root: best.root, rel };
 }
 
 const ChangesModel = { key, pick, versions, splitName, locate };
 globalThis.ChangesModel = ChangesModel;
 if (typeof module !== "undefined") module.exports = ChangesModel;
+})();

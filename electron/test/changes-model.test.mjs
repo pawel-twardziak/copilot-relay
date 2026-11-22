@@ -35,6 +35,17 @@ test("versions: with and without uncommitted", () => {
   assert.deepEqual(ChangesModel.versions(file("a"), []), []);
 });
 
+test("locate: win32 returns the spelling the list holds; otherwise rel stays as computed", () => {
+  const win = { repos: [repo("c:/repo", [file("A/b.txt")])], loose: [] };
+  assert.deepEqual(ChangesModel.locate(win, "C:\\Repo\\a\\B.TXT", "win32"), { root: "c:/repo", rel: "A/b.txt" });
+  assert.deepEqual(ChangesModel.locate(win, "C:\\Repo\\other.txt", "win32"), { root: "c:/repo", rel: "other.txt" });
+});
+
+test("locate: a root with a trailing slash", () => {
+  const data = { repos: [repo("/w/r/", [])], loose: [] };
+  assert.deepEqual(ChangesModel.locate(data, "/w/r/a.txt", "linux"), { root: "/w/r/", rel: "a.txt" });
+});
+
 test("splitName", () => {
   assert.deepEqual(ChangesModel.splitName("electron/main.mjs"), { dir: "electron/", name: "main.mjs" });
   assert.deepEqual(ChangesModel.splitName("main.mjs"), { dir: "", name: "main.mjs" });

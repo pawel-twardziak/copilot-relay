@@ -56,6 +56,27 @@ test("parse: an empty context line (blank in the diff) is context", () => {
   assert.deepEqual(lines.slice(1).map((l) => [l.type, l.old, l.new, l.text]), [["ctx", 1, 1, "a"], ["ctx", 2, 2, ""], ["ctx", 3, 3, "c"]]);
 });
 
+test("parse: a no-newline note between a del and an add inside a hunk keeps the counts", () => {
+  const { lines } = DiffView.parse("@@ -1,2 +1,2 @@\n-a\n\\ No newline at end of file\n+b\n c\n");
+  assert.deepEqual(lines.map((l) => [l.type, l.old, l.new, l.text]), [
+    ["hunk", null, null, "@@ -1,2 +1,2 @@"], ["del", 1, null, "a"], ["note", null, null, "\\ No newline at end of file"], ["add", null, 1, "b"], ["ctx", 2, 2, "c"],
+  ]); // prettier-ignore
+});
+
+test("clip: cuts at the limit with a note, or returns the same object", () => {
+  const cut = DiffView.clip(DiffView.added("a\nb\nc\nd\ne\n"), 3);
+  assert.deepEqual(cut.lines.map((l) => [l.type, l.text]), [["add", "a"], ["add", "b"], ["add", "c"], ["note", "Only the first 3 lines are shown."]]);
+  const same = DiffView.added("a\nb\nc\n");
+  assert.equal(DiffView.clip(same, 3), same);
+  assert.equal(DiffView.LINE_LIMIT, 20000);
+});
+
+test("render: a long diff does not overflow the stack and is cut at the limit", () => {
+  const h = (tag, attrs, ...children) => ({ tag, attrs, children: children.flat() });
+  const el = DiffView.render(DiffView.added("x\n".repeat(130000)), h);
+  assert.equal(el.children.length, DiffView.LINE_LIMIT + 1);
+});
+
 test("added", () => {
   assert.deepEqual(DiffView.added("a\nb\n").lines.map((l) => [l.type, l.new, l.text]), [["add", 1, "a"], ["add", 2, "b"]]);
   assert.deepEqual(DiffView.added(""), { binary: false, lines: [] });

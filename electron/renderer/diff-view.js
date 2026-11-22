@@ -1,6 +1,7 @@
 // Unified diff parser and a small DOM renderer for the changes browser (the parser is pure).
 // Loaded as a classic <script> (sets globalThis.DiffView) and via require() in tests.
 "use strict";
+(function () {
 
 const HUNK_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 const BINARY_RE = /^Binary files .* differ$/;
@@ -71,18 +72,28 @@ function added(text) {
   return { binary: false, lines: splitLines(text).map((t, i) => ({ type: "add", old: null, new: i + 1, text: t })) };
 }
 
-/** Renders parsed lines with the app's element helper h(tag, attrs, ...children); text only through children strings. */
+const LINE_LIMIT = 20000;
+
+/** At most limit lines: the first ones plus a note, or parsed itself when it fits. */
+function clip(parsed, limit = LINE_LIMIT) {
+  if (parsed.lines.length <= limit) return parsed;
+  const note = { type: "note", old: null, new: null, text: `Only the first ${limit} lines are shown.` };
+  return { binary: parsed.binary, lines: [...parsed.lines.slice(0, limit), note] };
+}
+
+/** Renders the (clipped) parsed lines with the app's element helper h(tag, attrs, children); text only through children strings. */
 function render(parsed, h) {
   const num = (n) => h("span", { class: "dv-num" }, n == null ? "" : String(n));
   return h(
     "div",
     { class: "dv" },
-    ...parsed.lines.map((l) =>
+    clip(parsed).lines.map((l) =>
       h("div", { class: `dv-line ${l.type}` }, num(l.old), num(l.new), h("span", { class: "dv-text" }, l.text)),
     ),
   );
 }
 
-const DiffView = { parse, added, render };
+const DiffView = { parse, added, clip, render, LINE_LIMIT };
 globalThis.DiffView = DiffView;
 if (typeof module !== "undefined") module.exports = DiffView;
+})();
