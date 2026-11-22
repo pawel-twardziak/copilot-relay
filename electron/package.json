@@ -39,6 +39,7 @@
       "delegation.mjs",
       "prompt-count.mjs",
       "links-cache.mjs",
+      "repo-records.mjs",
       "session-list.mjs",
       "activity-panel.mjs",
       "context-tier.mjs",

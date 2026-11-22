@@ -165,6 +165,17 @@ function yamlGet(text, key) {
   return m ? yamlUnquote(m[1]) : undefined;
 }
 
+/** When a session was created (`created_at` of its workspace.yaml) as an ISO string; null when unknown or no date. */
+export function sessionCreatedAt(id) {
+  try {
+    const value = yamlGet(fs.readFileSync(path.join(sessionDir(id), "workspace.yaml"), "utf8"), "created_at");
+    const t = value ? new Date(value).getTime() : NaN;
+    return Number.isNaN(t) ? null : new Date(t).toISOString();
+  } catch {
+    return null;
+  }
+}
+
 /** workspace.yaml text with the given top-level keys replaced (or appended when missing). */
 function yamlSet(text, values) {
   const lines = text.split("\n");

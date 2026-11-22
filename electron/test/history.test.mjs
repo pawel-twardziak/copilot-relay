@@ -16,6 +16,7 @@ import {
   forkSession,
   messageTimes,
   readEvents,
+  sessionCreatedAt,
   sessionDir,
   sessionStateDir,
   truncateSession,
@@ -610,5 +611,28 @@ describe("messageTimes", () => {
       { type: "user.message", data: { content: "b" }, timestamp: "2026-11-21T19:22:58.000Z" },
     ]);
     assert.deepEqual(await messageTimes(id), { users: [T("2026-11-21T19:22:58.000Z")], agents: {} });
+  });
+});
+
+describe("sessionCreatedAt", () => {
+  const withYaml = (text) => {
+    const id = randomUUID();
+    const dir = path.join(home, "session-state", id);
+    fs.mkdirSync(dir);
+    if (text !== null) fs.writeFileSync(path.join(dir, "workspace.yaml"), text);
+    return id;
+  };
+
+  test("reads created_at as an ISO string", () => {
+    const id = withYaml("id: x\ncreated_at: 2026-11-02T19:39:49.716Z\nupdated_at: 2026-11-03T00:00:00.000Z\n");
+    assert.equal(sessionCreatedAt(id), "2026-11-02T19:39:49.716Z");
+  });
+
+  test("null for a missing key, a value that is no date, a missing file and an unknown or invalid id", () => {
+    assert.equal(sessionCreatedAt(withYaml("id: x\nname: n\n")), null);
+    assert.equal(sessionCreatedAt(withYaml("created_at: yesterday-ish\n")), null);
+    assert.equal(sessionCreatedAt(withYaml(null)), null);
+    assert.equal(sessionCreatedAt(randomUUID()), null);
+    assert.equal(sessionCreatedAt("../x"), null);
   });
 });
