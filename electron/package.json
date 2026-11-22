@@ -40,6 +40,7 @@
       "prompt-count.mjs",
       "links-cache.mjs",
       "repo-records.mjs",
+      "repo-track.mjs",
       "session-list.mjs",
       "activity-panel.mjs",
       "context-tier.mjs",
