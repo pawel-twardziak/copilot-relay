@@ -53,7 +53,16 @@ export class RelayClient {
     this.stopped = false;
     this.connected = false;
     this.autostarted = false;
+    this.retryMs ??= 1000; // first wait after a failure; doubles up to retryMaxMs, and starts over after a registration
+    this.retryMaxMs ??= 15_000;
+    this.#delay = this.retryMs;
   }
+
+  #delay;
+  #skipWait = false; // reconnectNow(): the next loop pass connects without waiting
+  #endWait = null; // ends the wait in progress
+  #timer = null;
+  #pending = []; // reconnectNow() callers waiting for the next registration
 
   start() {
     this.#loop();
@@ -62,6 +71,28 @@ export class RelayClient {
   stop() {
     this.stopped = true;
     this.abort?.abort();
+    this.#endWait?.();
+    this.#settle(false);
+  }
+
+  /**
+   * Ends the current wait or the live stream, connects at once and makes the next wait `retryMs`. Resolves true at the
+   * next `registered` event, false when the client is stopped (already, or before that event). Never restarts a
+   * stopped client.
+   */
+  reconnectNow() {
+    if (this.stopped) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      this.#pending.push(resolve);
+      this.#delay = this.retryMs;
+      this.#skipWait = true;
+      this.abort?.abort();
+      this.#endWait?.();
+    });
+  }
+
+  #settle(ok) {
+    for (const resolve of this.#pending.splice(0)) resolve(ok);
   }
 
   async list() {
@@ -139,11 +170,9 @@ export class RelayClient {
   }
 
   async #loop() {
-    let delay = 1000;
     while (!this.stopped) {
       try {
         await this.#connectOnce();
-        delay = 1000;
       } catch (e) {
         if (this.stopped) return;
         if (this.connected) this.log(`relay: disconnected (${e.message})`);
@@ -152,8 +181,17 @@ export class RelayClient {
           this.#autostart();
         }
       }
-      await new Promise((r) => setTimeout(r, delay));
-      delay = Math.min(delay * 2, 15_000);
+      if (!this.#skipWait) {
+        await new Promise((r) => {
+          this.#endWait = r;
+          this.#timer = setTimeout(r, this.#delay);
+        });
+        clearTimeout(this.#timer);
+        this.#endWait = null;
+      }
+      // reconnectNow() set the delay to its base and asked to connect now: no doubling for that pass
+      if (this.#skipWait) this.#skipWait = false;
+      else this.#delay = Math.min(this.#delay * 2, this.retryMaxMs);
     }
   }
 
@@ -203,6 +241,8 @@ export class RelayClient {
           this.name = payload.name;
           this.requestedName = null;
           this.requestedParent = null;
+          this.#delay = this.retryMs;
+          this.#settle(true);
           this.onRegistered?.(payload.name, payload);
         } else if (event === "renamed") {
           const changed = payload.name !== this.name;
