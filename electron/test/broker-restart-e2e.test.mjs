@@ -27,38 +27,41 @@ test("the run updates a repo copy and replaces its running broker", { timeout: 6
   appendFileSync(path.join(repo, ".git", "info", "exclude"), "node_modules\n");
   const link = path.join(repo, "node_modules");
   symlinkSync(path.join(ROOT, "node_modules"), link, "junction");
-  await upstream("MARK.txt", "x");
-
-  const copilotHome = path.join(tmp, "copilot-home");
-  const stateDir = mkdtempSync(path.join(os.tmpdir(), "broker-e2e-"));
-  t.after(() => rmSync(stateDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
-  const old = await startBroker(t, { script: path.join(repo, "server.mjs") });
-  const a = await old.connect("cli:e2e-a", { name: "alpha" });
-  const b = await old.connect("cli:e2e-b", { name: "beta" });
-  await a.client.send(b.client.name, "before");
-  await until(() => b.got.some((m) => m.text === "before"), "the message before the restart");
-
-  const npmCalls = [];
-  const fx = realEffects({ reconnect: (ms) => reconnectClients([a.client, b.client], ms) });
-  const realSpawn = fx.spawnBroker;
-  // Every command goes through the git isolation; `npm ci` is only recorded (no network in tests).
-  // Fails closed: anything that is not npm ci, git, the node probe or the install script is refused, never run.
-  fx.run = (program, args, opts = {}) => {
-    if (opts.label === "npm ci" || args.at(-1) === "ci") {
-      npmCalls.push({ program, args, cwd: opts.cwd });
-      return Promise.resolve({ stdout: "", stderr: "" });
-    }
-    const install = path.join(repo, "scripts", "install-extension.mjs");
-    const known = program === "git" || (program === "node" && args[0] === "-p") || (args[0] !== undefined && path.resolve(args[0]) === install);
-    if (!known) return Promise.reject(new Error(`the test does not run: ${program} ${args.join(" ")}`));
-    return isolatedRun(program, args, opts);
-  };
-  fx.spawnBroker = (node, script, opts) => realSpawn(node, script, {
-    ...opts,
-    env: { ...opts.env, COPILOT_RELAY_NAMES_FILE: path.join(stateDir, "names.json"), COPILOT_RELAY_DELEGATIONS_FILE: path.join(stateDir, "delegations.json") },
-  });
-
+  // From here on the link exists: whatever throws, the finally removes the link itself before the helper's recursive
+  // cleanup of the temp folder could follow it into this checkout's node_modules.
+  let old;
   try {
+    await upstream("MARK.txt", "x");
+
+    const copilotHome = path.join(tmp, "copilot-home");
+    const stateDir = mkdtempSync(path.join(os.tmpdir(), "broker-e2e-"));
+    t.after(() => rmSync(stateDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
+    old = await startBroker(t, { script: path.join(repo, "server.mjs") });
+    const a = await old.connect("cli:e2e-a", { name: "alpha" });
+    const b = await old.connect("cli:e2e-b", { name: "beta" });
+    await a.client.send(b.client.name, "before");
+    await until(() => b.got.some((m) => m.text === "before"), "the message before the restart");
+
+    const npmCalls = [];
+    const fx = realEffects({ reconnect: (ms) => reconnectClients([a.client, b.client], ms) });
+    const realSpawn = fx.spawnBroker;
+    // Every command goes through the git isolation; `npm ci` is only recorded (no network in tests).
+    // Fails closed: anything that is not npm ci, git, the node probe or the install script is refused, never run.
+    fx.run = (program, args, opts = {}) => {
+      if (opts.label === "npm ci" || args.at(-1) === "ci") {
+        npmCalls.push({ program, args, cwd: opts.cwd });
+        return Promise.resolve({ stdout: "", stderr: "" });
+      }
+      const install = path.join(repo, "scripts", "install-extension.mjs");
+      const known = program === "git" || (program === "node" && args[0] === "-p") || (args[0] !== undefined && path.resolve(args[0]) === install);
+      if (!known) return Promise.reject(new Error(`the test does not run: ${program} ${args.join(" ")}`));
+      return isolatedRun(program, args, opts);
+    };
+    fx.spawnBroker = (node, script, opts) => realSpawn(node, script, {
+      ...opts,
+      env: { ...opts.env, COPILOT_RELAY_NAMES_FILE: path.join(stateDir, "names.json"), COPILOT_RELAY_DELEGATIONS_FILE: path.join(stateDir, "delegations.json") },
+    });
+
     const out = await runRestart({ repo, url: old.url, copilotHome }, fx);
     const shown = JSON.stringify(out.steps, null, 1);
     assert.equal(out.ok, true, shown);
@@ -84,12 +87,14 @@ test("the run updates a repo copy and replaces its running broker", { timeout: 6
     // The broker the run started is not a child of the test: stop it here, before the temp folders go. Nothing in
     // here may throw over an earlier error.
     try {
-      const answers = () => fetch(`${old.url}/health`, { signal: AbortSignal.timeout(1000) }).then((r) => r.json(), () => null);
-      await fetch(`${old.url}/api/shutdown`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}", signal: AbortSignal.timeout(2000) }).catch(() => {});
-      await until(async () => !(await answers()), "the new broker to stop", 10_000).catch(async () => {
-        const h = await answers();
-        if (h?.pid) process.kill(h.pid);
-      });
+      if (old) {
+        const answers = () => fetch(`${old.url}/health`, { signal: AbortSignal.timeout(1000) }).then((r) => r.json(), () => null);
+        await fetch(`${old.url}/api/shutdown`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}", signal: AbortSignal.timeout(2000) }).catch(() => {});
+        await until(async () => !(await answers()), "the new broker to stop", 10_000).catch(async () => {
+          const h = await answers();
+          if (h?.pid) process.kill(h.pid);
+        });
+      }
     } catch { /* the folders are removed next */ }
     try {
       // Only the link itself: never the folder it points to.

@@ -11,8 +11,10 @@ const IDENTITY = ["-c", "user.name=test", "-c", "user.email=test@example.invalid
 // an environment without the variables that override repository discovery (git exports them to hooks), plus no system
 // or global git config, so a user's core.hooksPath, pull.rebase or core.fsmonitor cannot change results.
 const REPO_LOCATION_VARS = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_NAMESPACE", "GIT_PREFIX"];
+// A global config file that does not exist (os.devNull is "\\.\nul" on Windows, unverified with Git for Windows).
+const NO_GLOBAL_CONFIG = path.join(os.tmpdir(), "copilot-relay-tests-no-such-gitconfig");
 export const isolatedEnv = () => {
-  const env = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: os.devNull };
+  const env = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: NO_GLOBAL_CONFIG };
   for (const v of REPO_LOCATION_VARS) delete env[v];
   return env;
 };
@@ -20,7 +22,7 @@ export const isolatedEnv = () => {
 // `runProgram` with the same isolation, for handing to `updateRepo` as `run`.
 export const isolatedRun = (program, args, opts = {}) => runProgram(program, args, {
   ...opts,
-  env: { ...Object.fromEntries(REPO_LOCATION_VARS.map((v) => [v, undefined])), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: os.devNull, ...opts.env },
+  env: { ...Object.fromEntries(REPO_LOCATION_VARS.map((v) => [v, undefined])), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: NO_GLOBAL_CONFIG, ...opts.env },
 });
 
 function gitIn(cwd, args) {
