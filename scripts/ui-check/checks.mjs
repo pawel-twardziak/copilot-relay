@@ -65,6 +65,7 @@ function placementErrors(app, mode) {
     const expected = groups.filter(inPanel).map((g) => g._entry);
     if (entries.length !== expected.length || entries.some((e, i) => e !== expected[i])) errors.push("the panel's entries are not those of the log's panel groups in log order");
     if (v.panel.hidden !== !entries.length) errors.push("panel.hidden is " + v.panel.hidden + " with " + entries.length + " entries");
+    if (v.activityBtn.hidden !== !entries.length) errors.push("the Activity button's hidden is " + v.activityBtn.hidden + " with " + entries.length + " entries");
     return errors;
   })()`);
 }
@@ -118,6 +119,85 @@ async function followingPanel(app) {
   await scrollTo(app, PANEL, `${PANEL}.scrollHeight`);
   assert.equal(await app.ev(`${V}.panelFollow`), true, "the panel follows");
 }
+
+// --- width, collapse and the narrow drawer (Task 5)
+const LONG_WAIT_SCENARIO = path.join(FIXTURES, "panel-long-wait-scenario.mjs");
+/** The view's panel as you see it: its width in real pixels, 0 when it is not shown. */
+const panelWidth = (app, v = V) => app.ev(`(() => { const p = ${v}.panel; return p.checkVisibility() ? Math.round(p.getBoundingClientRect().width) : 0; })()`);
+const shown = (app, el) => app.ev(`${el}.checkVisibility()`);
+/** Drags the view's handle dx px (negative: left) with the pointer, as you would; then waits for the layout. */
+async function dragHandle(app, dx, v = V) {
+  await app.ev(`(() => {
+    const h = ${v}.panelHandle, r = h.getBoundingClientRect();
+    const x = r.left + r.width / 2, y = r.top + r.height / 2;
+    const ev = (type, clientX) => new PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 1, isPrimary: true, pointerType: "mouse", button: 0, buttons: type === "pointerup" ? 0 : 1, clientX, clientY: y });
+    h.dispatchEvent(ev("pointerdown", x));
+    const dx = ${dx};
+    document.elementFromPoint(x + dx / 2, y)?.dispatchEvent(ev("pointermove", x + dx / 2));
+    document.body.dispatchEvent(ev("pointermove", x + dx));
+    document.body.dispatchEvent(ev("pointerup", x + dx));
+  })()`);
+  await frames(app);
+}
+const panelButton = (v = V) => `${v}.panel.querySelector(".panel-head button")`;
+/** Clicks the panel head's button (collapse, or close the drawer). */
+async function panelHeadButton(app, v = V) {
+  await app.ev(`${panelButton(v)}.click()`);
+  await frames(app);
+}
+async function activityButton(app, v = V) {
+  assert.equal(await shown(app, `${v}.activityBtn`), true, "the Activity button shows");
+  await app.ev(`${v}.activityBtn.click()`);
+  await frames(app);
+}
+/** Clicks the first in-panel group's header in the chat. */
+async function headerClick(app, v = V) {
+  await app.ev(`${v}.log.querySelector(":scope > .group.in-panel > summary").click()`);
+  await frames(app);
+}
+/** The first prompt of panel-scenario in the view. */
+async function firstTurn(app) {
+  await app.newSession();
+  await app.send("Look around.");
+  await app.idle();
+}
+/** A second session (in the launch's folder) that has played panel-scenario's first prompt; it is the active view. */
+async function secondView(app) {
+  const id = await app.ev(`(async () => {
+    await newSession(${V}.cwd.replace(/\\/[^/]+$/, ""));
+    return [...views.keys()].find((id) => id !== "scripted-work") ?? null;
+  })()`);
+  assert.ok(id, "a second view");
+  const v = `views.get(${JSON.stringify(id)})`;
+  await app.ev(`(() => { const v = ${v}; v.input.value = "Look around."; v.input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); })()`);
+  await app.check(`(() => { const v = ${v}; return !v.busy && !!v.panelBody.firstElementChild && Date.now() - (v.lastUpdate ?? 0) > 300; })()`, "the second view's turn");
+  await frames(app);
+  return { id, v };
+}
+const activate = async (app, id) => {
+  await app.ev(`activate(${JSON.stringify(id)})`);
+  await frames(app);
+};
+/** Closes the app, keeping its folder, and launches it again there with the view of scripted-work open. */
+async function relaunch(app, width = 1280) {
+  await app.close({ keep: true });
+  const again = await launch({ scenario: PANEL_SCENARIO, dir: app.dir, width });
+  try {
+    await again.ev(`openSession({ sessionId: "scripted-work", cwd: ${JSON.stringify(path.join(app.dir, "work"))} })`, "the session to reopen");
+    await again.check(`(() => { const v = ${V}; return v && !v.busy && !v.resuming && !!v.panelBody.firstElementChild && Date.now() - (v.lastUpdate ?? 0) > 300; })()`, "the replay");
+    await frames(again);
+  } catch (e) {
+    await again.close();
+    throw e;
+  }
+  return again;
+}
+/** In the narrow layout: the drawer's state as you see it. */
+const drawerState = (app) => app.ev(`(() => {
+  const v = ${V};
+  return { narrow: v.row.classList.contains("narrow"), shown: v.panel.checkVisibility(), hidden: v.panel.hidden, logWidth: v.log.offsetWidth, rowWidth: v.row.clientWidth };
+})()`);
+const storedUi = (app) => app.ev("localStorage.getItem(UI_KEY)");
 
 export const checks = [
   {
@@ -451,6 +531,16 @@ export const checks = [
         assert.equal(await app.ev(`${V}.follow`), true, `the log follows after the switch to ${mode}`);
         await assertAtBottom(app, LOG, `the log after the switch to ${mode}`);
       }
+      // the panel resized, collapsed and expanded
+      const width = await panelWidth(app);
+      await dragHandle(app, -60);
+      assert.equal(await panelWidth(app), width + 60, "the panel dragged wider");
+      for (const [what, act] of [["the drag", () => {}], ["collapsing", () => panelHeadButton(app)], ["expanding", () => activityButton(app)]]) {
+        await act();
+        await frames(app);
+        assert.equal(await app.ev(`${V}.follow`), true, `the log follows after ${what}`);
+        await assertAtBottom(app, LOG, `the log after ${what}`);
+      }
     },
   },
   {
@@ -478,6 +568,174 @@ export const checks = [
         await frames(app);
         await place(`after the switch to ${mode}`);
       }
+      await dragHandle(app, -60);
+      await place("after the panel was dragged wider");
+      await panelHeadButton(app);
+      assert.equal(await panelWidth(app), 0, "the panel collapsed");
+      await place("after the panel collapsed");
+      await activityButton(app);
+      await place("after the panel expanded");
+    },
+  },
+  {
+    // the handle's drag sets the width in real pixels, clamped to [280, row − 480] at every chat scale; every view
+    // has it, and it is kept after a relaunch (a window 1600 wide: the row is 1300, the maximum 820)
+    name: "panel-width",
+    modes: ["all"],
+    async run(app) {
+      await app.resize(1600, 800);
+      await firstTurn(app);
+      assert.equal(await app.ev(`${V}.row.clientWidth`), 1300, "the row of a window 1600 wide");
+      assert.equal(await panelWidth(app), 420, "the default width");
+      await dragHandle(app, -100);
+      assert.equal(await panelWidth(app), 520, "dragged 100 px left");
+      for (const scale of [1, 0.7, 2]) {
+        await app.ev(`(() => { ui.chatScale = ${scale}; applyChatScale(); })()`);
+        await frames(app);
+        await dragHandle(app, -2000);
+        assert.equal(await panelWidth(app), 1300 - 480, `dragged far left at chat scale ${scale}`);
+        await dragHandle(app, 2000);
+        assert.equal(await panelWidth(app), 280, `dragged far right at chat scale ${scale}`);
+      }
+      await app.ev(`(() => { ui.chatScale = 1; applyChatScale(); })()`);
+      await dragHandle(app, -220);
+      assert.equal(await panelWidth(app), 500, "dragged back to 500");
+      const { v } = await secondView(app);
+      assert.equal(await panelWidth(app, v), 500, "the second view's width");
+      await activate(app, "scripted-work");
+      assert.equal(await panelWidth(app), 500, "the first view shown again");
+      const again = await relaunch(app, 1600);
+      try {
+        assert.equal(await again.ev("ui.panelWidth"), 500, "the stored width after a relaunch");
+        assert.equal(await panelWidth(again), 500, "the width after a relaunch");
+      } finally {
+        await again.close();
+      }
+    },
+  },
+  {
+    // the panel head's button collapses the panel in every view, kept after a relaunch; "Activity" and a header
+    // click in the chat bring it back
+    name: "panel-collapse",
+    modes: ["all"],
+    async run(app) {
+      await firstTurn(app);
+      const { id, v } = await secondView(app);
+      await activate(app, "scripted-work");
+      assert.equal(await panelWidth(app), 420, "the panel shows");
+      await panelHeadButton(app);
+      assert.equal(await panelWidth(app), 0, "collapsed by its head's button");
+      assert.equal(await app.ev(`${V}.log.offsetWidth === ${V}.row.clientWidth`), true, "the log takes the row");
+      assert.equal(await app.ev(`${V}.panel.hidden`), false, "panel.hidden: the view still has entries");
+      await activate(app, id);
+      assert.equal(await panelWidth(app, v), 0, "collapsed in the second view");
+      await activate(app, "scripted-work");
+      const again = await relaunch(app);
+      try {
+        assert.equal(await panelWidth(again), 0, "still collapsed after a relaunch");
+        await activityButton(again);
+        assert.equal(await panelWidth(again), 420, "Activity brings it back");
+        assert.equal(await again.ev("ui.panelCollapsed"), false, "stored: not collapsed");
+        await panelHeadButton(again);
+        assert.equal(await panelWidth(again), 0, "collapsed again");
+        await headerClick(again);
+        assert.equal(await panelWidth(again), 420, "a header click in the chat brings it back");
+        assert.equal(await again.ev(`${V}.log.querySelector(":scope > .group.in-panel")._entry.open`), true, "its entry open");
+      } finally {
+        await again.close();
+      }
+    },
+  },
+  {
+    // a view below 760 px (window 900: view 600): the panel is a drawer over the log, closed until shown; crossing
+    // between the layouts writes nothing and opens nothing
+    name: "drawer",
+    modes: ["all"],
+    async run(app) {
+      await app.resize(900, 800);
+      await firstTurn(app);
+      const closed = await drawerState(app);
+      assert.deepStrictEqual(closed, { narrow: true, shown: false, hidden: false, logWidth: 600, rowWidth: 600 }, "the narrow layout, drawer closed");
+      assert.equal(await shown(app, `${V}.activityBtn`), true, "the Activity button shows");
+      await headerClick(app);
+      const open = await drawerState(app);
+      assert.deepStrictEqual(open, { ...closed, shown: true }, "a header click opens the drawer, the log keeps its width");
+      const over = await app.ev(`(() => {
+        const v = ${V}, p = v.panel.getBoundingClientRect(), r = v.row.getBoundingClientRect();
+        return { position: getComputedStyle(v.panel).position, right: p.right === r.right, top: p.top === r.top, bottom: p.bottom === r.bottom, width: Math.round(p.width) };
+      })()`);
+      assert.deepStrictEqual(over, { position: "absolute", right: true, top: true, bottom: true, width: 420 }, "the drawer over the log's right side");
+      await panelHeadButton(app);
+      assert.deepStrictEqual(await drawerState(app), closed, "its button closes it");
+      await activityButton(app);
+      assert.deepStrictEqual(await drawerState(app), open, "Activity opens it");
+      await activityButton(app);
+      assert.deepStrictEqual(await drawerState(app), closed, "Activity closes it");
+      // crossing to the wide layout and back
+      const stored = await storedUi(app);
+      await app.resize(1280, 800);
+      await frames(app);
+      assert.equal(await panelWidth(app), 420, "the wide layout shows the panel");
+      await app.resize(900, 800);
+      await frames(app);
+      assert.deepStrictEqual(await drawerState(app), closed, "back in the narrow layout: the drawer stays closed");
+      assert.equal(await storedUi(app), stored, "nothing stored by the crossing");
+      // collapsed in the wide layout: the narrow one does not open the drawer, the wide one keeps it collapsed
+      await app.resize(1280, 800);
+      await frames(app);
+      await panelHeadButton(app);
+      assert.equal(await panelWidth(app), 0, "collapsed");
+      const collapsed = await storedUi(app);
+      await app.resize(900, 800);
+      await frames(app);
+      assert.deepStrictEqual(await drawerState(app), closed, "collapsed, then narrow: the drawer closed");
+      await app.resize(1280, 800);
+      await frames(app);
+      assert.equal(await panelWidth(app), 0, "wide again: still collapsed");
+      assert.equal(await storedUi(app), collapsed, "nothing stored by the crossings");
+    },
+  },
+  {
+    // Esc with the drawer open while a turn runs: inside the drawer it closes the drawer (the turn runs on), in the
+    // message box it stops the turn (the drawer stays)
+    name: "drawer-esc",
+    modes: ["all"],
+    scenario: LONG_WAIT_SCENARIO,
+    async run(app) {
+      await app.resize(900, 800);
+      await app.newSession();
+      await app.send("Look around.");
+      await app.check(`${V}.busy && !!${V}.log.querySelector(":scope > .group.subagent.in-panel")`, "the turn's groups");
+      await app.ev(`(() => { const v = ${V}, stop = v.cancel; window.__stops = 0; v.cancel = function () { __stops++; return stop.call(this); }; })()`);
+      const esc = (target) => app.ev(`(() => { const t = ${target}; t.focus(); t.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); })()`);
+      const state = () => app.ev(`({ open: ${V}.panel.checkVisibility(), busy: ${V}.busy, stops: __stops })`);
+      await headerClick(app);
+      assert.deepStrictEqual(await state(), { open: true, busy: true, stops: 0 }, "the drawer open while the turn runs");
+      await esc(`${V}.panel.querySelector(".panel-entry > summary")`);
+      await frames(app);
+      assert.deepStrictEqual(await state(), { open: false, busy: true, stops: 0 }, "Esc inside the drawer closes it, the turn runs on");
+      await activityButton(app);
+      await esc(`${V}.input`);
+      await frames(app);
+      assert.deepStrictEqual(await state(), { open: true, busy: true, stops: 1 }, "Esc in the message box stops the turn, the drawer stays");
+    },
+  },
+  {
+    // a permission card arriving under an open drawer closes it: the question must be visible
+    name: "drawer-permission",
+    modes: ["all"],
+    async run(app) {
+      await app.resize(900, 800);
+      await firstTurn(app);
+      await headerClick(app);
+      assert.equal(await shown(app, `${V}.panel`), true, "the drawer open");
+      await app.send("Run both checks.");
+      await app.check(`!!${V}.el.querySelector(".perm:not(.done)")`, "a permission card");
+      await frames(app);
+      assert.equal(await shown(app, `${V}.panel`), false, "the card closed the drawer");
+      assert.equal(await shown(app, `${V}.el.querySelector(".perm:not(.done)")`), true, "the card shows");
+      await app.answerPermission();
+      await app.idle();
     },
   },
   {

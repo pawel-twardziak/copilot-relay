@@ -324,9 +324,21 @@ class SessionView {
     this.log = h("div", { class: "log" });
     // the activity panel beside the log: in a panel mode it holds the bodies of groups (place), each in an entry
     this.panelBody = h("div", { class: "panel-body" }); // the panel's scroller, zoomed with the chat
-    this.panel = h("aside", { class: "activity-panel", hidden: true }, this.panelBody); // hidden: no entry
-    this.panelHandle = h("div", { class: "panel-handle", hidden: true });
+    this.panelClose = h("button", { onclick: () => this.hidePanel() }); // collapse, or close the drawer
+    const panelHead = h("div", { class: "panel-head" }, h("span", { class: "title" }, "Activity"), this.panelClose);
+    this.panel = h("aside", { class: "activity-panel", hidden: true }, panelHead, this.panelBody); // hidden: no entry
+    // Esc inside the open drawer closes it; listened to here only, so Esc elsewhere keeps its meaning (stop the
+    // turn, cancel an edit, close the command popup, the image viewer or the file preview)
+    this.panel.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || !this.row.classList.contains("drawer-open")) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.setDrawer(false);
+    });
+    this.panelHandle = h("div", { class: "panel-handle", hidden: true, onpointerdown: (e) => this.dragPanel(e) });
     this.row = h("div", { class: "chat-row" }, this.log, this.panelHandle, this.panel);
+    this.drawerOpen = false; // the narrow layout's drawer: per view, not stored (layoutPanel)
+    new ResizeObserver(() => this.layoutPanel()).observe(this.row); // the layout follows the view's width
     this.follow = true; // follow streamed output: off once you scroll up, on again near the bottom
     this.lastTop = 0;
     this.log.addEventListener("scroll", () => {
@@ -368,6 +380,8 @@ class SessionView {
     this.cmdIndex = 0;
     this.cmdToken = null;
     this.filesBtn = h("button", { title: "Files opened from this conversation", hidden: true, onclick: () => filePreview.show(this) });
+    // shown while the view has a panel entry: shows or hides the panel (wide layout) or the drawer (narrow)
+    this.activityBtn = h("button", { title: "Show or hide the activity panel", hidden: true, onclick: () => this.togglePanel() }, "Activity");
     this.cmdPopup = h("div", { class: "cmd-popup", role: "listbox", hidden: true, onmousedown: (e) => e.preventDefault() });
     this.editText = h("span");
     this.queueEl = h("div", { class: "queue-strip", hidden: true });
@@ -385,6 +399,7 @@ class SessionView {
         this.selects,
         this.closeChildrenBtn,
         this.filesBtn,
+        this.activityBtn,
         h("button", { title: "Copy the whole conversation as Markdown", onclick: (e) => this.copyThread(e.currentTarget) }, "Copy thread"),
         h("button", { class: "danger", title: "Close this session in the app (it stays resumable)", onclick: () => closeView(this.sessionId) }, "Close"),
         h("button", { class: "danger", title: "Delete this whole session from disk", onclick: () => deleteSessionFlow({ sessionId: this.sessionId, cwd: this.cwd, title: this.title }) }, "Delete"),
@@ -1579,7 +1594,74 @@ class SessionView {
 
   /** The panel shows while it has an entry. */
   updatePanelShown() {
-    this.panel.hidden = this.panelHandle.hidden = !this.panelBody.firstElementChild;
+    const hidden = !this.panelBody.firstElementChild;
+    if (hidden === this.panel.hidden) return;
+    this.panel.hidden = this.panelHandle.hidden = hidden;
+    this.layoutPanel();
+  }
+
+  /** The panel's geometry for the view's width (UiState.panelLayout): its width, the narrow layout (a drawer over
+   *  the log) and what shows: in the wide layout the panel unless collapsed (ui.panelCollapsed), in the narrow one
+   *  the drawer while open (drawerOpen). panel.hidden keeps meaning "no entry"; the rest is classes on the row. */
+  layoutPanel() {
+    this.activityBtn.hidden = this.panel.hidden;
+    const viewWidth = this.row.clientWidth;
+    if (!viewWidth) return; // not shown: laid out when it shows (the row's ResizeObserver)
+    const { narrow, width } = UiState.panelLayout(viewWidth, ui.panelWidth);
+    this.panel.style.width = `${width}px`;
+    this.row.classList.toggle("narrow", narrow);
+    this.row.classList.toggle("collapsed", !narrow && ui.panelCollapsed);
+    this.row.classList.toggle("drawer-open", narrow && this.drawerOpen);
+    this.panelClose.textContent = narrow ? "✕" : "»";
+    this.panelClose.title = narrow ? "Close (Esc)" : "Hide the activity panel";
+  }
+  /** The layout applied: the panel is a drawer over the log. */
+  isNarrow() {
+    return this.row.classList.contains("narrow");
+  }
+  setDrawer(open) {
+    if (!open && this.panel.contains(document.activeElement)) this.input.focus(); // the focus leaves the closing drawer
+    this.drawerOpen = open;
+    this.layoutPanel();
+  }
+  /** The "Activity" button. */
+  togglePanel() {
+    if (this.isNarrow()) this.setDrawer(!this.drawerOpen);
+    else setPanelCollapsed(!ui.panelCollapsed);
+  }
+  /** The panel head's button. */
+  hidePanel() {
+    if (this.isNarrow()) this.setDrawer(false);
+    else setPanelCollapsed(true);
+  }
+  /** A group is shown: the panel un-collapsed, or the drawer opened. */
+  revealPanel() {
+    if (this.isNarrow()) this.setDrawer(true);
+    else if (ui.panelCollapsed) setPanelCollapsed(false);
+  }
+  /** The handle dragged: the width follows the pointer in real pixels, kept within the layout's limits; stored and
+   *  applied to every view when the drag ends. */
+  dragPanel(e) {
+    if (e.button !== 0) return;
+    e.preventDefault(); // no text selection while dragging
+    const startX = e.clientX;
+    const start = this.panel.getBoundingClientRect().width;
+    const move = (m) => {
+      ui.panelWidth = UiState.panelLayout(this.row.clientWidth, start + startX - m.clientX).width;
+      this.layoutPanel();
+    };
+    const end = () => {
+      removeEventListener("pointermove", move);
+      removeEventListener("pointerup", end);
+      removeEventListener("pointercancel", end);
+      document.body.classList.remove("panel-resizing");
+      saveUi();
+      layoutPanels();
+    };
+    addEventListener("pointermove", move);
+    addEventListener("pointerup", end);
+    addEventListener("pointercancel", end);
+    document.body.classList.add("panel-resizing");
   }
 
   /** Whether the group is open: the state of whatever holds its body (the group, or its entry in the panel). */
@@ -1600,6 +1682,7 @@ class SessionView {
   /** An in-panel group's header clicked in the chat (or "N subagents running"): its entry opened, scrolled into view
    *  and highlighted for a second. The panel stops following, and the scroll made here does not turn it back on. */
   showInPanel(group) {
+    this.revealPanel();
     const entry = group._entry;
     entry.open = true;
     this.panelFollow = false;
@@ -1780,6 +1863,7 @@ class SessionView {
 
   permission({ reqId, toolCall, options }) {
     this.flush();
+    this.setDrawer(false); // the question must be visible
     const card = h(
       "div",
       { class: "perm" },
@@ -2824,7 +2908,8 @@ function askDeleteTree(s, idx, below) {
   });
 }
 
-// Sidebar state kept across restarts: pinned sessions, collapsed project folders, chat text scale.
+// Sidebar state kept across restarts: pinned sessions, collapsed project folders, chat text scale, the activity
+// panel's width and collapsed state.
 const UI_KEY = "copilot-sessions.ui.v1";
 function loadUi() {
   let raw = {};
@@ -2832,7 +2917,13 @@ function loadUi() {
     raw = JSON.parse(localStorage.getItem(UI_KEY) ?? "{}") ?? {};
   } catch {}
   const set = (a) => new Set(Array.isArray(a) ? a.filter((x) => typeof x === "string") : []);
-  return { pinned: set(raw.pinned), collapsed: set(raw.collapsed), chatScale: Number.isFinite(raw.chatScale) ? raw.chatScale : 1 };
+  return {
+    pinned: set(raw.pinned),
+    collapsed: set(raw.collapsed),
+    chatScale: Number.isFinite(raw.chatScale) ? raw.chatScale : 1,
+    panelWidth: Number.isFinite(raw.panelWidth) ? raw.panelWidth : UiState.PANEL.def, // the activity panel's width, every view's
+    panelCollapsed: raw.panelCollapsed === true, // applies to the wide layout only
+  };
 }
 const ui = loadUi();
 // The image viewer, opened from a thumbnail: wheel zooms around the cursor, drag pans, double-click toggles fit / 100 %.
@@ -2982,8 +3073,18 @@ const viewer = (() => {
 })();
 function saveUi() {
   try {
-    localStorage.setItem(UI_KEY, JSON.stringify({ pinned: [...ui.pinned], collapsed: [...ui.collapsed], chatScale: ui.chatScale }));
+    const { pinned, collapsed, chatScale, panelWidth, panelCollapsed } = ui;
+    localStorage.setItem(UI_KEY, JSON.stringify({ pinned: [...pinned], collapsed: [...collapsed], chatScale, panelWidth, panelCollapsed }));
   } catch {}
+}
+/** The activity panel's stored width or collapsed state changed: every view lays its panel out again. */
+function layoutPanels() {
+  for (const v of views.values()) v.layoutPanel();
+}
+function setPanelCollapsed(collapsed) {
+  ui.panelCollapsed = collapsed;
+  saveUi();
+  layoutPanels();
 }
 
 /** Collapse / expand one project in place (no re-render, so the transition runs). */

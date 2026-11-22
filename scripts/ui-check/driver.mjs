@@ -81,7 +81,8 @@ async function attach(port) {
  * @returns the driver; every method that waits throws after 20 s.
  */
 export async function launch({ scenario, settings = {}, width = 1280, height = 800, dir = null }) {
-  // dir: the folder of an earlier launch kept with close({ keep: true }); this launch uses its settings and removes it
+  // dir: the folder of an earlier launch kept with close({ keep: true }); this launch uses its settings and stored UI
+  // state, and removes it
   const tmp = dir ?? mkdtempSync(path.join(os.tmpdir(), "ui-check-"));
   const config = path.join(tmp, "config");
   const work = path.join(tmp, "work"); // the session folder: the session id is scripted-work
@@ -115,6 +116,12 @@ export async function launch({ scenario, settings = {}, width = 1280, height = 8
   async function close({ keep = false } = {}) {
     if (closed) return;
     closed = true;
+    // kept for another launch: first the app quits as when you close its window, which writes its localStorage to
+    // disk (killed, it loses what it wrote in the last seconds)
+    if (keep && ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ id: 0, method: "Runtime.evaluate", params: { expression: "window.close()" } }));
+      await Promise.race([exited, sleep(5000)]);
+    }
     ws?.close();
     try {
       process.kill(-proc.pid, "SIGTERM");
