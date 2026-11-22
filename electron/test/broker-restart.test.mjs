@@ -137,6 +137,18 @@ test("check: a missing folder is reported as not a copilot-relay folder, before 
   assert.deepEqual(calls.order, []);
 });
 
+test("check: an empty, missing or relative repo fails before any file check or effect", async (t) => {
+  for (const repo of ["", undefined, "relative/folder"]) {
+    const { fx, calls, input } = fakeFx(t);
+    const out = await runRestart({ ...input, repo }, fx);
+    assert.equal(out.ok, false, String(repo));
+    assert.equal(out.steps[0].status, "failed", String(repo));
+    assert.equal(out.steps[0].detail, "Set the copilot-relay repository folder first (an absolute path).", String(repo));
+    assert.equal(out.summary, "Stopped at Check. The broker was not restarted.", String(repo));
+    assert.deepEqual(calls.order, [], String(repo));
+  }
+});
+
 test("check: git's top level is another folder", async (t) => {
   const { fx, calls, input, repo } = fakeFx(t, { toplevel: os.tmpdir() });
   const out = await runRestart(input, fx);

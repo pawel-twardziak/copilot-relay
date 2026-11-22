@@ -112,14 +112,15 @@ identity it has in a terminal (`cli:<sessionId>`), so it keeps its relay name. I
   the app or its sessions. Set the copilot-relay repository folder first (it defaults to the folder of the broker
   the app starts). The button runs six steps and shows each one:
   1. **Check** – the folder is a copilot-relay repository.
-  2. **Update** – `git fetch`, then the latest `main` is checked out. Uncommitted changes go to a stash named
-     `copilot-sessions restart <time>`; the stash is kept and never applied or dropped.
+  2. **Update** – uncommitted changes go to a stash named `copilot-sessions restart <time>` (only when there
+     is something `git stash` can take); then `git checkout main` when another branch is checked out, then
+     `git pull --ff-only origin main`. The stash is kept, never applied or dropped, and the result names it.
   3. **Install** – `npm ci`, then the extension installer (`install-extension`).
   4. **Stop** – the old broker is asked to shut down.
   5. **Start** – the new broker starts from the folder.
   6. **Reconnect** – the app's sessions register with the new broker again.
 
-  If a step fails, the later ones are skipped and the summary says where it stopped. The app asks first when a
+  If a step fails, the later steps are not run and the summary says where it stopped. The app asks first when a
   session is working or when sessions started from the broker's web page would end. Sessions in terminals reconnect
   on their own. A broker started before this version cannot be stopped by the button: stop it by hand once, then the
   button works.

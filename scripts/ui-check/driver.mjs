@@ -99,7 +99,7 @@ export async function launch({ scenario, settings = {}, width = 1280, height = 8
   const relayPort = await freePort(); // the app's relay URL points here, where nothing listens: never the real broker on 7777
   // X11 only, so the window is on Xvfb's display even from a Wayland session (Electron would pick Wayland).
   // Its own process group: close() stops xvfb, Electron and the agents it started together.
-  const { WAYLAND_DISPLAY, ...env } = process.env;
+  const { WAYLAND_DISPLAY, COPILOT_RELAY_URL, ...env } = process.env; // an inherited COPILOT_RELAY_URL would beat COPILOT_RELAY_PORT
   const proc = spawn("xvfb-run", ["-a", ELECTRON, "electron", "--ozone-platform=x11", `--remote-debugging-port=${port}`], {
     cwd: ROOT,
     env: { ...env, XDG_SESSION_TYPE: "x11", XDG_CONFIG_HOME: config, COPILOT_HOME: path.join(tmp, "copilot-home"), COPILOT_RELAY_PORT: String(relayPort), SCRIPTED_SCENARIO: path.resolve(scenario) },

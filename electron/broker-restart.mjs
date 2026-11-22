@@ -90,6 +90,7 @@ export async function runRestart(input, fx, onStep = () => {}) {
   };
 
   const check = async () => {
+    if (typeof repo !== "string" || !path.isAbsolute(repo)) throw new Error("Set the copilot-relay repository folder first (an absolute path).");
     if (!["server.mjs", path.join("scripts", "install-extension.mjs")].every((f) => existsSync(path.join(repo, f)))) {
       throw new Error(`Not a copilot-relay folder: ${repo} (server.mjs and scripts/install-extension.mjs are expected there).`);
     }
