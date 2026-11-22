@@ -2,6 +2,7 @@
 // agent changes a file there (or, at its first tool call, the repository of the session folder).
 import { stat } from "node:fs/promises";
 import path from "node:path";
+import { sameRoot } from "./repo-records.mjs";
 
 const EDIT_KINDS = new Set(["edit", "delete", "move"]);
 
@@ -54,24 +55,24 @@ export function createRepoTracker({ store, git, allow, nearestDir = defaultNeare
   async function handlePaths(sessionId, cwd, paths) {
     const done = seen.get(sessionId) ?? seen.set(sessionId, new Set()).get(sessionId);
     const call = [...new Set(paths.map((p) => path.resolve(cwd, p)))];
+    // First place every path of the call (repository root and path below it), then record.
+    const placed = [];
     for (const abs of call) {
       if (done.has(abs)) continue;
       if (!(await allow(abs))) continue;
       const dir = await nearestDir(abs);
       const where = dir ? await git.where(dir) : null;
-      if (!where) {
+      placed.push(where ? { abs, root: where.root, rel: where.prefix + slashes(path.relative(dir, abs)) } : { abs, root: null });
+    }
+    for (const { abs, root, rel } of placed) {
+      if (root === null) {
         store.addLoose(sessionId, abs);
       } else {
-        const { root, prefix } = where;
         if (!store.repo(sessionId, root)) {
-          const omit = new Set();
-          for (const other of call) {
-            const rel = path.relative(root, other);
-            if (rel && !rel.startsWith("..") && !path.isAbsolute(rel)) omit.add(slashes(rel));
-          }
+          const omit = new Set(placed.filter((p) => p.root !== null && sameRoot(p.root, root)).map((p) => p.rel));
           store.addRepo(sessionId, await newRecord(root, omit));
         }
-        store.touch(sessionId, root, prefix + slashes(path.relative(dir, abs)));
+        store.touch(sessionId, root, rel);
       }
       done.add(abs);
     }
@@ -91,8 +92,8 @@ export function createRepoTracker({ store, git, allow, nearestDir = defaultNeare
       return enqueue(sessionId, async () => {
         await handlePaths(sessionId, cwd, editPaths(update));
         if (kind === "tool_call" && !folderDone.has(sessionId)) {
-          folderDone.add(sessionId);
           await handleSessionFolder(sessionId, cwd);
+          folderDone.add(sessionId); // only after it worked: a failed lookup is retried at the next tool_call
         }
       });
     },
