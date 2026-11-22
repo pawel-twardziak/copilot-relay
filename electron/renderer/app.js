@@ -328,9 +328,10 @@ class SessionView {
     const panelHead = h("div", { class: "panel-head" }, h("span", { class: "title" }, "Activity"), this.panelClose);
     this.panel = h("aside", { class: "activity-panel", hidden: true }, panelHead, this.panelBody); // hidden: no entry
     // Esc inside the open drawer closes it; listened to here only, so Esc elsewhere keeps its meaning (stop the
-    // turn, cancel an edit, close the command popup, the image viewer or the file preview)
+    // turn, cancel an edit, close the command popup, the image viewer or the file preview). A held Esc's repeats do
+    // nothing: one press closes the drawer and no more
     this.panel.addEventListener("keydown", (e) => {
-      if (e.key !== "Escape" || !this.row.classList.contains("drawer-open")) return;
+      if (e.key !== "Escape" || e.repeat || !this.row.classList.contains("drawer-open")) return;
       e.preventDefault();
       e.stopPropagation();
       this.setDrawer(false);
@@ -1620,9 +1621,12 @@ class SessionView {
     return this.row.classList.contains("narrow");
   }
   setDrawer(open) {
-    if (!open && this.panel.contains(document.activeElement)) this.input.focus(); // the focus leaves the closing drawer
+    const closing = !open && this.row.classList.contains("drawer-open") && this.panel.contains(document.activeElement);
     this.drawerOpen = open;
     this.layoutPanel();
+    // the focus leaves the drawer it was in for the button that opens it again (not the message box, where the next
+    // Esc would stop the turn)
+    if (closing) this.activityBtn.focus();
   }
   /** The "Activity" button. */
   togglePanel() {

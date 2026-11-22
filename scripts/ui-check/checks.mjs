@@ -292,15 +292,19 @@ export const checks = [
     },
   },
   {
-    // an in-panel group's header in the chat shows its entry; both headers say the same, ⏸ included
+    // an in-panel group's header in the chat shows its entry; both headers say the same, ⏸ included; the card does not
+    // take the focus out of the panel
     name: "header-shows",
     modes: PANEL_MODES,
     async run(app) {
       await app.newSession();
       await app.send("Look around.");
       await app.idle();
+      // the focus in the panel (wide layout): an arriving permission card leaves it there
+      await app.ev(`${V}.panel.querySelector(".panel-entry > summary").focus()`);
       await app.send("Run both checks.");
       await app.check(`!!${V}.el.querySelector(".perm:not(.done)")`, "a permission card");
+      assert.equal(await app.ev(`${V}.panel.contains(document.activeElement)`), true, "the focus still in the panel after the card arrived");
       const waiting = await app.ev(`[...${V}.log.querySelectorAll(":scope > .group")]
         .filter((g) => g.querySelector(":scope > summary .title").textContent.includes("⏸"))
         .map((g) => ({ inPanel: g.classList.contains("in-panel"), entry: g._entry?.querySelector(":scope > summary .title").textContent ?? null }))`);
@@ -714,7 +718,16 @@ export const checks = [
       await esc(`${V}.panel.querySelector(".panel-entry > summary")`);
       await frames(app);
       assert.deepStrictEqual(await state(), { open: false, busy: true, stops: 0 }, "Esc inside the drawer closes it, the turn runs on");
+      assert.equal(await app.ev(`document.activeElement === ${V}.activityBtn`), true, "the focus back on the Activity button");
+      // a double Esc: the second one lands where the focus went, and must not stop the turn
+      await esc("document.activeElement");
+      await frames(app);
+      assert.deepStrictEqual(await state(), { open: false, busy: true, stops: 0 }, "a second Esc after the drawer closed");
+      // a held Esc: its repeated keydowns inside the open drawer do nothing
       await activityButton(app);
+      await app.ev(`(() => { const t = ${V}.panel.querySelector(".panel-entry > summary"); t.focus(); t.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", repeat: true, bubbles: true, cancelable: true })); })()`);
+      await frames(app);
+      assert.deepStrictEqual(await state(), { open: true, busy: true, stops: 0 }, "a repeated Esc inside the drawer");
       await esc(`${V}.input`);
       await frames(app);
       assert.deepStrictEqual(await state(), { open: true, busy: true, stops: 1 }, "Esc in the message box stops the turn, the drawer stays");
