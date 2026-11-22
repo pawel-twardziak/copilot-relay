@@ -52,3 +52,11 @@ test("output is capped to its last 64 KiB", async () => {
   assert.equal(r.stdout.length, 64 * 1024);
   assert.ok(r.stdout.endsWith("END"));
 });
+test("a missing cwd is reported as a missing folder, not a missing program", async () => {
+  const cwd = path.join(os.tmpdir(), "no-such-folder-xyz");
+  await assert.rejects(runProgram(process.execPath, ["-e", "1"], { cwd }), (e) => {
+    assert.equal(e.code, "NOCWD");
+    assert.equal(e.message, `Folder does not exist: ${cwd}`);
+    return true;
+  });
+});

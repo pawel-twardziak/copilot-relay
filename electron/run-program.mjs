@@ -1,5 +1,6 @@
 // Runs an external program with a timeout and returns its (capped) output. Main process only, no electron import.
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import { killTree } from "./job-runner.mjs";
 
@@ -27,7 +28,11 @@ export function runProgram(program, args, { cwd, env, timeoutMs, shell = false, 
     let timedOut = false;
     let timer;
     const cap = (s) => (s.length > CAP ? s.slice(-CAP) : s);
-    const spawnFailed = (e) => fail(e.code === "ENOENT" ? notFound(program) : e.message, e.code ?? "SPAWN", stdout, stderr);
+    const spawnFailed = (e) => {
+      // Node reports a nonexistent cwd as ENOENT on the spawn too.
+      if (e.code === "ENOENT" && cwd != null && !fs.existsSync(cwd)) return fail(`Folder does not exist: ${cwd}`, "NOCWD", stdout, stderr);
+      return fail(e.code === "ENOENT" ? notFound(program) : e.message, e.code ?? "SPAWN", stdout, stderr);
+    };
     let child;
     try {
       child = spawn(program, args, {

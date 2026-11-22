@@ -6,7 +6,8 @@ export const GIT_ENV = { GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" };
 const STASH_IDENTITY = ["-c", "user.name=Copilot Sessions", "-c", "user.email=copilot-sessions@localhost"];
 
 export async function updateRepo({ repo, run, now = () => new Date(), timeoutMs = 60_000 }) {
-  const git = async (...args) => (await run("git", args, { cwd: repo, env: GIT_ENV, timeoutMs })).stdout.trim();
+  const call = async (args, extra) => (await run("git", args, { cwd: repo, env: GIT_ENV, timeoutMs, ...extra })).stdout.trim();
+  const git = (...args) => call(args);
 
   const branch = await git("rev-parse", "--abbrev-ref", "HEAD");
   const before = await git("rev-parse", "--short", "HEAD");
@@ -14,7 +15,7 @@ export async function updateRepo({ repo, run, now = () => new Date(), timeoutMs 
   try {
     if (await git("status", "--porcelain")) {
       const message = `copilot-sessions restart ${now().toISOString()}`;
-      await git(...STASH_IDENTITY, "stash", "push", "--include-untracked", "-m", message);
+      await call([...STASH_IDENTITY, "stash", "push", "--include-untracked", "-m", message], { label: "git stash" });
       stash = { branch, message };
     }
     if (branch !== "main") await git("checkout", "main");

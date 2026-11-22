@@ -3,13 +3,29 @@ import { execFile } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { runProgram } from "../run-program.mjs";
 
 const IDENTITY = ["-c", "user.name=test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false"];
 
-// Runs git in `cwd` (always explicit, so nothing here can touch the surrounding repository).
+// What keeps these tests off the surrounding repository: every git call has an explicit `cwd` inside a temp folder AND
+// an environment without the variables that override repository discovery (git exports them to hooks), plus no system
+// or global git config, so a user's core.hooksPath, pull.rebase or core.fsmonitor cannot change results.
+const REPO_LOCATION_VARS = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_NAMESPACE", "GIT_PREFIX"];
+export const isolatedEnv = () => {
+  const env = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: os.devNull };
+  for (const v of REPO_LOCATION_VARS) delete env[v];
+  return env;
+};
+
+// `runProgram` with the same isolation, for handing to `updateRepo` as `run`.
+export const isolatedRun = (program, args, opts = {}) => runProgram(program, args, {
+  ...opts,
+  env: { ...Object.fromEntries(REPO_LOCATION_VARS.map((v) => [v, undefined])), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: os.devNull, ...opts.env },
+});
+
 function gitIn(cwd, args) {
   return new Promise((resolve, reject) => {
-    execFile("git", [...IDENTITY, ...args], { cwd, windowsHide: true, encoding: "utf8" }, (err, stdout, stderr) => {
+    execFile("git", [...IDENTITY, ...args], { cwd, env: isolatedEnv(), windowsHide: true, encoding: "utf8" }, (err, stdout, stderr) => {
       if (err) reject(new Error(`git ${args.join(" ")} failed: ${stderr || err.message}`));
       else resolve(stdout);
     });

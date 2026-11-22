@@ -1,15 +1,16 @@
 // Tests for bringing the broker repository to the latest main, against real throwaway git repositories.
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { GIT_ENV, describeUpdate, updateRepo } from "../broker-git.mjs";
 import { runProgram } from "../run-program.mjs";
-import { repoWithRemote } from "./git-helper.mjs";
+import { isolatedEnv, isolatedRun, repoWithRemote } from "./git-helper.mjs";
 
 const now = () => new Date("2026-11-22T12:00:00.000Z");
 const message = "copilot-sessions restart 2026-11-22T12:00:00.000Z";
-const run = runProgram;
+const run = isolatedRun;
 const update = (repo) => updateRepo({ repo, run, now });
 const dirty = (repo) => {
   writeFileSync(path.join(repo, "README.md"), "edited");
@@ -107,7 +108,7 @@ test("the stash works on a machine with no git identity at all", async (t) => {
   await r.upstream("new.txt", "x");
   dirty(r.repo);
   const empty = mkdtempSync(path.join(r.tmp, "home-"));
-  const noIdentity = (program, args, opts = {}) => runProgram(program, args, { ...opts, env: { ...opts.env,
+  const noIdentity = (program, args, opts = {}) => isolatedRun(program, args, { ...opts, env: { ...opts.env,
     HOME: empty, USERPROFILE: empty, XDG_CONFIG_HOME: empty, GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: path.join(empty, "none"), EMAIL: "",
     GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "user.useConfigOnly", GIT_CONFIG_VALUE_0: "true" } });
@@ -115,6 +116,7 @@ test("the stash works on a machine with no git identity at all", async (t) => {
   assert.deepEqual(out.stash, { branch: "main", message });
   assert.equal((await r.git("status", "--porcelain")).trim(), "");
   assert.equal((await r.git("stash", "list")).trim().split("\n").length, 1);
+  assert.equal((await r.git("log", "-1", "--format=%an <%ae>", "refs/stash")).trim(), "Copilot Sessions <copilot-sessions@localhost>");
 });
 
 test("a repo folder with spaces and non-ASCII characters", async (t) => {
@@ -157,4 +159,58 @@ test("describeUpdate", () => {
   assert.equal(describeUpdate({ before: "abc1234", after: "def5678", stash: null }), "abc1234 → def5678");
   assert.equal(describeUpdate({ before: "abc1234", after: "def5678", stash: { branch: "feature", message } }),
     "abc1234 → def5678; changes stashed from feature");
+});
+
+test("a failed stash is reported as git stash", async (t) => {
+  const r = await repoWithRemote(t);
+  dirty(r.repo);
+  const failStash = (program, args, opts) => args.includes("stash")
+    ? isolatedRun(process.execPath, ["-e", "process.exit(1)"], opts)
+    : isolatedRun(program, args, opts);
+  await assert.rejects(updateRepo({ repo: r.repo, run: failStash, now }), /^Error: git stash failed/);
+});
+
+test("the stash call is labelled git stash", async () => {
+  let label;
+  const fake = async (program, args, opts) => {
+    if (args[0] === "status") return { stdout: " M a\n", stderr: "" };
+    if (args.includes("stash")) { label = opts.label; throw new Error("stop"); }
+    return { stdout: "x\n", stderr: "" };
+  };
+  await assert.rejects(updateRepo({ repo: "unused", run: fake, now }), /stop/);
+  assert.equal(label, "git stash");
+});
+
+test("an inherited GIT_DIR does not redirect git away from the temp repo", async (t) => {
+  const saved = process.env.GIT_DIR;
+  process.env.GIT_DIR = path.join(os.tmpdir(), "no-such-git-dir-xyz");
+  t.after(() => { if (saved === undefined) delete process.env.GIT_DIR; else process.env.GIT_DIR = saved; });
+  const r = await repoWithRemote(t);
+  const head = await r.upstream("new.txt", "x");
+  dirty(r.repo);
+  const out = await update(r.repo);
+  assert.equal(out.after, head);
+  assert.equal((await r.git("status", "--porcelain")).trim(), "");
+});
+
+test("the stash leaves an untracked nested linked worktree and its uncommitted work alone", async (t) => {
+  const r = await repoWithRemote(t);
+  const wt = path.join(r.repo, "nested", "wt");
+  await r.git("worktree", "add", "nested/wt", "-b", "side");
+  writeFileSync(path.join(wt, "README.md"), "wt edit");
+  writeFileSync(path.join(wt, "wt-untracked.txt"), "wt u");
+  writeFileSync(path.join(r.repo, "README.md"), "main edit");
+  const head = await r.upstream("new.txt", "x");
+  const out = await update(r.repo);
+  const wtStatus = (await runProgram("git", ["-C", wt, "status", "--porcelain"], { cwd: r.tmp, env: isolatedEnv() })).stdout;
+  assert.equal(out.after, head);
+  assert.equal(readFileSync(path.join(wt, "README.md"), "utf8"), "wt edit");
+  assert.equal(readFileSync(path.join(wt, "wt-untracked.txt"), "utf8"), "wt u");
+  assert.match(wtStatus, /README\.md/);
+  assert.match(wtStatus, /wt-untracked\.txt/);
+  assert.equal(out.stash.branch, "main");
+  // The nested worktree is not part of the stash: only the main work tree's tracked change is, and `nested/` stays untracked.
+  assert.match(await r.git("stash", "show", "--include-untracked", "--stat"), /README\.md \|/);
+  assert.doesNotMatch(await r.git("stash", "show", "--include-untracked", "--stat"), /nested|wt-untracked/);
+  assert.equal((await r.git("status", "--porcelain")).trim(), "?? nested/");
 });
