@@ -1352,9 +1352,12 @@ class SessionView {
     // rendered yet is rendered now (final render, with links); one whose last frame rendered everything only gets
     // the links, so the message is not parsed again and a text selection in it survives. A message that streams on
     // later (a background subagent) is rendered again in its own block and finished at the next flush.
+    let rendered = false;
     for (const r of this.touched) {
-      if (this.dirty.has(r)) renderRun(r, true);
-      else if (r.type === "agent") linkify(r.body, { codeOnly: true });
+      if (this.dirty.has(r)) {
+        renderRun(r, true);
+        rendered = true;
+      } else if (r.type === "agent") linkify(r.body, { codeOnly: true });
       else if (r.type === "user") linkify(r.body);
       if (r.type === "agent") this.imageRefs(r.body);
       else if (r.type === "user") this.mentionThumbs(r.el, r.text);
@@ -1366,6 +1369,7 @@ class SessionView {
     }
     this.touched.clear();
     this.dirty.clear();
+    if (rendered) this.followBottom(); // a block rendered here (the turn's last text, at its end) grew: no frame follows it
   }
 
   // --- groups: the main agent's work (tools, thinking) and each subagent, collapsed (Activity decides the place)

@@ -111,6 +111,13 @@ async function untilSubagent(app) {
 }
 /** Opens the subagent's entry as a mode switch carries an open group over: not a click, which stops the follow. */
 const openSubEntry = (app) => app.ev(`${SUB_GROUP}._entry.open = true`);
+/** In a panel mode (the subagent's body is in the panel): its entry open, the panel scrolled to its end, following. */
+async function followingPanel(app) {
+  await openSubEntry(app);
+  await frames(app);
+  await scrollTo(app, PANEL, `${PANEL}.scrollHeight`);
+  assert.equal(await app.ev(`${V}.panelFollow`), true, "the panel follows");
+}
 
 export const checks = [
   {
@@ -471,6 +478,54 @@ export const checks = [
         await frames(app);
         await place(`after the switch to ${mode}`);
       }
+    },
+  },
+  {
+    // a size change alone (nothing appended): a following log, and a following panel with an open entry, keep their
+    // bottoms when the window gets narrower (the log's text reflows) and lower
+    name: "resize-keeps-bottom",
+    scenario: SCROLL_SCENARIO,
+    async run(app) {
+      const panel = (await savedMode(app)) !== "off";
+      await untilSubagent(app);
+      await app.idle();
+      if (panel) await followingPanel(app);
+      assert.equal(await app.ev(`${V}.follow`), true, "the log follows");
+      assert.ok((await assertAtBottom(app, LOG, "the log before the resize")).over > 100, "the log overflows");
+      if (panel) assert.ok((await assertAtBottom(app, PANEL, "the panel before the resize")).over > 100, "the panel overflows");
+      await app.resize(1000, 500);
+      await frames(app);
+      await assertAtBottom(app, LOG, "the log in a narrower window");
+      await app.resize(1000, 400);
+      await frames(app);
+      await assertAtBottom(app, LOG, "the log in a lower window");
+      if (panel) await assertAtBottom(app, PANEL, "the panel in a lower window");
+    },
+  },
+  {
+    // the view streams while another view is active: shown again, its following log and panel are at their bottoms
+    name: "switch-keeps-bottom",
+    scenario: SCROLL_SCENARIO,
+    async run(app) {
+      const panel = (await savedMode(app)) !== "off";
+      await app.resize(1280, 500);
+      await app.newSession();
+      const other = await app.ev(`(async () => {
+        await newSession(${V}.cwd.replace(/\\/[^/]+$/, "")); // a second session, in the launch's folder
+        return [...views.keys()].find((id) => id !== "scripted-work") ?? null;
+      })()`);
+      assert.ok(other, "a second view");
+      await app.ev(`activate("scripted-work")`);
+      await app.send("Explain the files.");
+      await app.check(`!!${SUB_GROUP}`, "the subagent's group");
+      if (panel) await followingPanel(app);
+      await app.ev(`activate(${JSON.stringify(other)})`);
+      await app.idle();
+      assert.equal(await app.ev(`${V}.el.classList.contains("active")`), false, "the view streamed while hidden");
+      await app.ev(`activate("scripted-work")`);
+      await frames(app);
+      assert.ok((await assertAtBottom(app, LOG, "the log shown again")).over > 100, "the log overflows");
+      if (panel) assert.ok((await assertAtBottom(app, PANEL, "the panel shown again")).over > 100, "the panel overflows");
     },
   },
   {
