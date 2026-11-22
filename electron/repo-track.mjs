@@ -101,6 +101,10 @@ export function createRepoTracker({ store, git, allow, nearestDir = defaultNeare
       if (!EDIT_KINDS.has(toolCall?.kind)) return Promise.resolve();
       return enqueue(sessionId, () => handlePaths(sessionId, cwd, pathsOf(toolCall.locations)));
     },
+    /** A removed repository returns at the agent's next edit there: forget the seen paths, keep the folder flag. */
+    forgetSeen(sessionId) {
+      seen.delete(sessionId);
+    },
     closed(sessionId) {
       seen.delete(sessionId);
       folderDone.delete(sessionId);

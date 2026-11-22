@@ -1230,8 +1230,8 @@ handle("changes:add", async (sessionId) => {
   return r.canceled ? null : changes.add(sessionId, r.filePaths[0]);
 });
 handle("changes:remove", async (sessionId, root) => {
-  changes.remove(knownSession(sessionId), root);
-  tracker.closed(sessionId); // the agent's next edit there records the repository again, with a new start point
+  await changes.remove(knownSession(sessionId), root); // a failure reaches the window; the reset below runs only on success
+  tracker.forgetSeen(sessionId); // the agent's next edit there records the repository again, with a new start point
 });
 
 // Real paths files:read has returned in this run: the only ones files:watch accepts.

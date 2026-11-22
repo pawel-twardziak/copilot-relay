@@ -227,3 +227,20 @@ test("16: closed clears the seen paths", async (t) => {
   await tracker.update("s", REPO, diffUpdate(at(REPO, "a.txt")));
   assert.equal(calls.where, 2);
 });
+
+test("17: forgetSeen: a removed root returns at the next edit, not at the next tool call of any kind", async (t) => {
+  const { store, tracker } = setup(t);
+  await tracker.update("s", REPO, diffUpdate(at(REPO, "a.txt")));
+  const first = store.repo("s", REPO);
+  const call = { sessionUpdate: "tool_call", kind: "execute" };
+  await tracker.update("s", REPO, call); // the session folder is looked at once
+  store.removeRepo("s", REPO);
+  tracker.forgetSeen("s");
+  await tracker.update("s", REPO, call);
+  assert.equal(store.repo("s", REPO), null, "an execute call does not record it again");
+  await tracker.update("s", REPO, diffUpdate(at(REPO, "a.txt")));
+  const again = store.repo("s", REPO);
+  assert.ok(again, "the same edit path records it again");
+  assert.notEqual(again.base, first.base);
+  assert.notEqual(again.at, first.at);
+});

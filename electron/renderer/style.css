@@ -435,7 +435,7 @@ span.img-chip.off { border: 1px dashed var(--border); }
 .dv-line { min-height: 18px; white-space: pre; } /* block with inline cells: a copied line keeps its sign on it */
 .dv-num { display: inline-block; vertical-align: top; width: 6ch; height: 18px; padding: 0 6px; text-align: right; color: var(--muted); background: var(--panel); user-select: none; -webkit-user-select: none; }
 .dv-sign { padding: 0 6px 0 8px; }
-.dv-text { padding: 0 16px 0 0; }
+.dv-text { display: inline-block; padding: 0 16px 0 0; }
 .dv-line.add { color: var(--ok); }
 .dv-line.del { color: var(--err); }
 .dv-line.hunk { color: var(--accent); background: var(--panel-2); }

@@ -248,7 +248,7 @@ function createFilePreview({ api, h, md, onStatus }) {
       r = await api.readFile(v.cwd, filePath, { viewingCwd: v.cwd, confirmed: true });
     } catch (e) {
       if (my !== seq) return;
-      cur = { path: filePath, line: null, result: null };
+      cur = { path: filePath, line: null, result: null, note: readNote(e) };
       showUnavailable(filePath, e.message);
       return watch(filePath); // it may come back
     }
@@ -620,8 +620,8 @@ function createFilePreview({ api, h, md, onStatus }) {
     } catch (e) {
       if (stale()) return;
       cur.result = null;
-      if (mode !== "change") return showUnavailable(changed, e.message);
       cur.note = readNote(e);
+      if (mode !== "change") return showUnavailable(changed, e.message);
       return paintFile();
     }
     if (stale()) return;

@@ -1606,6 +1606,17 @@ export const checks = [
       assert.equal(await app.ev(`${fileBtn}.textContent`), "Hide file");
       rmSync(path.join(work, "notes.txt"));
       await contentShows("This file is deleted.");
+
+      // a file deleted while shown alone, then a version entry and its file: the pane keeps the note
+      writeFileSync(path.join(work, "notes.txt"), "hello\n");
+      await app.ev(`${V}.log.querySelector('.diff-path[data-path="notes.txt"]').click()`);
+      await contentShows("hello");
+      rmSync(path.join(work, "notes.txt"));
+      await app.check(`!${FP}.querySelector(".fp-content").textContent.includes("hello")`, "the file pane to drop notes.txt's text");
+      await app.ev(`${FP}.querySelector(".fp-version").click()`);
+      await app.ev(`${fileBtn}.click()`); // hide, then show again: the pane is painted from cur
+      await app.ev(`${fileBtn}.click()`);
+      await contentShows("This file is deleted.");
     },
   },
 ];
