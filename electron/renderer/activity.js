@@ -189,10 +189,24 @@ function createActivity() {
 
 const MARKS = { running: "●", completed: "✓", failed: "✗", interrupted: "⊘", quiet: "○" };
 
-/** The one-line header of a group: `3 tools · 1 thought · <running tool>`, or `subagent · <title> · N tools · <last line>`. */
-function headerText({ kind, title = "", tools = 0, thoughts = 0, runningTitle = "", lastLine = "", waiting = false }) {
+/** A finished work group's tools by outcome, when the outcomes differ: [["completed", 25], ["failed", 1], ["quiet", 1]]
+ *  (in this order, zero counts left out). null while a tool runs and when all of them ended the same way: the header
+ *  then shows one mark and "N tools". */
+function toolSplit({ tools = 0, running = 0, failed = 0, leftover = 0 }) {
+  if (running) return null;
+  const parts = [["completed", tools - failed - leftover], ["failed", failed], ["quiet", leftover]].filter(([, n]) => n > 0);
+  return parts.length > 1 && tools >= failed + leftover ? parts : null;
+}
+
+/** The one-line header of a group: `3 tools · 1 thought · <running tool>`, or `subagent · <title> · N tools · <last line>`.
+ *  A work group with a split (toolSplit) lists its counts in place of "N tools": `25 · ✗ 1 · 5 thoughts` (the first
+ *  count's mark is the header's own mark). */
+function headerText({ kind, title = "", tools = 0, thoughts = 0, runningTitle = "", lastLine = "", waiting = false, split = null }) {
   const plural = (n, w) => (n ? `${n} ${w}${n === 1 ? "" : "s"}` : "");
-  if (kind === "work") return [plural(tools, "tool"), plural(thoughts, "thought"), waiting ? "⏸ permission" : runningTitle].filter(Boolean).join(" · ");
+  if (kind === "work") {
+    const counts = split ? split.map(([status, n], k) => (k ? `${MARKS[status]} ${n}` : `${n}`)).join(" · ") : plural(tools, "tool");
+    return [counts, plural(thoughts, "thought"), waiting ? "⏸ permission" : runningTitle].filter(Boolean).join(" · ");
+  }
   const tail = waiting ? "⏸ permission" : lastLine;
   return ["subagent", title === "subagent" ? "" : title, plural(tools, "tool"), tail].filter(Boolean).join(" · ");
 }
@@ -203,6 +217,6 @@ function inPanel(mode, kind) {
   return mode === "all" || (mode === "subagents" && kind === "subagent");
 }
 
-const Activity = { create: createActivity, inPanel, headerText, MARKS };
+const Activity = { create: createActivity, inPanel, headerText, toolSplit, MARKS };
 globalThis.Activity = Activity;
 if (typeof module !== "undefined") module.exports = Activity;
