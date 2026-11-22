@@ -1,7 +1,7 @@
 // Full-screen changes browser: the files changed in the session's repositories (main's changes:* records), the
 // versions of the selected file and its git diff; a file link from the chat opens that file alone. This file holds
-// the state; changes-list.js draws the list. Loaded before app.js; app.js calls createFilePreview once. File and diff text reach the DOM only as textContent, as escaped
-// highlight.js output, or through md() (marked + DOMPurify).
+// the state; changes-list.js draws the list. Loaded before app.js; app.js calls createFilePreview once. File and
+// diff text reach the DOM only as textContent, as escaped highlight.js output, or through md() (marked + DOMPurify).
 "use strict";
 
 const LINE_H = 18; // px, must match .fp-code line-height in style.css

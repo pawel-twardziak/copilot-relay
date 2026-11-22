@@ -1470,6 +1470,9 @@ export const checks = [
       await fpSelect(app, "README.md");
       assert.equal((await fpStrip(app))[0]?.label, "Uncommitted", "README.md's first version");
       assert.ok((await fpDiffTypes(app)).includes("del") && (await fpDiffTypes(app)).includes("add"), "README.md's diff has a removed and an added line");
+      // selected as Ctrl+A does: each line's sign stays on that line in the copied text
+      const copied = await app.ev(`(() => { getSelection().selectAllChildren(${FP}.querySelector(".fp-diff .dv")); const t = getSelection().toString(); getSelection().removeAllRanges(); return t; })()`);
+      assert.ok(copied.includes("-# work") && copied.includes("+# changed"), `README.md's copied diff: ${JSON.stringify(copied)}`);
 
       await fpSelect(app, "b.txt");
       const strip = await fpStrip(app);
