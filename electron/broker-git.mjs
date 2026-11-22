@@ -1,6 +1,10 @@
 // Brings the broker's git repository to the latest main, stashing local changes first. Main process only.
 export const GIT_ENV = { GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" };
 
+// Only the stash carries an identity: a machine that just runs the broker may have none, and a stash does not leave
+// its author in the work tree.
+const STASH_IDENTITY = ["-c", "user.name=Copilot Sessions", "-c", "user.email=copilot-sessions@localhost"];
+
 export async function updateRepo({ repo, run, now = () => new Date(), timeoutMs = 60_000 }) {
   const git = async (...args) => (await run("git", args, { cwd: repo, env: GIT_ENV, timeoutMs })).stdout.trim();
 
@@ -10,7 +14,7 @@ export async function updateRepo({ repo, run, now = () => new Date(), timeoutMs 
   try {
     if (await git("status", "--porcelain")) {
       const message = `copilot-sessions restart ${now().toISOString()}`;
-      await git("stash", "push", "--include-untracked", "-m", message);
+      await git(...STASH_IDENTITY, "stash", "push", "--include-untracked", "-m", message);
       stash = { branch, message };
     }
     if (branch !== "main") await git("checkout", "main");

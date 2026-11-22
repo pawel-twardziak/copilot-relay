@@ -1,6 +1,6 @@
 // Tests for bringing the broker repository to the latest main, against real throwaway git repositories.
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
 import { GIT_ENV, describeUpdate, updateRepo } from "../broker-git.mjs";
@@ -9,10 +9,7 @@ import { repoWithRemote } from "./git-helper.mjs";
 
 const now = () => new Date("2026-11-22T12:00:00.000Z");
 const message = "copilot-sessions restart 2026-11-22T12:00:00.000Z";
-// A stash is a commit, so it needs an identity that does not depend on the machine's git config.
-const identity = { GIT_AUTHOR_NAME: "test", GIT_AUTHOR_EMAIL: "test@example.invalid",
-  GIT_COMMITTER_NAME: "test", GIT_COMMITTER_EMAIL: "test@example.invalid" };
-const run = (program, args, opts = {}) => runProgram(program, args, { ...opts, env: { ...opts.env, ...identity } });
+const run = runProgram;
 const update = (repo) => updateRepo({ repo, run, now });
 const dirty = (repo) => {
   writeFileSync(path.join(repo, "README.md"), "edited");
@@ -105,6 +102,21 @@ test("diverged main with a dirty work tree: rejects and reports the stash", asyn
   assert.equal((await r.git("stash", "list")).trim().split("\n").length, 1);
 });
 
+test("the stash works on a machine with no git identity at all", async (t) => {
+  const r = await repoWithRemote(t);
+  await r.upstream("new.txt", "x");
+  dirty(r.repo);
+  const empty = mkdtempSync(path.join(r.tmp, "home-"));
+  const noIdentity = (program, args, opts = {}) => runProgram(program, args, { ...opts, env: { ...opts.env,
+    HOME: empty, USERPROFILE: empty, XDG_CONFIG_HOME: empty, GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: path.join(empty, "none"), EMAIL: "",
+    GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "user.useConfigOnly", GIT_CONFIG_VALUE_0: "true" } });
+  const out = await updateRepo({ repo: r.repo, run: noIdentity, now });
+  assert.deepEqual(out.stash, { branch: "main", message });
+  assert.equal((await r.git("status", "--porcelain")).trim(), "");
+  assert.equal((await r.git("stash", "list")).trim().split("\n").length, 1);
+});
+
 test("a repo folder with spaces and non-ASCII characters", async (t) => {
   const r = await repoWithRemote(t, "re po ż");
   const head = await r.upstream("new.txt", "x");
@@ -123,11 +135,13 @@ test("every git call has the repo as cwd, no prompts and the timeout", async (t)
     return { stdout: "", stderr: "" };
   };
   await updateRepo({ repo: r.repo, run: fake, now });
-  assert.deepEqual(calls.map((c) => c.args.slice(0, 2).join(" ")), [
+  assert.deepEqual(calls.map((c) => c.args.filter((a) => !a.startsWith("user.") && a !== "-c").slice(0, 2).join(" ")), [
     "rev-parse --abbrev-ref", "rev-parse --short", "status --porcelain", "stash push", "checkout main", "pull --ff-only", "rev-parse --short",
   ]);
-  assert.deepEqual(calls[3].args, ["stash", "push", "--include-untracked", "-m", message]);
+  assert.deepEqual(calls[3].args, ["-c", "user.name=Copilot Sessions", "-c", "user.email=copilot-sessions@localhost",
+    "stash", "push", "--include-untracked", "-m", message]);
   assert.deepEqual(calls[5].args, ["pull", "--ff-only", "origin", "main"]);
+  for (const c of calls.filter((_, i) => i !== 3)) assert.ok(!c.args.includes("-c"));
   for (const c of calls) {
     assert.equal(c.program, "git");
     assert.equal(c.opts.cwd, r.repo);
