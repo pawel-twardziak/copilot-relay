@@ -343,6 +343,18 @@ test("directory, binary and network targets are not text", async () => {
     assert.deepEqual(await resolvePreview({ ...base, target: "n.txt", confirmed: true }, { isNetwork: async () => true }), { notText: true });
   });
 });
+test("the changes browser's absolute paths are read as written: %, #, a line-like suffix and non-ASCII", async () => {
+  await withDir(async (dir) => {
+    const names = ["50% off.txt", "notes#1.md", "zażółć gęślą.txt"];
+    if (process.platform !== "win32") names.push("log:12"); // ":" is not allowed in a Windows file name
+    for (const name of names) await writeFile(path.join(dir, name), `text of ${name}`);
+    for (const name of names) {
+      const r = await resolvePreview({ baseCwd: dir, target: path.join(dir, name), viewingCwd: dir, confirmed: true }, { isNetwork: notNetwork });
+      assert.equal(r.text, `text of ${name}`, name);
+      assert.equal(r.path, path.join(dir, name), name);
+    }
+  });
+});
 test("web links are not text", async () => {
   for (const target of ["https://x", "mailto:a@b.c", "ftp://h/f"]) {
     assert.deepEqual(await resolvePreview({ baseCwd: "/", target, viewingCwd: "/" }, { isNetwork: never }), { notText: true });

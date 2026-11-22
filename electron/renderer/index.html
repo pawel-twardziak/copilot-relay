@@ -117,9 +117,14 @@
       <div class="viewer-cap"></div>
     </div>
 
-    <div id="file-preview" hidden tabindex="-1" role="dialog" aria-label="File preview">
+    <div id="file-preview" hidden tabindex="-1" role="dialog" aria-label="Changes">
       <aside class="fp-list">
-        <div class="fp-list-title">Files</div>
+        <div class="fp-list-title">
+          <span>Changes</span>
+          <button data-act="refresh" title="Read the repositories again">⟳</button>
+          <button data-act="add" title="Add a repository">+</button>
+        </div>
+        <div class="fp-loading" hidden>Reading changes…</div>
         <div class="fp-items"></div>
       </aside>
       <section class="fp-main">
@@ -134,7 +139,11 @@
             <button data-act="close" title="Close (Esc)">✕</button>
           </div>
         </header>
-        <div class="fp-content"></div>
+        <div class="fp-versions" hidden></div>
+        <div class="fp-panes">
+          <div class="fp-diff" tabindex="0" hidden></div>
+          <div class="fp-content"></div>
+        </div>
       </section>
       <div class="fp-confirm" hidden>
         <div class="fp-confirm-box">

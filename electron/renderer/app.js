@@ -148,14 +148,17 @@ const md = (text, options) => DOMPurify.sanitize(marked.parse(text ?? ""), { ADD
 // the DOM helpers schedules.js builds its page with (it loads before this file, so it reads them at call time)
 globalThis.AppUi = { h, md, copyBtn };
 
-// The full-screen file preview; one for the whole window, it closes when the active session changes.
+// The full-screen changes browser (file-preview.js); one for the whole window, it closes when the active session changes.
 const filePreview = createFilePreview({
   api,
   h,
   md,
   onStatus: (text) => setStatus(text, true),
-  onChange: (id) => views.get(id)?.updateFilesBtn(),
 });
+// the preview's list of opened files before the changes browser
+try {
+  localStorage.removeItem("copilot-sessions.files.v1");
+} catch {}
 
 // image types and size limit come from the main process, which attaches the images (one source of truth)
 let imageConfigPromise;
@@ -386,7 +389,6 @@ class SessionView {
     this.cmdMatches = [];
     this.cmdIndex = 0;
     this.cmdToken = null;
-    this.filesBtn = h("button", { title: "Files opened from this conversation", hidden: true, onclick: () => filePreview.show(this) });
     // shown while the view has a panel entry: shows or hides the panel (wide layout) or the drawer (narrow)
     this.activityBtn = h("button", { title: "Show or hide the activity panel", hidden: true, onclick: () => this.togglePanel() }, "Activity");
     this.cmdPopup = h("div", { class: "cmd-popup", role: "listbox", hidden: true, onmousedown: (e) => e.preventDefault() });
@@ -405,7 +407,7 @@ class SessionView {
         this.usageChip,
         this.selects,
         this.closeChildrenBtn,
-        this.filesBtn,
+        h("button", { title: "Changes in this session's repositories", onclick: () => filePreview.show(this) }, "Changes"),
         this.activityBtn,
         h("button", { title: "Copy the whole conversation as Markdown", onclick: (e) => this.copyThread(e.currentTarget) }, "Copy thread"),
         h("button", { class: "danger", title: "Close this session in the app (it stays resumable)", onclick: () => closeView(this.sessionId) }, "Close"),
@@ -478,14 +480,7 @@ class SessionView {
     this.bindLinks(this.log);
     this.bindLinks(this.panelBody);
     this.setTitle(title);
-    this.updateFilesBtn();
     $("#main").append(this.el);
-  }
-
-  updateFilesBtn() {
-    const n = filePreview.count(this.sessionId);
-    this.filesBtn.hidden = n === 0;
-    this.filesBtn.textContent = `Files (${n})`;
   }
 
   /** Web links open in the browser; anything else is treated as a file path (relative to the session folder). */

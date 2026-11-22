@@ -1,4 +1,4 @@
-// Pure helpers for clickable file paths in chat text and the per-session recent files list (no DOM).
+// Pure helpers for clickable file paths in chat text and the preview's highlight language (no DOM).
 // Loaded as a classic <script> (sets globalThis.FileLinks) and via require() in tests.
 "use strict";
 
@@ -96,42 +96,6 @@ function parseRelayHeader(text) {
   };
 }
 
-/** Recent files stored as JSON { sessionId: [{ path, line }] }; anything malformed is dropped. */
-function parseRecent(json) {
-  let data;
-  try {
-    data = JSON.parse(json);
-  } catch {
-    return {};
-  }
-  if (!data || typeof data !== "object" || Array.isArray(data)) return {};
-  return Object.fromEntries(
-    Object.entries(data)
-      .filter(([, list]) => Array.isArray(list))
-      .map(([id, list]) => [
-        id,
-        list
-          .filter((e) => e && typeof e.path === "string")
-          .map((e) => ({
-            path: e.path,
-            line: Number.isInteger(e.line) ? e.line : null,
-          })),
-      ]),
-  );
-}
-
-/** The entry on top, any older entry for the same path removed, at most max kept. */
-function recentAdd(list, entry, max = 20) {
-  return [
-    { path: entry.path, line: entry.line ?? null },
-    ...list.filter((e) => e.path !== entry.path),
-  ].slice(0, max);
-}
-
-function recentRemove(list, path) {
-  return list.filter((e) => e.path !== path);
-}
-
 // highlight.js language names
 const LANG_BY_NAME = {
   Makefile: "makefile",
@@ -165,9 +129,6 @@ const FileLinks = {
   pathCandidates,
   splitPathSuffix,
   parseRelayHeader,
-  parseRecent,
-  recentAdd,
-  recentRemove,
   previewLanguage,
   WELL_KNOWN_NAMES,
 };

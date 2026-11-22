@@ -317,6 +317,51 @@ const STOP_MARKS = [
   { kind: "subagent", chat: "⊘" },
 ];
 
+/** The changes checks' repository in the launch's work folder: one commit of README.md, b.txt and a .gitignore that
+ *  hides the scripted agent's file. git runs only there, isolated and with a test identity. */
+async function changesRepo(app) {
+  const work = path.join(app.dir, "work");
+  writeFileSync(path.join(work, "README.md"), "# work\n");
+  writeFileSync(path.join(work, "b.txt"), "b\n");
+  writeFileSync(path.join(work, ".gitignore"), ".scripted-agent.json\n");
+  await gitIn(work, ["init", "-q", "-b", "main"]);
+  await gitIn(work, ["add", "README.md", "b.txt", ".gitignore"]);
+  await gitIn(work, ["commit", "-q", "-m", "first"]);
+  return work;
+}
+
+/** A new session's turn of changes-scenario.mjs, then notes.txt as its edit wrote it, recorded as touched. */
+async function notesWritten(app, work) {
+  const id = await app.newSession();
+  await app.send("Write the notes.");
+  await app.idle();
+  // written after the turn: it did not exist at the start point
+  writeFileSync(path.join(work, "notes.txt"), "hello\n");
+  await app.check(`api.changesList(${JSON.stringify(id)}).then((l) => l.repos[0]?.files.some((f) => f.path === "notes.txt" && f.touched))`, "the edit to be recorded");
+  return id;
+}
+
+const FP = `document.querySelector("#file-preview")`;
+/** The changes browser's list: per group its name and rows (state letter, marks, path, selected). */
+const fpGroups = (app) => app.ev(`[...${FP}.querySelectorAll(".fp-group")].map((g) => ({
+  name: g.querySelector(".fp-group-name").textContent,
+  rows: [...g.querySelectorAll(".fp-row")].map((r) => ({
+    state: r.querySelector(".fp-state").textContent,
+    flags: [...r.querySelectorAll(".fp-flag")].map((f) => f.textContent).join(""),
+    path: r.querySelector(".fp-row-path").textContent,
+    active: r.classList.contains("active"),
+  })),
+}))`);
+const fpRow = (rel) => `[...${FP}.querySelectorAll(".fp-row")].find((r) => r.querySelector(".fp-row-path").textContent === ${JSON.stringify(rel)})`;
+const fpStrip = (app) => app.ev(`[...${FP}.querySelectorAll(".fp-versions:not([hidden]) .fp-version")].map((b) => ({ label: b.textContent, active: b.classList.contains("active") }))`);
+const fpDiffTypes = (app) => app.ev(`[...${FP}.querySelectorAll(".fp-diff .dv-line")].map((l) => l.className.replace("dv-line ", ""))`);
+const fpListed = (app) => app.check(`!${FP}.hidden && ${FP}.querySelector(".fp-loading").hidden && ${FP}.querySelectorAll(".fp-row").length > 0`, "the list of changes");
+/** Clicks the row of rel and waits for its diff (or a message) in the diff pane. */
+async function fpSelect(app, rel) {
+  await app.ev(`${fpRow(rel)}.click()`);
+  await app.check(`${fpRow(rel)}.classList.contains("active") && !!${FP}.querySelector(".fp-diff .dv, .fp-diff .fp-msg")`, `the diff of ${rel}`);
+}
+
 export const checks = [
   {
     name: "baseline-live",
@@ -1371,19 +1416,9 @@ export const checks = [
     modes: ["off"],
     scenario: CHANGES_SCENARIO,
     async run(app) {
-      const work = path.join(app.dir, "work");
-      writeFileSync(path.join(work, "README.md"), "# work\n");
-      writeFileSync(path.join(work, ".gitignore"), ".scripted-agent.json\n");
-      await gitIn(work, ["init", "-q", "-b", "main"]);
-      await gitIn(work, ["add", "README.md", ".gitignore"]);
-      await gitIn(work, ["commit", "-q", "-m", "first"]);
-      const id = await app.newSession();
+      const work = await changesRepo(app);
+      const id = await notesWritten(app, work);
       const list = `api.changesList(${JSON.stringify(id)})`;
-      await app.send("Write the notes.");
-      await app.idle();
-      // written after the turn: it did not exist at the start point
-      writeFileSync(path.join(work, "notes.txt"), "hello\n");
-      await app.check(`${list}.then((l) => l.repos[0]?.files.some((f) => f.path === "notes.txt" && f.touched))`, "the edit to be recorded");
       const live = await app.ev(list);
       assert.equal(live.repos.length, 1, "one repository");
       const [repo] = live.repos;
@@ -1391,13 +1426,79 @@ export const checks = [
       assert.equal(repo.source, "auto");
       assert.equal(repo.error, null);
       assert.deepStrictEqual(repo.files, [{ path: "notes.txt", state: "?", uncommitted: true, committed: false, touched: true, dirtyAtStart: false }]);
+      // removed while the session runs: the agent's next edit there records it again, with a later start point
+      await app.ev(`api.changesRemove(${JSON.stringify(id)}, ${JSON.stringify(repo.root)})`);
+      await app.send("Write the notes again.");
+      await app.idle();
+      await app.check(`${list}.then((l) => l.repos[0]?.files.some((f) => f.path === "notes.txt" && f.touched))`, "the repository to come back");
+      const back = (await app.ev(list)).repos;
+      assert.equal(back.length, 1, "one repository after the second edit");
+      assert.ok(back[0].at > repo.at, `a later start point: ${back[0].at} after ${repo.at}`);
       await app.reload();
       const replayed = await app.ev(list);
       assert.equal(replayed.repos.length, 1, "one repository after the replay");
-      assert.equal(replayed.repos[0].at, repo.at, "the start point's time after the replay");
+      assert.equal(replayed.repos[0].at, back[0].at, "the start point's time after the replay");
       await app.ev(`api.changesRemove(${JSON.stringify(id)}, ${JSON.stringify(repo.root)})`);
       await app.reload();
       assert.deepStrictEqual((await app.ev(list)).repos, [], "a removed repository after another replay");
+    },
+  },
+  {
+    // the Changes button opens the browser on the session's repository: rows with their marks, a file's versions and
+    // its git diff; a file link in the chat opens that file alone with its row selected; ⟳ keeps the selection.
+    name: "changes-browser",
+    modes: ["off"],
+    scenario: CHANGES_SCENARIO,
+    async run(app) {
+      const work = await changesRepo(app);
+      await notesWritten(app, work);
+      writeFileSync(path.join(work, "README.md"), "# changed\n"); // stays uncommitted
+      writeFileSync(path.join(work, "b.txt"), "b\nc\n");
+      await gitIn(work, ["add", "b.txt"]);
+      await gitIn(work, ["commit", "-q", "-m", "second"]);
+
+      await app.ev(`[...${V}.el.querySelectorAll(".head button")].find((b) => b.textContent === "Changes").click()`);
+      await fpListed(app);
+      const groups = await fpGroups(app);
+      assert.deepStrictEqual(groups.map((g) => g.name), ["work"], "one group named after the session folder");
+      assert.deepStrictEqual(groups[0].rows.map(({ state, flags, path: p }) => ({ state, flags, path: p })), [
+        { state: "M", flags: "", path: "README.md" },
+        { state: "M", flags: "✓", path: "b.txt" },
+        { state: "?", flags: "●", path: "notes.txt" },
+      ]);
+
+      await fpSelect(app, "README.md");
+      assert.equal((await fpStrip(app))[0]?.label, "Uncommitted", "README.md's first version");
+      assert.ok((await fpDiffTypes(app)).includes("del") && (await fpDiffTypes(app)).includes("add"), "README.md's diff has a removed and an added line");
+
+      await fpSelect(app, "b.txt");
+      const strip = await fpStrip(app);
+      assert.equal(strip.length, 1, "b.txt has one version");
+      assert.match(strip[0].label, /^[0-9a-f]{7} second$/, "b.txt's commit");
+      assert.ok((await fpDiffTypes(app)).includes("add"), "b.txt's diff has an added line");
+
+      await fpSelect(app, "notes.txt");
+      const types = await fpDiffTypes(app);
+      assert.ok(types.length > 0 && types.every((t) => t === "add"), `notes.txt is all added: ${types}`);
+
+      await app.ev(`document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))`);
+      await app.check(`${FP}.hidden`, "the browser to close");
+      await app.ev(`${V}.log.querySelector('.diff-path[data-path="notes.txt"]').click()`);
+      await app.check(`!${FP}.hidden && ${FP}.querySelector(".fp-content").textContent.includes("hello")`, "notes.txt alone");
+      await fpListed(app);
+      await app.check(`${fpRow("notes.txt")}.classList.contains("active")`, "notes.txt's row selected");
+      assert.equal(await app.ev(`${FP}.querySelector(".fp-diff").hidden`), true, "no diff pane for a file link");
+      assert.equal(await app.ev(`${FP}.querySelector(".fp-content").hidden`), false, "the file's content");
+
+      await fpSelect(app, "b.txt");
+      await gitIn(work, ["add", "-A"]);
+      await gitIn(work, ["commit", "-q", "-m", "third"]);
+      const loader = await app.ev(`(() => { ${FP}.querySelector('[data-act="refresh"]').click(); return !${FP}.querySelector(".fp-loading").hidden; })()`);
+      assert.equal(loader, true, "the loader while the list is read");
+      await fpListed(app);
+      const after = (await fpGroups(app))[0].rows;
+      assert.equal(after.find((r) => r.path === "README.md").flags, "✓", "README.md committed");
+      assert.deepStrictEqual(after.filter((r) => r.active).map((r) => r.path), ["b.txt"], "the selection after ⟳");
     },
   },
 ];

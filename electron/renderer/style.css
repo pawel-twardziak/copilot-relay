@@ -388,19 +388,54 @@ span.img-chip.off { border: 1px dashed var(--border); }
 .viewer-bar .viewer-zoom { min-width: 64px; font-variant-numeric: tabular-nums; }
 .viewer-cap { position: absolute; left: 14px; bottom: 10px; color: var(--muted); font-size: 12px; pointer-events: none; }
 
-/* file preview */
+/* file preview: the changes browser */
 #file-preview { position: fixed; inset: 0; z-index: 1000; display: flex; background: var(--bg); outline: none; }
 #file-preview[hidden] { display: none; }
-.fp-list { width: 240px; flex: none; display: flex; flex-direction: column; background: var(--panel); border-right: 1px solid var(--border); min-height: 0; }
-.fp-list-title { padding: 10px 12px; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+.fp-list { width: 280px; flex: none; display: flex; flex-direction: column; background: var(--panel); border-right: 1px solid var(--border); min-height: 0; }
+.fp-list-title { display: flex; align-items: center; gap: 4px; padding: 6px 8px 6px 12px; color: var(--muted); font-size: 12px; letter-spacing: .04em; }
+.fp-list-title span { flex: 1; text-transform: uppercase; }
+.fp-list-title button, .fp-group-head button { padding: 0 6px; border: none; background: none; color: var(--muted); }
+.fp-list-title button:hover, .fp-group-head button:hover { color: var(--text); }
+.fp-loading { padding: 4px 12px; color: var(--muted); font-size: 12px; }
+.fp-loading[hidden] { display: none; }
 .fp-items { overflow-y: auto; flex: 1; }
-.fp-item { display: flex; align-items: center; gap: 6px; padding: 6px 8px 6px 12px; cursor: pointer; border-left: 2px solid transparent; }
-.fp-item:hover { background: var(--panel-2); }
-.fp-item.active { background: var(--panel-2); border-left-color: var(--accent); }
-.fp-item.gone .fp-item-name { color: var(--muted); text-decoration: line-through; }
-.fp-item-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.fp-item button { padding: 0 6px; border: none; background: none; color: var(--muted); }
-.fp-item button:hover { color: var(--text); }
+.fp-empty { padding: 12px; color: var(--muted); }
+.fp-empty p { margin: 0 0 10px; }
+.fp-group-head { display: flex; align-items: center; gap: 6px; padding: 5px 8px; cursor: pointer; font-weight: 600; }
+.fp-group-head:hover { background: var(--panel-2); }
+.fp-fold { flex: none; width: 1em; color: var(--muted); }
+.fp-group-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fp-note { padding: 2px 12px 6px 28px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.fp-note.err { color: var(--err); }
+.fp-row { display: flex; align-items: center; gap: 6px; padding: 3px 8px 3px 26px; cursor: pointer; border-left: 2px solid transparent; white-space: nowrap; }
+.fp-row:hover { background: var(--panel-2); }
+.fp-row.active { background: var(--panel-2); border-left-color: var(--accent); }
+.fp-state { flex: none; width: 1.2ch; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted); }
+.fp-flags { flex: none; display: flex; min-width: 1.2em; color: var(--muted); font-size: 11px; }
+.fp-flag { width: 1.2em; text-align: center; }
+.fp-row-path { flex: 1; min-width: 0; display: flex; }
+/* the folder part shrinks first and is cut at its start (rtl box, the text itself kept left to right) */
+.fp-dir { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; direction: rtl; color: var(--muted); }
+.fp-dir > span { direction: ltr; unicode-bidi: bidi-override; }
+.fp-file { flex: 0 0 auto; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.fp-versions { display: flex; gap: 6px; padding: 6px 12px; overflow-x: auto; border-bottom: 1px solid var(--border); background: var(--panel); }
+.fp-versions[hidden] { display: none; }
+.fp-version { flex: none; max-width: 360px; padding: 2px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fp-version.active { border-color: var(--accent); color: var(--text); background: var(--user); }
+.fp-panes { flex: 1; min-height: 0; display: flex; }
+.fp-panes > * { flex: 1; min-width: 0; }
+.fp-diff { overflow: auto; outline: none; }
+.fp-diff[hidden], .fp-content[hidden] { display: none; }
+/* the rendered diff (diff-view.js); not under .diff, whose .add/.del rules colour chat diffs */
+.dv { min-width: max-content; font: 12.5px/18px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; user-select: text; }
+.dv-line { display: flex; min-height: 18px; white-space: pre; }
+.dv-num { flex: none; width: 6ch; padding: 0 6px; text-align: right; color: var(--muted); background: var(--panel); user-select: none; -webkit-user-select: none; }
+.dv-text { padding: 0 16px 0 8px; }
+.dv-line.add { color: var(--ok); }
+.dv-line.del { color: var(--err); }
+.dv-line.hunk { color: var(--accent); background: var(--panel-2); }
+.dv-line.note { color: var(--muted); font-style: italic; }
+.dv-line.add .dv-num, .dv-line.del .dv-num, .dv-line.hunk .dv-num { color: var(--muted); }
 .fp-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .fp-head { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--panel); }
 .fp-title { flex: 1; min-width: 0; }
