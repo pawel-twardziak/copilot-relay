@@ -70,3 +70,23 @@ test("locate: inner root wins, outside is null, win32 is case and slash insensit
   const win = { repos: [repo("c:/repo", [])], loose: [] };
   assert.deepEqual(ChangesModel.locate(win, "C:\\Repo\\a\\b.txt", "win32"), { root: "c:/repo", rel: "a/b.txt" });
 });
+
+test("clampRatio: a finite number clamped to 0.2–0.8, anything else 0.5", () => {
+  assert.equal(ChangesModel.clampRatio(0.1), 0.2);
+  assert.equal(ChangesModel.clampRatio(0.95), 0.8);
+  assert.equal(ChangesModel.clampRatio(0.3), 0.3);
+  assert.equal(ChangesModel.clampRatio(NaN), 0.5);
+  assert.equal(ChangesModel.clampRatio(Infinity), 0.5);
+  assert.equal(ChangesModel.clampRatio("x"), 0.5);
+  assert.equal(ChangesModel.clampRatio("0.3"), 0.5);
+});
+
+test("parsePrefs: the stored split, defaults for missing or broken text", () => {
+  const defaults = { showFile: false, ratio: 0.5 };
+  assert.deepEqual(ChangesModel.parsePrefs(null), defaults);
+  assert.deepEqual(ChangesModel.parsePrefs("{"), defaults);
+  assert.deepEqual(ChangesModel.parsePrefs("null"), defaults);
+  assert.deepEqual(ChangesModel.parsePrefs("[1]"), defaults);
+  assert.deepEqual(ChangesModel.parsePrefs('{"showFile":true,"ratio":0.3}'), { showFile: true, ratio: 0.3 });
+  assert.deepEqual(ChangesModel.parsePrefs('{"showFile":"yes","ratio":2}'), { showFile: false, ratio: 0.8 });
+});

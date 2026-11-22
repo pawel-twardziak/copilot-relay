@@ -1,4 +1,5 @@
-// Pure list model of the changes browser: keys, selection, versions of a file, path location and joining (no DOM).
+// Pure list model of the changes browser: keys, selection, versions of a file, path location and joining, the
+// split's stored preferences (no DOM).
 // Loaded as a classic <script> (sets globalThis.ChangesModel) and via require() in tests.
 "use strict";
 (function () {
@@ -63,7 +64,20 @@ function abs(root, rel, platform) {
   return platform === "win32" ? p.replace(/\//g, "\\") : p;
 }
 
-const ChangesModel = { key, pick, versions, splitName, locate, abs };
+/** The diff pane's share of the split: a finite number clamped to 0.2–0.8, anything else 0.5. */
+const clampRatio = (value) => (typeof value === "number" && Number.isFinite(value) ? Math.min(0.8, Math.max(0.2, value)) : 0.5);
+
+/** The stored split (localStorage text): { showFile, ratio }, the defaults for missing or broken text. */
+function parsePrefs(text) {
+  let raw = null;
+  try {
+    raw = JSON.parse(text ?? "null");
+  } catch {}
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) raw = {};
+  return { showFile: raw.showFile === true, ratio: clampRatio(raw.ratio) };
+}
+
+const ChangesModel = { key, pick, versions, splitName, locate, abs, clampRatio, parsePrefs };
 globalThis.ChangesModel = ChangesModel;
 if (typeof module !== "undefined") module.exports = ChangesModel;
 })();

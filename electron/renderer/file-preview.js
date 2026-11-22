@@ -1,13 +1,15 @@
 // Full-screen changes browser: the files changed in the session's repositories (main's changes:* records), the
 // versions of the selected file and its git diff; a file link from the chat opens that file alone. This file holds
-// the state; changes-list.js draws the list. Loaded before app.js; app.js calls createFilePreview once. File and
-// diff text reach the DOM only as textContent, as escaped highlight.js output, or through md() (marked + DOMPurify).
+// the state; changes-list.js draws the list. Show file puts the file on disk beside the diff; the file on show is
+// watched. Loaded before app.js; app.js calls createFilePreview once. File and diff text reach the DOM only as
+// textContent, as escaped highlight.js output, or through md() (marked + DOMPurify).
 "use strict";
 
 const LINE_H = 18; // px, must match .fp-code line-height in style.css
 const OVERSCAN = 40; // extra lines rendered above and below the viewport in the windowed view
 // ChangesModel.locate compares paths as the main process's platform does (the renderer has no process.platform)
 const PLATFORM = /^win/i.test(navigator.platform) ? "win32" : "other";
+const PREFS_KEY = "copilot-sessions.changes.v1"; // { showFile, ratio } of the split, for all sessions
 
 function createFilePreview({ api, h, md, onStatus }) {
   const el = document.querySelector("#file-preview");
@@ -16,9 +18,12 @@ function createFilePreview({ api, h, md, onStatus }) {
   const nameEl = el.querySelector(".fp-name");
   const pathEl = el.querySelector(".fp-path");
   const stripEl = el.querySelector(".fp-versions");
+  const panesEl = el.querySelector(".fp-panes");
   const diffEl = el.querySelector(".fp-diff");
+  const splitEl = el.querySelector(".fp-split");
   const content = el.querySelector(".fp-content");
   const mdBtn = el.querySelector('[data-act="md"]');
+  const fileBtn = el.querySelector('[data-act="file"]');
   const confirmEl = el.querySelector(".fp-confirm");
   const errEl = h("div", { class: "fp-error", hidden: true });
   el.querySelector(".fp-head").after(errEl);
@@ -30,18 +35,24 @@ function createFilePreview({ api, h, md, onStatus }) {
   let selKey = null; // ChangesModel.key of the selected row; find(selKey) gives its file
   let versions = []; // the strip of the selected row
   let version = null; // the strip entry on show in the diff pane
-  let mode = null; // "change": the diff pane shows; "file": the content pane shows; null: nothing on show
+  // "change": the diff pane shows, with Show file the content pane too; "file": the content pane shows; null: nothing
+  let mode = null;
   const collapsed = new Set(); // `${sessionId}\n${root}` of the folded groups
-  let cur = null; // { path, line, result } of the file on show in the content pane
+  let cur = null; // { path, line, result, note } of the file on show; in "change" mode the selected row's file
   let mdSource = false;
   let pending = null; // { view, href, base } waiting for the user's answer to the confirmation
   let confirmOnly = false; // the overlay was opened by a link's confirmation, not by the browser
   let fullText = null; // text of the windowed (plain tier) file on show, for Select all + copy
   let allSelected = false;
   let seq = 0; // a newer read or selection, a close or another session makes older content answers stale
+  let diffSeq = 0; // a newer diff request (another version, a refresh) makes older diff answers stale
   let stripSeq = 0; // a newer selection (also one that only builds the strip), a close or another session makes older commit lists stale
   let listSeq = 0; // a newer list request, a close or another session makes an older list stale
   let refreshSeq = 0; // a newer refresh makes older refreshes stale
+  let prefs = { showFile: false, ratio: 0.5 };
+  try {
+    prefs = ChangesModel.parsePrefs(localStorage.getItem(PREFS_KEY));
+  } catch {}
 
   const dirOf = (p) => p.slice(0, Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\")) + 1) || p;
   const baseName = (p) => p.split(/[/\\]/).pop() || p;
@@ -59,22 +70,40 @@ function createFilePreview({ api, h, md, onStatus }) {
   };
   const message = (text) => content.replaceChildren(h("div", { class: "fp-msg" }, text));
   const diffMessage = (text) => diffEl.replaceChildren(h("div", { class: "fp-msg" }, text));
+  const isMd = (r) => /\.(md|markdown)$/i.test(r?.name ?? "") && r.tier === "highlight";
+  /** The Markdown toggle: shown for a Markdown file in the content pane while that pane shows. */
+  const syncMd = () => {
+    mdBtn.hidden = content.hidden || !isMd(cur?.result);
+    mdBtn.textContent = mdSource ? "Show rendered" : "Show source";
+  };
   const setHeader = (name, path) => {
     nameEl.textContent = name;
     pathEl.textContent = path;
-    mdBtn.hidden = true;
+    syncMd();
   };
+  /** Which panes show; leaving both modes drops the file on show. */
   function setMode(m) {
     mode = m;
-    content.hidden = m !== "file";
+    const split = m === "change" && prefs.showFile;
+    content.hidden = m !== "file" && !split;
     diffEl.hidden = m !== "change";
-    if (m !== "file") {
+    splitEl.hidden = !split;
+    diffEl.style.flex = split ? `0 0 ${prefs.ratio * 100}%` : "";
+    fileBtn.hidden = m !== "change";
+    fileBtn.textContent = prefs.showFile ? "Hide file" : "Show file";
+    if (m == null) {
       cur = null;
       fullText = null;
       content.replaceChildren();
       watch(null);
     }
+    syncMd();
   }
+  const savePrefs = () => {
+    try {
+      localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+    } catch {}
+  };
 
   // --- one file's content -------------------------------------------------------------------------------
 
@@ -181,21 +210,18 @@ function createFilePreview({ api, h, md, onStatus }) {
     };
     errEl.hidden = true;
     fullText = result.tier === "plain" ? result.text : null;
-    const isMd = /\.(md|markdown)$/i.test(result.name) && result.tier === "highlight";
-    mdBtn.hidden = !isMd;
     nameEl.textContent = result.name;
     pathEl.textContent = result.path;
+    syncMd();
     if (result.tier === "too-large") {
       return message(`${result.name} is ${sizeText(result.size)}, too large to preview (the limit is 20 MB). Use "Open in system app".`);
     }
-    if (isMd && !mdSource) {
-      mdBtn.textContent = "Show source";
+    if (isMd(result) && !mdSource) {
       const box = markdownView(result.text);
       content.replaceChildren(box);
       if (top != null) box.scrollTop = top;
       return refocus();
     }
-    mdBtn.textContent = "Show rendered";
     const language = result.tier === "highlight" ? FileLinks.previewLanguage(result.name) : null;
     const { scroll, reveal } = codeView(result.text, language, line, result.tier === "plain");
     content.replaceChildren(scroll);
@@ -235,6 +261,87 @@ function createFilePreview({ api, h, md, onStatus }) {
       renderFile(r, null);
     }
   }
+
+  const notText = (r) => r.notText || r.outside || r.tier === "binary";
+
+  /** "change" mode: what the content pane shows of cur, when it shows. */
+  function paintFile(keepScroll = false) {
+    if (mode !== "change" || content.hidden || !cur) return;
+    if (cur.result) return renderFile(cur.result, cur.line, keepScroll);
+    fullText = null;
+    if (cur.note) message(cur.note);
+    else content.replaceChildren(); // still reading
+  }
+
+  /** The note for a listed file that cannot be read, from the read's error. */
+  const readNote = (e) => (/^File not found/.test(e.message) ? "This file is deleted." : e.message);
+
+  /** "change" mode: read the selected row's file, also while its pane is hidden: main watches only a path it has read. */
+  async function loadPaneFile(my, root, rel) {
+    const v = view;
+    const abs = absPath(root, rel);
+    cur = { path: abs, line: null, result: null, note: null };
+    mdSource = false;
+    fullText = null;
+    content.replaceChildren();
+    watch(null);
+    syncMd();
+    let r;
+    try {
+      r = await api.readFile(root, abs, { viewingCwd: v.cwd, confirmed: true });
+    } catch (e) {
+      if (my !== seq) return;
+      cur.note = readNote(e);
+      return paintFile();
+    }
+    if (my !== seq) return;
+    const ok = !notText(r);
+    cur = { path: r.path ?? abs, line: null, result: ok ? r : null, note: ok ? null : "This file is not a text file." };
+    watch(cur.path);
+    paintFile();
+  }
+
+  // --- the split ----------------------------------------------------------------------------------------
+
+  /** Show file / Hide file: the content pane beside the diff; the choice is kept for all sessions. */
+  function toggleFile() {
+    prefs.showFile = !prefs.showFile;
+    savePrefs();
+    setMode("change");
+    if (prefs.showFile) paintFile();
+    else {
+      fullText = null;
+      content.replaceChildren();
+    }
+  }
+
+  /** The divider drags with pointer capture, as dragPanel in app.js; the ratio is saved when it is let go. */
+  function dragSplit(e) {
+    if (e.button !== 0) return;
+    e.preventDefault(); // no text selection while dragging
+    try {
+      splitEl.setPointerCapture(e.pointerId); // the moves still arrive outside the window
+    } catch {}
+    const startX = e.clientX;
+    const start = diffEl.getBoundingClientRect().width;
+    const total = panesEl.getBoundingClientRect().width;
+    const move = (m) => {
+      prefs.ratio = ChangesModel.clampRatio((start + m.clientX - startX) / total);
+      diffEl.style.flex = `0 0 ${prefs.ratio * 100}%`;
+    };
+    const end = () => {
+      removeEventListener("pointermove", move);
+      removeEventListener("pointerup", end);
+      removeEventListener("pointercancel", end);
+      el.classList.remove("fp-resizing");
+      savePrefs();
+    };
+    addEventListener("pointermove", move);
+    addEventListener("pointerup", end);
+    addEventListener("pointercancel", end);
+    el.classList.add("fp-resizing");
+  }
+  splitEl.addEventListener("pointerdown", dragSplit);
 
   // --- the list -----------------------------------------------------------------------------------------
 
@@ -339,6 +446,7 @@ function createFilePreview({ api, h, md, onStatus }) {
       errEl.hidden = true;
       setHeader(ChangesModel.splitName(rel).name, absPath(root, rel));
       diffEl.replaceChildren();
+      loadPaneFile(my, root, rel);
     }
     let commits;
     try {
@@ -367,45 +475,57 @@ function createFilePreview({ api, h, md, onStatus }) {
 
   // --- diff ---------------------------------------------------------------------------------------------
 
-  /** Show the diff of the selected row's version `id` (switches to the diff pane). */
-  async function loadDiff(id) {
+  /** Show the diff of the selected row's version `id` (switches to the diff pane; the file pane keeps its file).
+   *  `keep` (the file changed on disk): the diff is replaced in place, at the same scroll position. */
+  async function loadDiff(id, keep = false) {
     const sel = find(selKey);
     if (sel?.root == null) return; // only a repository's file has versions
-    const my = ++seq;
+    const my = seq;
+    const mine = ++diffSeq;
+    const stale = () => my !== seq || mine !== diffSeq;
     const { root, rel, file } = sel;
     const v = view;
-    version = id;
-    renderStrip();
-    setMode("change");
-    errEl.hidden = true;
-    setHeader(ChangesModel.splitName(rel).name, absPath(root, rel));
-    diffEl.replaceChildren();
+    if (!keep) {
+      version = id;
+      renderStrip();
+      setMode("change");
+      errEl.hidden = true;
+      setHeader(ChangesModel.splitName(rel).name, absPath(root, rel));
+      diffEl.replaceChildren();
+    }
+    const { scrollTop, scrollLeft } = diffEl;
+    const show = (node) => {
+      diffEl.replaceChildren(node);
+      diffEl.scrollTop = scrollTop;
+      diffEl.scrollLeft = scrollLeft;
+    };
+    const say = (text) => show(h("div", { class: "fp-msg" }, text));
     try {
       // an untracked file has no diff: its content is the addition
       const r = id === "uncommitted" && file.state === "?" ? { added: true } : await api.changesDiff(v.sessionId, root, rel, id);
-      if (my !== seq) return;
-      if (r.tooLarge) return diffMessage("This diff is larger than 2 MB. Use Show file.");
-      if (r.added) return await showAdded(my, v, root, rel);
+      if (stale()) return;
+      if (r.tooLarge) return say("This diff is larger than 2 MB. Use Show file.");
+      if (r.added) return await showAdded(stale, v, root, rel, show, say);
       const parsed = DiffView.parse(r.text);
-      if (parsed.binary) diffMessage("Binary file.");
-      else if (!parsed.lines.length) diffMessage("No changes."); // a mode change, a pure rename, a submodule
-      else diffEl.replaceChildren(DiffView.render(parsed, h));
+      if (parsed.binary) say("Binary file.");
+      else if (!parsed.lines.length) say("No changes."); // a mode change, a pure rename, a submodule
+      else show(DiffView.render(parsed, h));
     } catch (e) {
-      if (my === seq) diffMessage(e.message);
+      if (!stale()) say(e.message);
     }
   }
 
   /** A new file's diff: its whole content as added lines. */
-  async function showAdded(my, v, root, rel) {
+  async function showAdded(stale, v, root, rel, show, say) {
     const abs = absPath(root, rel);
     const r = await api.readFile(root, abs, { viewingCwd: v.cwd, confirmed: true });
-    if (my !== seq) return;
-    if (r.notText || r.tier === "binary") diffMessage("Binary file.");
-    else if (r.tier === "too-large") diffMessage(`${r.name} is ${sizeText(r.size)}, too large to preview (the limit is 20 MB). Use "Open in system app".`);
+    if (stale()) return;
+    if (r.notText || r.tier === "binary") say("Binary file.");
+    else if (r.tier === "too-large") say(`${r.name} is ${sizeText(r.size)}, too large to preview (the limit is 20 MB). Use "Open in system app".`);
     else {
       const parsed = DiffView.added(r.text);
-      if (parsed.lines.length) diffEl.replaceChildren(DiffView.render(parsed, h));
-      else diffMessage("Empty file.");
+      if (parsed.lines.length) show(DiffView.render(parsed, h));
+      else say("Empty file.");
     }
   }
 
@@ -485,23 +605,31 @@ function createFilePreview({ api, h, md, onStatus }) {
     return true;
   }
 
-  /** The watched file changed: read it again and show it in place. The list, the mark and the scroll stay as they are. */
+  /** The watched file changed: read it again and show it in place, and in "change" mode with Uncommitted on show its
+   *  diff too. The list, the mark and the scroll positions stay as they are. */
   async function refresh(changed) {
-    if (el.hidden || !view || mode !== "file" || cur?.path !== changed) return;
+    if (el.hidden || !view || !mode || cur?.path !== changed) return;
+    if (mode === "change" && version === "uncommitted") loadDiff(version, true);
     const my = seq;
     const mine = ++refreshSeq;
     const v = view;
+    const stale = () => my !== seq || mine !== refreshSeq || cur?.path !== changed; // the user has moved on
     let r;
     try {
       r = await api.readFile(v.cwd, changed, { viewingCwd: v.cwd, confirmed: true });
     } catch (e) {
-      if (my !== seq || mine !== refreshSeq || cur?.path !== changed) return;
+      if (stale()) return;
       cur.result = null;
-      return showUnavailable(changed, e.message);
+      if (mode !== "change") return showUnavailable(changed, e.message);
+      cur.note = readNote(e);
+      return paintFile();
     }
-    if (my !== seq || mine !== refreshSeq || cur?.path !== changed) return; // the user has moved on
-    cur.result = r;
-    if (r.notText || r.outside || r.tier === "binary") showUnavailable(changed, "This file is no longer a text file.");
+    if (stale()) return;
+    cur.result = notText(r) ? null : r;
+    if (mode === "change") {
+      cur.note = cur.result ? null : "This file is no longer a text file.";
+      paintFile(true);
+    } else if (!cur.result) showUnavailable(changed, "This file is no longer a text file.");
     else renderFile(r, cur.line, true);
   }
   api.onFileChanged(refresh);
@@ -537,10 +665,11 @@ function createFilePreview({ api, h, md, onStatus }) {
       const sel = find(selKey);
       const target = mode === "file" ? cur?.path : sel?.root != null ? absPath(sel.root, sel.rel) : null;
       if (target) api.openLink(view.cwd, target).catch((err) => fail(err.message));
-    } else if (act === "md" && mode === "file" && cur?.result) {
+    } else if (act === "md" && !content.hidden && cur?.result) {
       mdSource = !mdSource;
       renderFile(cur.result, cur.line);
-    } else if (act === "allow" && pending) {
+    } else if (act === "file" && mode === "change") toggleFile();
+    else if (act === "allow" && pending) {
       const p = pending;
       pending = null;
       confirmEl.hidden = true;
@@ -564,11 +693,12 @@ function createFilePreview({ api, h, md, onStatus }) {
       if ((e.ctrlKey || e.metaKey) && ZOOM_KEY.test(e.key)) return; // the app's zoom guard swallows these
       e.stopImmediatePropagation();
       if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "a") {
-        e.preventDefault(); // select the pane on show, not the whole window
-        const node = mode === "change" ? diffEl.querySelector(".dv") : content.querySelector(".fp-text, .fp-md");
+        e.preventDefault(); // select the pane that has the focus (else the diff), not the whole window
+        const inFile = !content.hidden && (mode === "file" || content.contains(document.activeElement));
+        const node = inFile ? content.querySelector(".fp-text, .fp-md") : diffEl.querySelector(".dv");
         if (node) {
           getSelection().selectAllChildren(node);
-          allSelected = mode === "file";
+          allSelected = inFile;
         }
         return;
       }

@@ -425,7 +425,11 @@ span.img-chip.off { border: 1px dashed var(--border); }
 .fp-panes { flex: 1; min-height: 0; display: flex; }
 .fp-panes > * { flex: 1; min-width: 0; }
 .fp-diff { overflow: auto; outline: none; }
-.fp-diff[hidden], .fp-content[hidden] { display: none; }
+.fp-diff[hidden], .fp-content[hidden], .fp-split[hidden] { display: none; }
+.fp-panes > .fp-split { flex: none; width: 1px; background: var(--border); position: relative; cursor: col-resize; }
+.fp-split::before { content: ""; position: absolute; top: 0; bottom: 0; left: -3px; right: -3px; z-index: 1; } /* what you grab */
+.fp-split:hover, #file-preview.fp-resizing .fp-split { background: var(--accent); }
+#file-preview.fp-resizing { cursor: col-resize; user-select: none; }
 /* the rendered diff (diff-view.js); not under .diff, whose .add/.del rules colour chat diffs */
 .dv { min-width: max-content; font: 12.5px/18px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; user-select: text; }
 .dv-line { min-height: 18px; white-space: pre; } /* block with inline cells: a copied line keeps its sign on it */
