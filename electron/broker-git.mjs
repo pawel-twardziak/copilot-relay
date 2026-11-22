@@ -6,14 +6,23 @@ export const GIT_ENV = { GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" };
 const STASH_IDENTITY = ["-c", "user.name=Copilot Sessions", "-c", "user.email=copilot-sessions@localhost"];
 
 export async function updateRepo({ repo, run, now = () => new Date(), timeoutMs = 60_000 }) {
-  const call = async (args, extra) => (await run("git", args, { cwd: repo, env: GIT_ENV, timeoutMs, ...extra })).stdout.trim();
+  const call = async (args, { raw = false, ...extra } = {}) => {
+    const { stdout } = await run("git", args, { cwd: repo, env: GIT_ENV, timeoutMs, ...extra });
+    return raw ? stdout : stdout.trim();
+  };
   const git = (...args) => call(args);
+  // Stash leaves nested repositories and linked worktrees alone (untracked entries ending in "/"), and with only those
+  // left it would still create an empty stash entry. So only the other entries count as local changes.
+  const hasStashable = async () => {
+    const status = await call(["status", "--porcelain", "-z", "--untracked-files=all"], { raw: true });
+    return status.split("\0").some((entry) => entry !== "" && !(entry.startsWith("?? ") && entry.endsWith("/")));
+  };
 
   const branch = await git("rev-parse", "--abbrev-ref", "HEAD");
   const before = await git("rev-parse", "--short", "HEAD");
   let stash = null;
   try {
-    if (await git("status", "--porcelain")) {
+    if (await hasStashable()) {
       const message = `copilot-sessions restart ${now().toISOString()}`;
       await call([...STASH_IDENTITY, "stash", "push", "--include-untracked", "-m", message], { label: "git stash" });
       stash = { branch, message };

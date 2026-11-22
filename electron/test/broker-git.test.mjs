@@ -1,6 +1,6 @@
 // Tests for bringing the broker repository to the latest main, against real throwaway git repositories.
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -140,6 +140,7 @@ test("every git call has the repo as cwd, no prompts and the timeout", async (t)
   assert.deepEqual(calls.map((c) => c.args.filter((a) => !a.startsWith("user.") && a !== "-c").slice(0, 2).join(" ")), [
     "rev-parse --abbrev-ref", "rev-parse --short", "status --porcelain", "stash push", "checkout main", "pull --ff-only", "rev-parse --short",
   ]);
+  assert.deepEqual(calls[2].args, ["status", "--porcelain", "-z", "--untracked-files=all"]);
   assert.deepEqual(calls[3].args, ["-c", "user.name=Copilot Sessions", "-c", "user.email=copilot-sessions@localhost",
     "stash", "push", "--include-untracked", "-m", message]);
   assert.deepEqual(calls[5].args, ["pull", "--ff-only", "origin", "main"]);
@@ -152,6 +153,35 @@ test("every git call has the repo as cwd, no prompts and the timeout", async (t)
     assert.equal(c.opts.timeoutMs, 60_000);
   }
   assert.deepEqual(GIT_ENV, { GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" });
+});
+
+test("only an untracked nested worktree: nothing is stashed and nothing is claimed", async (t) => {
+  const r = await repoWithRemote(t);
+  await r.git("worktree", "add", "nested/wt", "-b", "side");
+  const head = await r.upstream("new.txt", "x");
+  const out = await update(r.repo);
+  assert.equal(out.stash, null);
+  assert.equal(out.after, head);
+  assert.equal((await r.git("stash", "list")).trim(), "");
+  assert.doesNotMatch(describeUpdate(out), /stashed/);
+});
+
+test("an ordinary untracked folder is stashed", async (t) => {
+  const r = await repoWithRemote(t);
+  mkdirSync(path.join(r.repo, "notes"));
+  writeFileSync(path.join(r.repo, "notes", "a.txt"), "n");
+  const out = await update(r.repo);
+  assert.deepEqual(out.stash, { branch: "main", message });
+  assert.equal(existsSync(path.join(r.repo, "notes")), false);
+  assert.match(await r.git("ls-tree", "-r", "--name-only", "refs/stash^3"), /notes\/a\.txt/);
+});
+
+test("an untracked file with a space and a non-ASCII letter alone triggers the stash", async (t) => {
+  const r = await repoWithRemote(t);
+  writeFileSync(path.join(r.repo, "mój plik.txt"), "u");
+  const out = await update(r.repo);
+  assert.deepEqual(out.stash, { branch: "main", message });
+  assert.equal(existsSync(path.join(r.repo, "mój plik.txt")), false);
 });
 
 test("describeUpdate", () => {
