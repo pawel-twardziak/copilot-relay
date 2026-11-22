@@ -25,9 +25,10 @@ export const isolatedRun = (program, args, opts = {}) => runProgram(program, arg
   env: { ...Object.fromEntries(REPO_LOCATION_VARS.map((v) => [v, undefined])), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: NO_GLOBAL_CONFIG, ...opts.env },
 });
 
-function gitIn(cwd, args) {
+// git in `cwd` with the test identity and the isolation above; `env` adds variables (GIT_COMMITTER_DATE, ...).
+export function gitIn(cwd, args, env = {}) {
   return new Promise((resolve, reject) => {
-    execFile("git", [...IDENTITY, ...args], { cwd, env: isolatedEnv(), windowsHide: true, encoding: "utf8" }, (err, stdout, stderr) => {
+    execFile("git", [...IDENTITY, ...args], { cwd, env: { ...isolatedEnv(), ...env }, windowsHide: true, encoding: "utf8" }, (err, stdout, stderr) => {
       if (err) reject(new Error(`git ${args.join(" ")} failed: ${stderr || err.message}`));
       else resolve(stdout);
     });
