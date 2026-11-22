@@ -95,3 +95,45 @@ The side panel shipped (`docs/superpowers/specs/2026-11-21-activity-panel-design
   asserts it with an overflowing panel); some checks depend on fixed
   pauses (500 ms, 3 s) and pass vacuously on a slow machine; no check fails when only the panel's `ResizeObserver` is
   removed.
+
+## Phase 2: smaller leftovers from the reviews
+Set aside by the task reviews and the final review of `feat/activity-panel` (v0.16.0). None affects normal use.
+
+**App**
+- `UiState.panelLayout`: in the narrow branch the 280 px minimum beats "view − 40" below a 320 px view. Not reachable
+  today (window minimum 760, sidebar 300).
+- `app.js` repeats the pair `panelFollow = false; panelOwnTop = …` in two places.
+
+**Checks that are weaker than they look**
+- `log-keeps-place` only tests `scrollTop === 0`. It cannot fail on a lost reading position in the middle of the log.
+- `replay-ends-at-bottom` and `failed-replay-ends-at-bottom` pin the outcome, not the mechanism: no check fails when
+  the `resuming` guard in `followBottom` or the two scrolls at the end of a replay are removed. Replay speed is only
+  measured by hand.
+- `resize-keeps-bottom` does not assert that the resize took effect, and its "lower window" panel assertion was never
+  seen failing through the check itself.
+- `save-keeps-mode` reads the saved value once, right after the dialog closes, and never asserts the renderer's
+  `activityPanel` after Save or at startup.
+- `drawer` never reaches the "view − 40" cap. `drawer-esc` passes without `stopPropagation` in the panel's listener.
+  Drags are synthetic pointer events dispatched in the page.
+- `edit-dim`: the late group is timed by a fixed 3 s; its oracle repeats the implementation's expression;
+  `stubEditCount` patches a copy of `startEdit` and leaves `window.__countFrom`; `cancelled.dimmed` is always 0;
+  switching the edit to another message is not exercised.
+- `stop-marks`: the scripted agent plays no further step after `session/cancel`, while real Copilot keeps sending
+  subagent output after a Stop. Its `cancelPlaying` is one global that is never reset.
+- `panel-wait-scenario.mjs` hard-codes the two halves of the split text and has no guard when its anchors are missing.
+
+**Harness**
+- `driver.mjs`:
+  - `until()` swallows page errors, so a page exception shows up 20 s later as a timeout;
+  - attaching polls the full 20 s when Electron died at start (seen with a long `TMPDIR`: "Socket path too long");
+  - `reload()` breaks if the method is destructured;
+  - `close()` is idempotent by a flag, not a promise, waits without a bound after SIGKILL, and falls through to the
+    kill silently when the app does not exit within 5 s;
+  - `launch({ dir, settings })` ignores `settings`, and the file's header comment is stale.
+- `checks.mjs`: `relaunch()` leaks the kept temp dir if `launch` throws. The file is over 1000 lines; helpers and
+  checks could be split. `WAIT_MS` is exported from `panel-scroll-scenario.mjs` but used only there.
+- `run.mjs`: unknown flags are ignored; `--record` prints "(recorded)" for checks that record nothing; `--record`
+  with a check that does not run in mode `off` runs nothing and says nothing.
+- `scripted-agent.mjs`: a `session/prompt` before `session/new` throws instead of answering with an error; request
+  handlers run in a microtask. `scripted-agent.test.mjs`: one 1000 ms bound is measured after a 200 ms sleep.
+- The UI checks run on Linux only (Xvfb) and are not part of CI.
