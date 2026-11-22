@@ -307,7 +307,7 @@ test("add: a listed root is detected before the start point is read", async (t) 
   let reads = 0;
   const counting = { ...git, head: (root) => (reads++, git.head(root)), headAt: (...a) => (reads++, git.headAt(...a)) };
   const { store, changes } = setup(t, { git: counting });
-  store.addRepo(SID, rec(r.repo));
+  store.addRepo(SID, rec(realpathSync.native(r.repo)));
   const res = await changes.add(SID, r.repo);
   assert.equal(res.message, "repo is already listed.");
   assert.equal(reads, 0);
