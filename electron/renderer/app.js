@@ -819,11 +819,30 @@ class SessionView {
   append(el) {
     this.markTurn(el);
     this.log.append(el);
-    // a live message takes the clock; replayed ones get their recorded time when the replay ends
-    if (!this.resuming && isTimed(el)) this.stamp(el, Date.now());
+    // a live message takes the clock; replayed ones get their recorded time when the replay ends (applyTimes). An
+    // answer of the history that arrives after the replay's end still takes its recorded time.
+    if (!this.resuming && isTimed(el)) this.stamp(el, this.recordedTime(el) ?? Date.now());
     if (el._info) this.place(el); // a group: its body goes where the mode says
     this.followBottom();
     return el;
+  }
+  /** The time the session history has for an answer (by its messageId), or null. */
+  recordedTime(el) {
+    const agents = this.historyTimes?.agents;
+    const id = el._messageId;
+    return agents && typeof id === "string" && Object.hasOwn(agents, id) ? agents[id] : null;
+  }
+  /** After a replay: give the replayed messages the times the session history has for them (api.messageTimes: the
+   *  user messages in order, the answers by messageId). A hidden (empty) prompt counts for the order and shows none;
+   *  a message the history can't place shows none either. */
+  applyTimes(times) {
+    this.historyTimes = times;
+    const els = [...this.log.children].filter((el) => isTimed(el) && el._time == null);
+    const items = els.map((el) => ({ kind: el.classList.contains("agent") ? "agent" : "user", messageId: el._messageId }));
+    const at = MessageTimes.assign(times, items);
+    els.forEach((el, i) => {
+      if (at[i] != null && !el.hidden) this.stamp(el, at[i]);
+    });
   }
   /** Show a message's time (once) in its top right corner, with a date line before it when it is the first timed
    *  message of its day. el is already in the log. */
@@ -1355,6 +1374,7 @@ class SessionView {
       if (type === "thought") el = h("details", { class: "thought" }, h("summary", {}, "Thinking"), body);
       else {
         el = h("div", { class: `msg ${type}` }, body, copyBtn(() => shown()));
+        el._messageId = messageId; // its time in the session history is found by it (applyTimes)
         el._md = () => {
           if (!shown().trim()) return null;
           if (type !== "user") return shown();
@@ -2522,8 +2542,10 @@ async function openSession(s, { activate: show = true } = {}) {
   try {
     const res = await api.openSession(s.sessionId, s.cwd, replayId);
     await replayed; // the answer may overtake the last replayed updates, the marker cannot
+    const times = await api.messageTimes(s.sessionId).catch(() => null); // while still resuming: nothing takes the clock meanwhile
     v.resuming = false;
     v.flush();
+    v.applyTimes(times);
     v.settleGroups();
     v.setConfig(res.configOptions);
     v.toBottom();
@@ -2532,7 +2554,10 @@ async function openSession(s, { activate: show = true } = {}) {
     if (!v.log.childElementCount) v.system("No messages yet.");
   } catch (e) {
     await replayed; // a failed load may have replayed too
+    const times = await api.messageTimes(s.sessionId).catch(() => null);
     v.resuming = false;
+    v.flush(); // the replayed blocks are complete: the dead view shows them with their times
+    v.applyTimes(times);
     v.dead = true;
     v.settleGroups(); // what was replayed before the failure keeps no ●
     v.error(`Could not resume this session: ${e.message}`);

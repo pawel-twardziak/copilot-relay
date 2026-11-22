@@ -61,6 +61,9 @@ It runs on Windows, macOS and Linux.
 - **Delete a whole session**: the **Delete** button in the session header, or 🗑 next to a session in the list (on
   hover). After a confirmation the app closes it and removes `~/.copilot/session-state/<id>/` and the session's rows
   in `~/.copilot/session-store.db`. This cannot be undone; files the agent changed are not reverted.
+- **Message times**: each of your messages, relay messages and answers shows the time it was sent (`HH:MM`, the full
+  date in its tooltip), and a date line separates the days. For a reopened session the times come from Copilot's
+  `events.jsonl`; a message that can't be matched there shows none.
 - **Your earlier messages**: **Left Shift+↑/↓** in the message box walks through the messages you wrote in this
   session; past the newest one you get back what you were typing. Editing a recalled message makes it the new draft.
   Right Shift+arrows still select text.

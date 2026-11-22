@@ -373,6 +373,49 @@ export const checks = [
     },
   },
   {
+    // replayed messages take the times of the history: users by ordinal, agents by messageId; never a shifted time
+    name: "message-times-replay",
+    modes: ["off"],
+    async run(app) {
+      await playScenario(app);
+      await app.reload();
+      const SETUP = `const v = ${V};
+        const day = (d, h, m) => new Date(2026, 10, d, h, m).getTime();
+        const users = [...v.log.querySelectorAll(":scope > .msg.user")];
+        const agents = [...v.log.querySelectorAll(":scope > .msg.agent")].filter((e) => typeof e._messageId === "string");
+        const clock = (e) => e.querySelector(":scope > .time")?.textContent ?? null;`;
+      const r = await app.ev(`(() => {
+        ${SETUP}
+        const before = v.el.querySelectorAll(".time, .day-sep").length; // the scripted session has no events.jsonl
+        users[1].hidden = true; // an empty replayed prompt: counted, not stamped
+        const last = agents.at(-1);
+        v.applyTimes({ users: [day(21, 20, 22), day(21, 20, 30), day(22, 9, 5)], agents: Object.fromEntries(agents.map((e) => [e._messageId, e === last ? day(22, 9, 6) : day(21, 20, 23)])) });
+        const seps = [...v.log.querySelectorAll(":scope > .day-sep")];
+        return {
+          before, users: users.length, agents: agents.length > 1,
+          userClocks: users.map(clock), agentClocks: [...new Set(agents.map(clock))],
+          seps: seps.map((s) => [s.textContent === MessageTimes.dayLabel(day(21, 12, 0)), s.textContent === MessageTimes.dayLabel(day(22, 12, 0)), users.indexOf(s.nextElementSibling)]),
+        };
+      })()`);
+      assert.deepEqual(r, {
+        before: 0, users: 3, agents: true,
+        userClocks: ["20:22", null, "09:05"], agentClocks: ["20:23", "09:06"],
+        seps: [[true, false, 0], [false, true, 2]],
+      });
+      // one user time too few: no user message is stamped, the agent ones are; a late block of the history keeps its time
+      await app.reload();
+      const m = await app.ev(`(() => {
+        ${SETUP}
+        v.applyTimes({ users: [day(21, 20, 22), day(21, 20, 30)], agents: { ...Object.fromEntries(agents.map((e) => [e._messageId, day(21, 20, 23)])), "late-1": day(21, 20, 40) } });
+        v.stream("agent", "late", "late-1");
+        v.flush();
+        const late = [...v.log.querySelectorAll(":scope > .msg.agent")].at(-1);
+        return { userClocks: users.map(clock), agentClocks: [...new Set(agents.map(clock))], late: clock(late), seps: v.log.querySelectorAll(":scope > .day-sep").length };
+      })()`);
+      assert.deepEqual(m, { userClocks: [null, null, null], agentClocks: ["20:23"], late: "20:40", seps: 1 });
+    },
+  },
+  {
     // the load replays the whole history, then fails: the dead view shows all of it, settled (the answer must not
     // end the replay before the last update); a few times, as the order of the two used to vary
     name: "failed-load-settles",
