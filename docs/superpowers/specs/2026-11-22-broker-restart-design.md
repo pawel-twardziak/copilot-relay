@@ -110,10 +110,11 @@ two, and a session's own autostart during the gap then starts the new version.
    user's decision): `npm ci` also when dependencies did not change, and the installer also when Copilot has no
    copilot-relay extension yet, which installs it. A failed `npm ci` says that the dependencies may now be
    incomplete and that the running broker is not affected (it will not start again until this step succeeds).
-3. **Stop.** `GET /health`: a refused connection means nothing to stop. An answer that is not a copilot-relay
-   broker, or a `/health` that cannot be read (a timeout, a body that is not a JSON object), fails the step with
-   "Something else answers at …". Otherwise keep its `pid`, `POST /api/shutdown`, and wait (up to 10 s) until
-   `/health` is refused or answers with another pid (an unreadable answer counts as still there). The shutdown
+3. **Stop.** `GET /health`: a read that gets no answer (refused, timed out, aborted, whatever the error) means no
+   broker, so nothing to stop. An answer that is not a copilot-relay broker, or an unreadable answer (its body is not
+   a JSON object), fails the step with "Something else answers at …". Otherwise keep its `pid`,
+   `POST /api/shutdown`, and wait (up to 10 s) until `/health` gets no answer or answers with another pid (an
+   unreadable answer counts as still there). The shutdown
    request is abandoned after 2 s and the polling decides. A 404 means a broker without the endpoint: the run
    stops with "This broker is older than the restart button. Stop it by hand once, then press the button again."
    Another refusal reads "The broker refused to stop: HTTP <n>."

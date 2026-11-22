@@ -15,8 +15,9 @@ const tmp = (t) => {
 };
 
 // script: { toplevel, branch, dirty, update: { before, after }, pullError, errors: { node, npm, installer },
-//   health: [state | null | "timeout" | "json-null", ...] (one per read, the last repeats; null: the connection is
-//   refused, "timeout": the read times out, "json-null": an HTTP answer whose body is JSON null), shutdownStatus,
+//   health: [state | null | "timeout" | "aborted" | "json-null" | "html", ...] (one per read, the last repeats; null:
+//   the connection is refused, "timeout" / "aborted": fetch rejects with a timeout / abort error and no ECONNREFUSED,
+//   "json-null": an HTTP answer whose body is JSON null, "html": an HTTP answer whose body is not JSON), shutdownStatus,
 //   spawnError, reconnect,
 //   installed: { brokerScript, nodePath }, noServer, url, nodePath }
 function fakeFx(t, script = {}) {
@@ -74,7 +75,9 @@ function fakeFx(t, script = {}) {
         const state = list[Math.min(healthReads++, list.length - 1)];
         if (state === null) throw refused();
         if (state === "timeout") throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+        if (state === "aborted") throw new DOMException("This operation was aborted", "AbortError");
         if (state === "json-null") return { ok: true, status: 200, json: async () => null };
+        if (state === "html") return { ok: true, status: 200, json: async () => JSON.parse("<!doctype html><p>hi</p>") };
         const body = JSON.parse(JSON.stringify(state).replaceAll("<repo>", repo.replaceAll("\\", "\\\\")));
         return { ok: true, status: 200, json: async () => body };
       }
@@ -340,8 +343,31 @@ test("something else on the port is left alone", async (t) => {
   noLater(calls, "shutdown", "spawn");
 });
 
-test("a first /health read that times out: Stop fails as something else answering, nothing is stopped", async (t) => {
-  const { fx, calls, input } = fakeFx(t, { health: ["timeout"] });
+test("a first /health read that gets no answer, whatever the error: Stop is skipped as no broker", async (t) => {
+  // refused, timed out (Windows reports a refused loopback connect only after its retries) or aborted
+  for (const state of [null, "timeout", "aborted"]) {
+    const { fx, calls, input } = fakeFx(t, { health: [state, relay({ pid: 5, root: "<repo>" })] });
+    const out = await runRestart(input, fx);
+    assert.equal(out.steps[3].status, "skipped", String(state));
+    assert.equal(out.steps[3].detail, "no broker was running", String(state));
+    assert.equal(out.ok, true, String(state));
+    noLater(calls, "shutdown");
+  }
+});
+
+test("after the shutdown, /health reads that reject with a timeout or an abort: Stop is done", async (t) => {
+  for (const state of ["timeout", "aborted"]) {
+    // every read after the first rejects: Stop must not wait for an ECONNREFUSED that never comes
+    const { fx, calls, input } = fakeFx(t, { health: [relay({ pid: 100 }), state] });
+    const out = await runRestart(input, fx);
+    assert.equal(out.steps[3].status, "done", state);
+    assert.equal(out.steps[3].detail, "stopped pid 100", state);
+    assert.equal(calls.shutdowns.length, 1, state);
+  }
+});
+
+test("a first /health answer whose body is not JSON: Stop fails as something else answering", async (t) => {
+  const { fx, calls, input } = fakeFx(t, { health: ["html"] });
   const out = await runRestart(input, fx);
   assert.equal(out.steps[3].status, "failed");
   assert.equal(out.steps[3].detail, "Something else answers at http://127.0.0.1:7777; it is not a copilot-relay broker.");
@@ -358,7 +384,7 @@ test("a first /health answer whose body is JSON null: Stop fails as something el
 });
 
 test("an unreadable /health while Stop polls counts as still there", async (t) => {
-  const { fx, calls, input } = fakeFx(t, { health: [relay({ pid: 9 }), "timeout"] });
+  const { fx, calls, input } = fakeFx(t, { health: [relay({ pid: 9 }), "html"] });
   const out = await runRestart(input, fx);
   assert.equal(out.steps[3].detail, "The broker did not stop within 10 s.");
   noLater(calls, "spawn");

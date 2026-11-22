@@ -71,15 +71,21 @@ export async function runRestart(input, fx, onStep = () => {}) {
     return s.status !== "failed";
   };
 
-  // One /health read: "absent" (the connection is refused), "broker" (an HTTP answer whose JSON body is an object, in
-  // `body`) or "unreadable" (anything else: a timeout, a reset, a body that is not a JSON object).
+  // One /health read, decided by whether an HTTP answer arrived: "absent" (no answer: refused, timed out, aborted,
+  // reset, whatever the error; Windows reports a refused loopback connect only after its retries), "broker" (an
+  // answer whose JSON body is an object, in `body`) or "unreadable" (an answer whose body is not JSON or not an object).
   const health = async () => {
+    let res;
     try {
-      const res = await fx.fetch(`${url}/health`, { signal: AbortSignal.timeout(LIMITS.healthMs) });
+      res = await fx.fetch(`${url}/health`, { signal: AbortSignal.timeout(LIMITS.healthMs) });
+    } catch {
+      return { kind: "absent" };
+    }
+    try {
       const body = await res.json();
       return body !== null && typeof body === "object" && !Array.isArray(body) ? { kind: "broker", body } : { kind: "unreadable" };
-    } catch (err) {
-      return { kind: err?.cause?.code === "ECONNREFUSED" ? "absent" : "unreadable" };
+    } catch {
+      return { kind: "unreadable" };
     }
   };
   // Polls `probe` until it returns something other than undefined, for at most `ms` of fx time.
