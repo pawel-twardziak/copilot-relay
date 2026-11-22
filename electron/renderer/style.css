@@ -430,7 +430,8 @@ span.img-chip.off { border: 1px dashed var(--border); }
 .dv { min-width: max-content; font: 12.5px/18px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; user-select: text; }
 .dv-line { display: flex; min-height: 18px; white-space: pre; }
 .dv-num { flex: none; width: 6ch; padding: 0 6px; text-align: right; color: var(--muted); background: var(--panel); user-select: none; -webkit-user-select: none; }
-.dv-text { padding: 0 16px 0 8px; }
+.dv-sign { flex: none; padding: 0 6px 0 8px; }
+.dv-text { padding: 0 16px 0 0; }
 .dv-line.add { color: var(--ok); }
 .dv-line.del { color: var(--err); }
 .dv-line.hunk { color: var(--accent); background: var(--panel-2); }

@@ -1,6 +1,6 @@
 // Full-screen changes browser: the files changed in the session's repositories (main's changes:* records), the
-// versions of the selected file and its git diff; a file link from the chat opens that file alone. Loaded before
-// app.js; app.js calls createFilePreview once. File and diff text reach the DOM only as textContent, as escaped
+// versions of the selected file and its git diff; a file link from the chat opens that file alone. This file holds
+// the state; changes-list.js draws the list. Loaded before app.js; app.js calls createFilePreview once. File and diff text reach the DOM only as textContent, as escaped
 // highlight.js output, or through md() (marked + DOMPurify).
 "use strict";
 
@@ -27,8 +27,7 @@ function createFilePreview({ api, h, md, onStatus }) {
   let view = null; // the SessionView the overlay belongs to
   let data = null; // the last list of dataOf's session: { repos, loose }; kept while closed, for the next show
   let dataOf = null;
-  let selKey = null; // ChangesModel.key of the selected row
-  let sel = null; // { root, rel, file } of the selected row (root null for a loose file; rel is then its path)
+  let selKey = null; // ChangesModel.key of the selected row; find(selKey) gives its file
   let versions = []; // the strip of the selected row
   let version = null; // the strip entry on show in the diff pane
   let mode = null; // "change": the diff pane shows; "file": the content pane shows; null: nothing on show
@@ -40,17 +39,14 @@ function createFilePreview({ api, h, md, onStatus }) {
   let fullText = null; // text of the windowed (plain tier) file on show, for Select all + copy
   let allSelected = false;
   let seq = 0; // a newer read or selection, a close or another session makes older content answers stale
+  let stripSeq = 0; // a newer selection (also one that only builds the strip), a close or another session makes older commit lists stale
   let listSeq = 0; // a newer list request, a close or another session makes an older list stale
   let refreshSeq = 0; // a newer refresh makes older refreshes stale
 
   const dirOf = (p) => p.slice(0, Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\")) + 1) || p;
   const baseName = (p) => p.split(/[/\\]/).pop() || p;
   const sizeText = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
-  /** A listed file's absolute path; rel comes from git with forward slashes. */
-  const absPath = (root, rel) => {
-    const p = `${root.replace(/[\\/]+$/, "")}/${rel}`;
-    return PLATFORM === "win32" ? p.replace(/\//g, "\\") : p;
-  };
+  const absPath = (root, rel) => ChangesModel.abs(root, rel, PLATFORM);
   /** An error goes into the preview while it is open (the status line is hidden under it), else to the status line. */
   const fail = (text) => {
     if (el.hidden) return onStatus(text);
@@ -250,84 +246,25 @@ function createFilePreview({ api, h, md, onStatus }) {
     return null;
   }
 
-  const flag = (text, title) => h("span", { class: "fp-flag", title }, text);
-
-  function row(key, title, flags, dir, name, state) {
-    return h(
-      "div",
-      { class: `fp-row${key === selKey ? " active" : ""}`, title, onclick: () => select(key) },
-      h("span", { class: "fp-state" }, state),
-      h("span", { class: "fp-flags" }, flags),
-      // the folder part gives way first, cut at its start (see .fp-dir), so the name stays readable
-      h("span", { class: "fp-row-path" }, dir && h("span", { class: "fp-dir" }, h("span", {}, dir)), h("span", { class: "fp-file" }, name)),
-    );
-  }
-
-  /** A collapsible group; `root` (a repository's) adds the button that removes it from the list. */
-  function group(foldId, name, title, root, body) {
-    const fold = `${dataOf}\n${foldId}`;
-    const shut = collapsed.has(fold);
-    const toggle = () => {
-      if (!collapsed.delete(fold)) collapsed.add(fold);
-      renderList();
-    };
-    const remove = (e) => {
-      e.stopPropagation();
-      removeRepo(root);
-    };
-    return h(
-      "div",
-      { class: "fp-group" },
-      h(
-        "div",
-        { class: "fp-group-head", title, onclick: toggle },
-        h("span", { class: "fp-fold" }, shut ? "▸" : "▾"),
-        h("span", { class: "fp-group-name" }, name),
-        root != null && h("button", { title: "Remove from the list", onclick: remove }, "✕"),
-      ),
-      !shut && body,
-    );
-  }
-
-  function repoGroup(r) {
-    const note = (text, cls = "") => h("div", { class: `fp-note${cls}` }, text);
-    const body = [];
-    if (r.error) body.push(note(r.error, " err"));
-    else {
-      if (r.note) body.push(note(r.note));
-      for (const f of r.files) {
-        const { dir, name } = ChangesModel.splitName(f.path);
-        const flags = [
-          f.touched && flag("●", "Edited by the agent"),
-          f.dirtyAtStart && flag("⏱", "Changed before the session"),
-          f.committed && !f.uncommitted && flag("✓", "Committed, no uncommitted change now"),
-        ];
-        body.push(row(ChangesModel.key(r.root, f.path), f.path, flags, dir, name, f.state));
-      }
-      if (!r.files.length && !r.note) body.push(note("No changes."));
-      if (r.truncated) body.push(note("Only the first 2000 files are shown."));
-    }
-    const since = r.at ? `\nSince ${new Date(r.at).toLocaleString()}` : "";
-    return group(r.root, r.name, r.root + since, r.root, body);
-  }
-
   function renderList() {
-    if (!data) return itemsEl.replaceChildren();
-    const groups = data.repos.map(repoGroup);
-    if (data.loose.length) {
-      const rows = data.loose.map((p) => row(ChangesModel.key(null, p), p, [flag("●", "Edited by the agent")], "", baseName(p), ""));
-      groups.push(group("\0loose", "No repository", "Files the agent edited outside any repository", null, rows));
-    }
-    if (!groups.length) {
-      groups.push(h("div", { class: "fp-empty" }, h("p", {}, "No repository is recorded for this session yet."), h("button", { "data-act": "add" }, "+ Add repository")));
-    }
-    itemsEl.replaceChildren(...groups);
+    const fold = (foldId) => `${dataOf}\n${foldId}`;
+    const on = {
+      select: (key) => select(key),
+      toggle(foldId) {
+        if (!collapsed.delete(fold(foldId))) collapsed.add(fold(foldId));
+        renderList();
+      },
+      remove: (root) => removeRepo(root),
+      add: () => addRepo(),
+    };
+    itemsEl.replaceChildren(...ChangesList.render(data, { h, selKey, isShut: (foldId) => collapsed.has(fold(foldId)), on }));
   }
 
   /** Ask for the session's list; until it answers the loader shows above the list it had. `after` runs on the answer. */
   async function loadList(after) {
     const my = ++listSeq;
     const v = view;
+    errEl.hidden = true;
     loadingEl.hidden = false;
     let d;
     try {
@@ -355,6 +292,7 @@ function createFilePreview({ api, h, md, onStatus }) {
 
   function addRepo() {
     const v = view;
+    errEl.hidden = true;
     api
       .changesAdd(v.sessionId)
       .then((r) => {
@@ -376,8 +314,9 @@ function createFilePreview({ api, h, md, onStatus }) {
 
   /** Select a row: its versions in the strip, then (showDiff) the first one's diff. A loose file shows its content. */
   async function select(key, showDiff = true) {
-    const my = ++seq;
-    sel = find(key);
+    const mine = ++stripSeq;
+    const my = showDiff ? ++seq : seq; // building only the strip leaves a content read in flight alone
+    const sel = find(key);
     selKey = sel ? key : null;
     versions = [];
     version = null;
@@ -405,13 +344,13 @@ function createFilePreview({ api, h, md, onStatus }) {
     try {
       commits = await api.changesCommits(view.sessionId, root, rel);
     } catch (e) {
-      if (my !== seq) return;
+      if (mine !== stripSeq || my !== seq) return;
       return showDiff ? diffMessage(e.message) : fail(e.message);
     }
-    if (my !== seq) return;
+    if (mine !== stripSeq) return;
     versions = ChangesModel.versions(file, commits);
     renderStrip();
-    if (!showDiff) return;
+    if (!showDiff || my !== seq) return;
     if (versions.length) loadDiff(versions[0].id);
     else diffMessage("No changes.");
   }
@@ -430,6 +369,7 @@ function createFilePreview({ api, h, md, onStatus }) {
 
   /** Show the diff of the selected row's version `id` (switches to the diff pane). */
   async function loadDiff(id) {
+    const sel = find(selKey);
     if (sel?.root == null) return; // only a repository's file has versions
     const my = ++seq;
     const { root, rel, file } = sel;
@@ -462,7 +402,11 @@ function createFilePreview({ api, h, md, onStatus }) {
     if (my !== seq) return;
     if (r.notText || r.tier === "binary") diffMessage("Binary file.");
     else if (r.tier === "too-large") diffMessage(`${r.name} is ${sizeText(r.size)}, too large to preview (the limit is 20 MB). Use "Open in system app".`);
-    else diffEl.replaceChildren(DiffView.render(DiffView.added(r.text), h));
+    else {
+      const parsed = DiffView.added(r.text);
+      if (parsed.lines.length) diffEl.replaceChildren(DiffView.render(parsed, h));
+      else diffMessage("Empty file.");
+    }
   }
 
   // --- opening ------------------------------------------------------------------------------------------
@@ -471,9 +415,10 @@ function createFilePreview({ api, h, md, onStatus }) {
     if (dataOf !== v.sessionId) {
       // another session: its own list, nothing of the previous one's answers
       listSeq++;
+      stripSeq++;
       data = null;
       dataOf = v.sessionId;
-      sel = selKey = null;
+      selKey = null;
       versions = [];
       renderList();
       renderStrip();
@@ -510,6 +455,7 @@ function createFilePreview({ api, h, md, onStatus }) {
     try {
       r = await api.readFile(base, href, { viewingCwd: v.cwd, confirmed });
     } catch (e) {
+      if (my !== seq) return true; // the user has moved on
       fail(e.message);
       return true;
     }
@@ -530,7 +476,8 @@ function createFilePreview({ api, h, md, onStatus }) {
     watch(r.path);
     renderFile(r, line);
     // its row, when it is listed; the strip stays hidden until then
-    sel = selKey = null;
+    stripSeq++;
+    selKey = null;
     versions = [];
     renderList();
     renderStrip();
@@ -562,6 +509,7 @@ function createFilePreview({ api, h, md, onStatus }) {
   /** The list and the selection stay for the next show of the same session. */
   function close() {
     seq++;
+    stripSeq++;
     listSeq++;
     setMode(null);
     errEl.hidden = true;
@@ -586,6 +534,7 @@ function createFilePreview({ api, h, md, onStatus }) {
     else if (act === "refresh" && view) reloadList();
     else if (act === "add" && view) addRepo();
     else if (act === "system" && view) {
+      const sel = find(selKey);
       const target = mode === "file" ? cur?.path : sel?.root != null ? absPath(sel.root, sel.rel) : null;
       if (target) api.openLink(view.cwd, target).catch((err) => fail(err.message));
     } else if (act === "md" && mode === "file" && cur?.result) {
@@ -665,7 +614,7 @@ function createFilePreview({ api, h, md, onStatus }) {
     forget(sessionId) {
       if (view?.sessionId === sessionId) close();
       if (dataOf === sessionId) {
-        data = dataOf = sel = selKey = null;
+        data = dataOf = selKey = null;
         renderList();
       }
       for (const fold of collapsed) if (fold.startsWith(`${sessionId}\n`)) collapsed.delete(fold);

@@ -8,6 +8,15 @@ const ChangesModel = createRequire(import.meta.url)("../renderer/changes-model.j
 const file = (path, extra = {}) => ({ path, state: "M", uncommitted: false, committed: false, touched: true, dirtyAtStart: false, ...extra });
 const repo = (root, files) => ({ root, name: root, files });
 
+test("abs: root and rel with the platform's separator; a loose file's path as is", () => {
+  assert.equal(ChangesModel.abs("/home/u/repo", "a/b.txt", "linux"), "/home/u/repo/a/b.txt");
+  assert.equal(ChangesModel.abs("/home/u/repo/", "b.txt", "linux"), "/home/u/repo/b.txt");
+  assert.equal(ChangesModel.abs("C:\\Repo", "a/b.txt", "win32"), "C:\\Repo\\a\\b.txt");
+  assert.equal(ChangesModel.abs("C:\\Repo\\", "b.txt", "win32"), "C:\\Repo\\b.txt");
+  assert.equal(ChangesModel.abs(null, "/x/loose.txt", "linux"), "/x/loose.txt");
+  assert.equal(ChangesModel.abs(null, "C:\\x\\loose.txt", "win32"), "C:\\x\\loose.txt");
+});
+
 test("key: repository file and loose file", () => {
   assert.equal(ChangesModel.key("/r", "a/b.txt"), ChangesModel.key("/r", "a/b.txt"));
   assert.notEqual(ChangesModel.key("/r", "a"), ChangesModel.key("/s", "a"));

@@ -81,14 +81,16 @@ function clip(parsed, limit = LINE_LIMIT) {
   return { binary: parsed.binary, lines: [...parsed.lines.slice(0, limit), note] };
 }
 
-/** Renders the (clipped) parsed lines with the app's element helper h(tag, attrs, children); text only through children strings. */
+/** Renders the (clipped) parsed lines with the app's element helper h(tag, attrs, children); text only through children strings.
+ *  The sign ("+", "-", blank) is selectable, so copied lines keep what was added and removed. */
 function render(parsed, h) {
   const num = (n) => h("span", { class: "dv-num" }, n == null ? "" : String(n));
+  const sign = (type) => h("span", { class: "dv-sign" }, type === "add" ? "+" : type === "del" ? "-" : " ");
   return h(
     "div",
     { class: "dv" },
     clip(parsed).lines.map((l) =>
-      h("div", { class: `dv-line ${l.type}` }, num(l.old), num(l.new), h("span", { class: "dv-text" }, l.text)),
+      h("div", { class: `dv-line ${l.type}` }, num(l.old), num(l.new), sign(l.type), h("span", { class: "dv-text" }, l.text)),
     ),
   );
 }

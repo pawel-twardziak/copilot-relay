@@ -1,4 +1,4 @@
-// Pure list model of the changes browser: keys, selection, versions of a file, path location (no DOM).
+// Pure list model of the changes browser: keys, selection, versions of a file, path location and joining (no DOM).
 // Loaded as a classic <script> (sets globalThis.ChangesModel) and via require() in tests.
 "use strict";
 (function () {
@@ -56,7 +56,14 @@ function locate(data, abs, platform) {
   return { root: best.root, rel };
 }
 
-const ChangesModel = { key, pick, versions, splitName, locate };
+/** A listed file's absolute path: root + rel (forward slashes) with the platform's separator; a loose file's path (root null) as is. */
+function abs(root, rel, platform) {
+  if (root == null) return rel;
+  const p = `${root.replace(/[\\/]+$/, "")}/${rel}`;
+  return platform === "win32" ? p.replace(/\//g, "\\") : p;
+}
+
+const ChangesModel = { key, pick, versions, splitName, locate, abs };
 globalThis.ChangesModel = ChangesModel;
 if (typeof module !== "undefined") module.exports = ChangesModel;
 })();

@@ -77,6 +77,14 @@ test("render: a long diff does not overflow the stack and is cut at the limit", 
   assert.equal(el.children.length, DiffView.LINE_LIMIT + 1);
 });
 
+test("render: each line has a selectable sign between the numbers and the text", () => {
+  const h = (tag, attrs, ...children) => ({ tag, attrs, children: children.flat() });
+  const el = DiffView.render(DiffView.parse("@@ -1,2 +1,2 @@\n a\n-b\n+c\n\\ No newline at end of file\n"), h);
+  const cells = el.children.map((line) => line.children.map((c) => [c.attrs.class, c.children.join("")]));
+  assert.deepEqual(cells.map((c) => c.map(([cls]) => cls)), Array(5).fill(["dv-num", "dv-num", "dv-sign", "dv-text"]));
+  assert.deepEqual(cells.map((c) => c[2][1]), [" ", " ", "-", "+", " "]); // hunk, ctx, del, add, note
+});
+
 test("added", () => {
   assert.deepEqual(DiffView.added("a\nb\n").lines.map((l) => [l.type, l.new, l.text]), [["add", 1, "a"], ["add", 2, "b"]]);
   assert.deepEqual(DiffView.added(""), { binary: false, lines: [] });
