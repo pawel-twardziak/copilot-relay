@@ -3,8 +3,10 @@
 From the task reviews and the final whole-branch review of `feat/activity-groups`. None of these blocks the merge.
 
 ## Parked by decision
-- **Replay shows ● briefly.** Replayed updates that arrive after `session/load` answers are treated as live until the
-  settle at the end of the replay. The spec says no ● phase. Cosmetic.
+- **Replay shows ● briefly: mostly fixed.** The replay now ends only after its last replayed update (main sends a
+  marker after it: baba155, ccd4ae2), so an opened session no longer shows ●. Left: a window reload during a resume
+  (the new open does not wait for the load still running), and an agent that dies during `session/load` (its last
+  updates can reach the dead view as live).
 - **Group title is fixed at creation.** A title that arrives in a later `task` update is not applied.
 - **Pure view logic still lives in `app.js`.** The work-group mark, the last-line extraction and the plan-in-place
   rule could move into `Activity` and get unit tests.
@@ -42,10 +44,51 @@ From the task reviews and the final whole-branch review of `feat/activity-groups
   - An empty work group can stay after `replacesTool`.
   - A permission for the `task` call itself gets no ⏸ (its badge is replaced by the group).
 
-## Manual checks before release (not run in the app)
-- A mid-turn queue delivery while a work tool is in flight (the synthetic ⊘ path).
-- Fork and Delete from a group header.
-- A permission ⏸ with real Copilot.
+## Fixed on the way
+- **A following log ended a turn ~50 px above its bottom** (every mode, since before the panel): the turn's last text
+  is drawn when the turn ends and nothing scrolled after it. A following log now goes to its bottom then (9418355).
 
-## Phase 2
-- Side panel (variant C), switchable in Settings, on the slot model described in the spec's Scope section.
+## Run with real Copilot (2026-11-22, Copilot CLI 1.0.115, Linux, phase 2 branch)
+A new session in a throwaway `/tmp` folder, subagents asked for on model "auto"; the session and its forks were deleted
+with the app afterwards.
+- Mode `all`: a sync and a background subagent. Both headers stay in the chat with ⇢, their content in the panel. The
+  background one's permission showed ⏸ in the chat header and in the panel entry, the card in the chat, "1 subagent
+  running" under the composer.
+- A message queued during that turn was delivered after the tool step, answered, then "↻ continuing the task". One
+  Fork/Delete per turn.
+- Fork from a group header (the first turn's reply, a subagent group): the fork opened with the history up to that
+  reply. Its sync subagent shows ⊘ and the background one ○, as their completions come after the cut.
+- `/context`, then a turn answered "OK", then Fork on it: the fork ends with "OK", `/context` gets no actions and is
+  not in it.
+- Switch to `subagents`: the work groups went inline, the subagent entries stayed. A second sync and background pair:
+  ⏸ in both headers again; "1 subagent running" opened and highlighted the entry.
+- Delete from a group header (that turn's reply): the view was rebuilt from the replay, the panel with the two entries
+  left.
+- Not seen: the mid-turn ⊘. With `sleep 30` running and a message queued, Copilot let the tool end (✓) before it took
+  the message.
+
+## Manual checks before release (not run in the app)
+- A mid-turn queue delivery while a work tool is in flight (the synthetic ⊘ path). Tried once with real Copilot, see
+  above.
+- A sent edit, and the panel after the rebuild. The UI checks cannot send one: the scripted session has no Copilot
+  history.
+- A mode switch during a replay, and with a permission card open.
+- The panel and the drawer on Windows (fonts, the ⏸ glyph, the drag).
+
+## Phase 2: left over
+The side panel shipped (`docs/superpowers/specs/2026-11-21-activity-panel-design.md`). Left:
+- **Subagents in the panel** look like the work groups there. Whether they need more is to be judged after use.
+- **An empty work group** kept after `replacesTool` (its turn's reply) gives an empty entry in mode `all`.
+- **Not built (non-goals):** a per-session switch, a "current turn only" filter, a link from an entry back to the chat.
+- **Drawer and focus:** the drawer does not take the focus when it opens, so `Esc` closes it only once you are inside.
+  `drawerOpen` is not reset when the panel loses its last entry. Collapsing leaves the focus on the hidden button.
+- **Drag:** no pointer capture and no buttons check (a lost `pointerup` keeps resizing). The 7 px grab area overlaps
+  the log's scrollbar by 3 px.
+- **Follow:** scroll anchoring within 80 px of the bottom can turn the panel's follow back on without a scroll of
+  yours. During a replay `finishRuns` brings the log to its bottom once per finished block.
+- **Replay marker:** its counter restarts at 0 after a window reload, so an old window's marker could end a new open's
+  wait.
+- **Code:** `group._entry` stays set after a group goes back inline, and `showInPanel` uses it unguarded.
+- **Checks:** the "panel after the replay" assertion of `forced-scroll` is likely vacuous; some checks depend on fixed
+  pauses (500 ms, 3 s) and pass vacuously on a slow machine; no check fails when only the panel's `ResizeObserver` is
+  removed.

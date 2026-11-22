@@ -122,6 +122,40 @@ test("a perm step holds the next update until the request is answered", async ()
   assert.deepEqual(a.seen[answer].result, { stopReason: "end_turn" });
 });
 
+test("session/cancel ends the running prompt at once: it answers cancelled and plays none of its remaining steps", async () => {
+  const a = await newSession(freshCwd());
+  await prompt(a, "first");
+  await a.waitFor((m) => m.params?.update?.messageId === "m2");
+  const answered = prompt(a, "second");
+  await a.waitFor((m) => m.method === "session/request_permission"); // waiting for its answer
+  const started = Date.now();
+  a.write({ method: "session/cancel", params: { sessionId: a.sessionId } });
+  const answer = await answered;
+  await new Promise((r) => setTimeout(r, 200));
+  a.stop();
+  assert.ok(Date.now() - started < 1000);
+  assert.deepEqual(a.seen[answer].result, { stopReason: "cancelled" });
+  assert.ok(!a.seen.some((m) => m.params?.update?.sessionUpdate === "tool_call_update"), "a step after the cancel was played");
+});
+
+test("session/cancel during a wait step ends the prompt without waiting", async () => {
+  const cwd = freshCwd();
+  const waiting = path.join(tmp, "waiting.mjs");
+  writeFileSync(waiting, `export default { prompts: ${JSON.stringify([[{ u: text("m1", "before") }, { wait: 5000 }, { u: text("m1", "after") }, { end: "end_turn" }]])} };\n`);
+  const a = start(cwd, waiting);
+  await a.request("initialize", { protocolVersion: 1 });
+  const sessionId = a.seen[await a.request("session/new", { cwd, mcpServers: [] })].result.sessionId;
+  const answered = a.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "go" }] });
+  await a.waitFor((m) => m.params?.update?.content?.text === "before");
+  const started = Date.now();
+  a.write({ method: "session/cancel", params: { sessionId } });
+  const answer = await answered;
+  a.stop();
+  assert.ok(Date.now() - started < 1000);
+  assert.deepEqual(a.seen[answer].result, { stopReason: "cancelled" });
+  assert.ok(!a.seen.some((m) => m.params?.update?.content?.text === "after"));
+});
+
 test("session/load in a new process replays the prompts and updates in order before its answer", async () => {
   const cwd = freshCwd();
   const a = await newSession(cwd);

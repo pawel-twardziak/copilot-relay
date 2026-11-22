@@ -238,6 +238,7 @@ body.panel-resizing { cursor: col-resize; user-select: none; }
 .edit-bar[hidden] { display: none; }
 .edit-bar > span { flex: 1; }
 .log > .edit-from, .log > .edit-from ~ * { opacity: .45; }
+.panel-entry.dim { opacity: .45; } /* its group comes after the edited message (dimEntries) */
 
 /* ---------- dialog ---------- */
 dialog { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 10px; width: 520px; }

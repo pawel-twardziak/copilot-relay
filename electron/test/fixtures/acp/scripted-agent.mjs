@@ -5,6 +5,8 @@
 //   { perm: toolCall }   a session/request_permission; the next step waits for its answer
 //   { wait: ms }         a pause
 //   { end: stopReason }  the prompt's answer; the steps after it are played after the answer
+// session/cancel (Stop) ends the running prompt as Copilot does: it answers "cancelled" (if not answered yet) and
+// plays none of its remaining steps; a pause or an unanswered permission request it waits on ends at once.
 // Every prompt (as a user_message_chunk, as Copilot replays it) and every update sent is recorded in
 // <cwd>/.scripted-agent.json; session/load sends them again, in order, before its answer. The scenario's optional
 // load: { delay: ms, error: message } holds that answer back for delay ms, and makes it that error (after the replay).
@@ -23,6 +25,7 @@ const sessionIdOf = (cwd) => `scripted-${path.basename(cwd)}`;
 let session = null; // { id, file, updates }
 let nextId = 0;
 const answers = new Map(); // id of a request we sent -> resolve
+let cancelPlaying = () => {}; // session/cancel: ends the prompt being played (play)
 
 function open(cwd, fresh) {
   const file = path.join(cwd, ".scripted-agent.json");
@@ -52,10 +55,19 @@ async function play(rpcId, steps) {
     if (!answered) send({ id: rpcId, result: { stopReason } });
     answered = true;
   };
+  let stopped = false;
+  const cancelled = new Promise((resolve) => {
+    cancelPlaying = () => {
+      stopped = true;
+      answer("cancelled");
+      resolve();
+    };
+  });
   for (const step of steps) {
+    if (stopped) return;
     if ("u" in step) update(step.u);
     else if ("perm" in step) {
-      await ask("session/request_permission", {
+      const asked = ask("session/request_permission", {
         sessionId: session.id,
         toolCall: step.perm,
         options: [
@@ -63,7 +75,8 @@ async function play(rpcId, steps) {
           { optionId: "reject", name: "Reject", kind: "reject_once" },
         ],
       });
-    } else if ("wait" in step) await sleep(step.wait);
+      await Promise.race([asked, cancelled]);
+    } else if ("wait" in step) await Promise.race([sleep(step.wait), cancelled]);
     else if ("end" in step) answer(step.end);
   }
   answer("end_turn"); // a script without an end step
@@ -96,7 +109,8 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     session.updates.push({ sessionUpdate: "user_message_chunk", content: { type: "text", text } });
     save();
     play(msg.id, prompts[n] ?? []);
-  } else if (msg.id != null) {
+  } else if (msg.method === "session/cancel") cancelPlaying();
+  else if (msg.id != null) {
     Promise.resolve()
       .then(() => handlers[msg.method]?.(msg.params))
       .then(

@@ -928,6 +928,7 @@ class SessionView {
     const ownText = String((el._ownText ?? el._matchText)());
     this.edit = { el, ordinal: el._turn, matchText, ownText, draft };
     el.classList.add("edit-from");
+    this.dimEntries();
     this.editText.textContent = EditMessage.editBanner(count.removedUserMessages);
     this.editBar.hidden = false;
     this.input.value = ownText;
@@ -942,8 +943,18 @@ class SessionView {
     if (!this.edit) return;
     this.edit.el.classList.remove("edit-from");
     this.edit = null;
+    this.dimEntries();
     this.editBar.hidden = true;
     if (!this.busy) queueMicrotask(() => this.pump());
+  }
+
+  /** Edit mode dims the panel entries of the groups after the message being edited, as the log dims those groups
+   *  (.edit-from ~ *, a sibling rule that cannot reach the panel); no entry is dimmed when not editing. */
+  dimEntries() {
+    const from = this.edit?.el;
+    for (const g of this.log.querySelectorAll(":scope > .group")) {
+      g._entry?.classList.toggle("dim", !!from && !!(from.compareDocumentPosition(g) & Node.DOCUMENT_POSITION_FOLLOWING));
+    }
   }
 
   /** Leave edit mode and bring back what was typed before it. */
@@ -1584,6 +1595,7 @@ class SessionView {
     }
     if (!inPanel) group._entry?.remove();
     group.classList.toggle("in-panel", inPanel);
+    if (this.edit) this.dimEntries(); // a group created or moved during an edit (none is dimmed otherwise)
     this.updatePanelShown();
   }
 

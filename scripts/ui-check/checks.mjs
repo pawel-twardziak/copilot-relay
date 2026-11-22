@@ -1,9 +1,10 @@
 // The UI checks run by scripts/ui-check/run.mjs: { name, scenario?, modes?, run(app) }, each throwing on failure.
 // app is a driver (driver.mjs) launched with the check's scenario (default panel-scenario.mjs), its mode already set.
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { LATE_TEXT } from "../../electron/test/fixtures/acp/late-group-scenario.mjs";
 import { PARTS } from "../../electron/test/fixtures/acp/panel-scroll-scenario.mjs";
 import { launch } from "./driver.mjs";
 
@@ -198,6 +199,80 @@ const drawerState = (app) => app.ev(`(() => {
   return { narrow: v.row.classList.contains("narrow"), shown: v.panel.checkVisibility(), hidden: v.panel.hidden, logWidth: v.log.offsetWidth, rowWidth: v.row.clientWidth };
 })()`);
 const storedUi = (app) => app.ev("localStorage.getItem(UI_KEY)");
+
+// --- edit mode, a dead view, Stop, a view switched while hidden, the turn marks (Task 6)
+/** What breaks "a panel entry is dimmed exactly when its group in the log comes after the message being edited" (none
+ *  while not editing), one message each; with the number of entries dimmed and not. */
+const dimState = (app) => app.ev(`(() => {
+  const v = ${V}, from = v.edit?.el ?? null, errors = [];
+  let dimmed = 0, clear = 0;
+  [...v.log.querySelectorAll(":scope > .group")].forEach((g, i) => {
+    if (!g._entry) return;
+    const after = !!from && !!(from.compareDocumentPosition(g) & Node.DOCUMENT_POSITION_FOLLOWING);
+    const dim = g._entry.classList.contains("dim");
+    if (dim !== after) errors.push("group " + i + " (" + g._info.kind + "): dim " + dim + ", after the edited message " + after);
+    if (!g.classList.contains("in-panel")) return;
+    const opacity = getComputedStyle(g._entry).opacity;
+    if (opacity !== (after ? "0.45" : "1")) errors.push("group " + i + ": its entry's opacity is " + opacity);
+    if (after) dimmed++;
+    else clear++;
+  });
+  return { errors, dimmed, clear };
+})()`);
+/** The scripted session has no Copilot history to count (its id is no UUID): startEdit's own code, its one history
+ *  call (api.countFrom, for the banner) answered in the page. */
+async function stubEditCount(app) {
+  const ok = await app.ev(`(() => {
+    const src = SessionView.prototype.startEdit.toString();
+    if (src.split("api.countFrom(").length !== 2) return false;
+    window.__countFrom = async () => ({ removedUserMessages: 2, removedEvents: 0 });
+    SessionView.prototype.startEdit = (0, eval)("({ " + src.replace("api.countFrom(", "__countFrom(") + " })").startEdit;
+    return true;
+  })()`);
+  assert.equal(ok, true, "startEdit calls api.countFrom once");
+}
+/** The pids of the scripted agents running in the launch's work folder (the session's Copilot processes). */
+function agentPids(app) {
+  const work = path.join(app.dir, "work");
+  return readdirSync("/proc")
+    .filter((p) => /^\d+$/.test(p))
+    .filter((p) => {
+      try {
+        return readlinkSync(`/proc/${p}/cwd`) === work && readFileSync(`/proc/${p}/cmdline`, "utf8").includes("scripted-agent.mjs");
+      } catch {
+        return false; // gone, or not ours
+      }
+    })
+    .map(Number);
+}
+/** Every group's mark: in the chat, and in its entry when its body is in the panel (else null). */
+const groupMarks = (app) => app.ev(`[...${V}.log.querySelectorAll(":scope > .group")].map((g) => ({
+  kind: g._info.kind,
+  chat: g.querySelector(":scope > summary .mark").textContent,
+  entry: g.classList.contains("in-panel") ? g._entry.querySelector(":scope > summary .mark").textContent : null,
+}))`);
+/** For each turn (from its user message to the next one): how many of its other log children have Fork and Delete;
+ *  and the children with more than one Fork. */
+const turnActs = (app) => app.ev(`(() => {
+  const counts = [], doubles = [];
+  [...${V}.log.children].forEach((e, i) => {
+    if (e.classList.contains("msg") && (e.classList.contains("user") || e.classList.contains("relay"))) return counts.push(0);
+    if (!counts.length) return;
+    const labels = [...e.querySelectorAll(".acts button.act")].map((b) => b.textContent);
+    const forks = labels.filter((l) => l === "Fork").length;
+    if (forks > 1) doubles.push(i);
+    if (forks && labels.includes("Delete")) counts[counts.length - 1]++;
+  });
+  return { counts, doubles };
+})()`);
+/** The marks of panel-wait-scenario's groups after a Stop halfway through the sync subagent, as mode off shows them:
+ *  the two work groups (before and after the plan) ✓, their tools ended; the subagent ⊘, stopped before its task
+ *  ended. */
+const STOP_MARKS = [
+  { kind: "work", chat: "✓" },
+  { kind: "work", chat: "✓" },
+  { kind: "subagent", chat: "⊘" },
+];
 
 export const checks = [
   {
@@ -729,8 +804,9 @@ export const checks = [
       await frames(app);
       assert.deepStrictEqual(await state(), { open: true, busy: true, stops: 0 }, "a repeated Esc inside the drawer");
       await esc(`${V}.input`);
+      await app.check(`!${V}.busy`, "the turn to stop"); // the scripted agent ends its prompt on session/cancel
       await frames(app);
-      assert.deepStrictEqual(await state(), { open: true, busy: true, stops: 1 }, "Esc in the message box stops the turn, the drawer stays");
+      assert.deepStrictEqual(await state(), { open: true, busy: false, stops: 1 }, "Esc in the message box stops the turn, the drawer stays");
     },
   },
   {
@@ -821,6 +897,130 @@ export const checks = [
       assert.ok((await scrollState(app, LOG)).over > 100, "the replayed log overflows");
       await assertAtBottom(app, LOG, "the log after the replay");
       await assertAtBottom(app, PANEL, "the panel after the replay");
+    },
+  },
+  {
+    // editing the second message dims the panel entries of the groups after it, as the log dims those groups; a
+    // group created meanwhile is dimmed, a mode switch keeps the rule, cancelling the edit undims everything
+    name: "edit-dim",
+    modes: ["all"],
+    scenario: path.join(FIXTURES, "late-group-scenario.mjs"),
+    async run(app) {
+      const groups = `${V}.log.querySelectorAll(":scope > .group").length`;
+      await playScenario(app);
+      await stubEditCount(app);
+      assert.deepStrictEqual((await dimState(app)).errors, [], "before the edit");
+      const before = await app.ev(groups);
+      await app.ev(`${V}.log.querySelectorAll(":scope > .msg.user")[1]._editAct.click()`);
+      await app.check(`!!${V}.edit`, "the edit to start");
+      await frames(app);
+      const editing = await dimState(app);
+      assert.deepStrictEqual(editing.errors, [], "editing the second message");
+      assert.ok(editing.dimmed > 0 && editing.clear > 0, `entries dimmed and not (${editing.dimmed}, ${editing.clear})`);
+      assert.equal(await app.ev(groups), before, "the late group not there yet");
+      await app.check(`${groups} > ${before}`, "the late group");
+      await frames(app);
+      assert.deepStrictEqual((await dimState(app)).errors, [], "after a group was created during the edit");
+      assert.equal(await app.ev(`[...${V}.log.querySelectorAll(":scope > .group")].find((g) => g._body.textContent.includes(${JSON.stringify(LATE_TEXT)}))._entry.classList.contains("dim")`), true, "the late group's entry dimmed");
+      for (const mode of ["subagents", "off", "all"]) {
+        await app.setMode(mode);
+        await frames(app);
+        assert.equal(await app.ev(`!!${V}.edit`), true, `still editing after the switch to ${mode}`);
+        assert.deepStrictEqual((await dimState(app)).errors, [], `after the switch to ${mode}`);
+      }
+      await app.ev(`${V}.editBar.querySelector("button").click()`);
+      await frames(app);
+      assert.equal(await app.ev(`!!${V}.edit`), false, "the edit cancelled");
+      const cancelled = await dimState(app);
+      assert.deepStrictEqual([cancelled.errors, cancelled.dimmed], [[], 0], "after the cancel: no entry dimmed");
+    },
+  },
+  {
+    // the agent process killed while a subagent runs: no ● left in the chat or the panel, a mode switch on the dead
+    // view keeps the placement, resuming builds the view and its panel again from the replay
+    name: "dead-view",
+    modes: ["all"],
+    scenario: WAIT_SCENARIO,
+    async run(app) {
+      await untilHalfway(app);
+      assert.ok(await app.ev(`!!${V}.panelBody.querySelector(".mark.running")`), "a ● entry in the panel");
+      const pids = agentPids(app);
+      assert.equal(pids.length, 1, "one agent process for the session");
+      process.kill(pids[0], "SIGKILL");
+      await app.check(`${V}.dead`, "the view to be dead");
+      await frames(app);
+      assert.deepStrictEqual(
+        await app.ev(`({ chat: ${V}.log.querySelectorAll(".mark.running").length, panel: ${V}.panelBody.querySelectorAll(".mark.running").length, bg: ${V}.bgEl.hidden })`),
+        { chat: 0, panel: 0, bg: true },
+        "no ● in the dead view",
+      );
+      await assertPlacement(app, "all", "in the dead view");
+      await app.setMode("subagents");
+      await assertPlacement(app, "subagents", "after a switch on the dead view");
+      await app.setMode("all");
+      await assertPlacement(app, "all", "after a switch back on the dead view");
+      await app.ev(`window.__dead = ${V}`);
+      await app.ev(`openSession({ sessionId: "scripted-work", cwd: ${JSON.stringify(path.join(app.dir, "work"))} })`, "the session to resume");
+      await app.idle();
+      assert.equal(await app.ev(`${V} !== __dead && !${V}.dead && !__dead.el.isConnected`), true, "a new view");
+      assert.ok(await app.ev(`${V}.panelBody.childElementCount`) > 0, "the new view's panel has entries");
+      await assertPlacement(app, "all", "after resuming");
+    },
+  },
+  {
+    // Stop while a sync subagent streams: the group's header in the chat and its entry in the panel show the marks
+    // of mode off
+    name: "stop-marks",
+    scenario: WAIT_SCENARIO,
+    async run(app) {
+      const mode = await savedMode(app);
+      await untilHalfway(app);
+      await app.ev(`${V}.stopBtn.click()`);
+      await app.idle();
+      const marks = await groupMarks(app);
+      assert.deepStrictEqual(marks.map(({ kind, chat }) => ({ kind, chat })), STOP_MARKS, "the marks in the chat");
+      for (const m of marks) if (m.entry !== null) assert.equal(m.entry, m.chat, `the ${m.kind} entry's mark`);
+      await assertPlacement(app, mode, "after the Stop");
+    },
+  },
+  {
+    // the mode switched while another view is active: shown again, the view has its groups where the new mode says
+    // and its following log and panel at their bottoms
+    name: "inactive-view",
+    modes: ["all"],
+    scenario: SCROLL_SCENARIO,
+    async run(app) {
+      await app.resize(1280, 500);
+      await app.newSession();
+      const other = await app.ev(`(async () => {
+        await newSession(${V}.cwd.replace(/\\/[^/]+$/, "")); // a second session, in the launch's folder
+        return [...views.keys()].find((id) => id !== "scripted-work") ?? null;
+      })()`);
+      assert.ok(other, "a second view");
+      await activate(app, "scripted-work");
+      await app.send("Explain the files.");
+      await app.idle();
+      await followingPanel(app);
+      for (const mode of ["subagents", "off", "all"]) {
+        await activate(app, other);
+        await app.setMode(mode);
+        assert.equal(await app.ev(`${V}.el.classList.contains("active")`), false, `the view hidden while the mode switched to ${mode}`);
+        await activate(app, "scripted-work");
+        await assertPlacement(app, mode, `shown again after the switch to ${mode}`);
+        assert.equal(await app.ev(`${V}.follow`), true, `the log follows after the switch to ${mode}`);
+        assert.ok((await assertAtBottom(app, LOG, `the log shown again after the switch to ${mode}`)).over > 100, "the log overflows");
+        if (mode !== "off") assert.ok((await assertAtBottom(app, PANEL, `the panel shown again after the switch to ${mode}`)).over > 100, "the panel overflows");
+      }
+    },
+  },
+  {
+    // every turn has exactly one Fork/Delete outside its user message, live and after a replay
+    name: "one-acts-per-turn",
+    async run(app) {
+      await playScenario(app);
+      assert.deepStrictEqual(await turnActs(app), { counts: [1, 1, 1], doubles: [] }, "live");
+      await app.reload();
+      assert.deepStrictEqual(await turnActs(app), { counts: [1, 1, 1], doubles: [] }, "after the replay");
     },
   },
 ];
