@@ -60,6 +60,15 @@
           <select id="set-context"><option value="default">200k</option><option value="long_context">1M</option></select>
         </label>
         <p class="hint">Used by new sessions and by sessions whose Context is "Default", the next time their Copilot starts. Open sessions keep theirs. 1M needs a model with a long-context tier (e.g. Claude Sonnet 5.5) and may cost more.</p>
+        <h3>Relay broker</h3>
+        <label>
+          Repository folder
+          <span class="field-row"><input id="set-broker-repo" spellcheck="false" /><button id="set-broker-browse" type="button">Browse…</button></span>
+        </label>
+        <p class="hint">The copilot-relay folder the broker runs from. The button brings it to the latest main (uncommitted changes go to a stash), installs it and restarts the broker. The app and its sessions stay open.</p>
+        <div class="store-actions"><button id="broker-restart" type="button">Update and restart broker</button></div>
+        <ul id="broker-steps"></ul>
+        <p class="hint" id="broker-summary"></p>
         <h3>Files</h3>
         <div class="store">
           <div class="store-label">Pasted images</div>
@@ -156,6 +165,7 @@
     <script src="activity.js"></script>
     <script src="../node_modules/@highlightjs/cdn-assets/highlight.min.js"></script>
     <script src="file-preview.js"></script>
+    <script src="broker-restart.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

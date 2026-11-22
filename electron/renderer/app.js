@@ -3216,8 +3216,38 @@ async function openSettings() {
   $("#set-relay-hint").textContent = s.relayAvailable
     ? `Open sessions can message each other and terminal sessions through the broker at ${s.relayUrl}. Applies to sessions opened after saving.`
     : "relay-client.mjs is missing from this build, so the relay is not available.";
+  brokerRepoDefault = s.brokerRepoDefault;
+  $("#set-broker-repo").value = s.brokerRepo || s.brokerRepoDefault;
+  renderBroker(await api.brokerStatus().catch(() => null));
   $("#settings").showModal();
 }
+// "Relay broker" section: one row per step of the restart run, the summary, the button locked while it runs
+let brokerRepoDefault = "";
+function renderBroker(st) {
+  if (!st) return;
+  $("#broker-steps").replaceChildren(
+    ...st.steps.map((step) => {
+      const row = BrokerRestart.stepRow(step);
+      return h("li", { class: row.cls }, h("span", { class: "mark" }, row.mark), h("span", {}, row.text));
+    }),
+  );
+  $("#broker-summary").textContent = st.summary;
+  $("#broker-restart").disabled = st.running;
+}
+api.onBrokerRestart(renderBroker);
+$("#set-broker-browse").addEventListener("click", async () => {
+  const dir = await api.pickDir("copilot-relay repository").catch(() => null);
+  if (dir) $("#set-broker-repo").value = dir;
+});
+$("#broker-restart").addEventListener("click", async () => {
+  try {
+    const q = BrokerRestart.restartQuestion(await api.brokerStatus());
+    if (q && !confirm(q)) return;
+    await api.brokerRestart($("#set-broker-repo").value);
+  } catch (err) {
+    $("#broker-summary").textContent = err.message;
+  }
+});
 async function renderStorage(message = "") {
   try {
     const st = await api.storage();
@@ -3250,7 +3280,7 @@ $("#store-clear").addEventListener("click", async (e) => {
 
 $("#settings").addEventListener("close", async () => {
   if ($("#settings").returnValue !== "save") return;
-  await api.setSettings({ copilotCommand: $("#set-command").value, relay: $("#set-relay").checked, contextTier: $("#set-context").value, queueMidTurn: $("#set-queue").checked, activityPanel: $("#set-activity").value });
+  await api.setSettings({ copilotCommand: $("#set-command").value, relay: $("#set-relay").checked, contextTier: $("#set-context").value, queueMidTurn: $("#set-queue").checked, activityPanel: $("#set-activity").value, brokerRepo: $("#set-broker-repo").value.trim() === brokerRepoDefault ? "" : $("#set-broker-repo").value });
   queueMidTurn = $("#set-queue").checked;
   activityPanel = $("#set-activity").value;
   for (const v of views.values()) v.settingChanged();

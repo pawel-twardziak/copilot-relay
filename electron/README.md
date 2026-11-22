@@ -108,6 +108,21 @@ identity it has in a terminal (`cli:<sessionId>`), so it keeps its relay name. I
   and starts `../server.mjs` itself when run from the repo. If the broker is unreachable, the header shows
   `relay: offline` and the app keeps retrying.
 - Turn it off in **⚙ Settings → Connect sessions to copilot-relay**. The change applies to sessions opened afterwards.
+- **⚙ Settings → Relay broker → Update and restart broker** brings the broker to the latest code without closing
+  the app or its sessions. Set the copilot-relay repository folder first (it defaults to the folder of the broker
+  the app starts). The button runs six steps and shows each one:
+  1. **Check** – the folder is a copilot-relay repository.
+  2. **Update** – `git fetch`, then the latest `main` is checked out. Uncommitted changes go to a stash named
+     `copilot-sessions restart <time>`; the stash is kept and never applied or dropped.
+  3. **Install** – `npm ci`, then the extension installer (`install-extension`).
+  4. **Stop** – the old broker is asked to shut down.
+  5. **Start** – the new broker starts from the folder.
+  6. **Reconnect** – the app's sessions register with the new broker again.
+
+  If a step fails, the later ones are skipped and the summary says where it stopped. The app asks first when a
+  session is working or when sessions started from the broker's web page would end. Sessions in terminals reconnect
+  on their own. A broker started before this version cannot be stopped by the button: stop it by hand once, then the
+  button works.
 
 ## File links and preview
 

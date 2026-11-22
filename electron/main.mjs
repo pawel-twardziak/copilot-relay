@@ -20,6 +20,7 @@ import { listAllPages } from "./session-list.mjs";
 import { beginPrompt, endPrompt } from "./prompt-count.mjs";
 import { normalizePanelMode } from "./activity-panel.mjs";
 import { createTierStore, effectiveTier, normalizeTier, switchTier, tierArgs, withContextOption } from "./context-tier.mjs";
+import { createRestarter, realEffects, reconnectClients } from "./broker-restart.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 let win = null;
@@ -1032,8 +1033,8 @@ handle("relay:rename", async (sessionId, name) => {
   return relay.rename(name);
 });
 
-handle("dialog:pickDir", async () => {
-  const r = await dialog.showOpenDialog(win, { title: "Folder for the new session", properties: ["openDirectory", "createDirectory"] });
+handle("dialog:pickDir", async (title) => {
+  const r = await dialog.showOpenDialog(win, { title: title || "Folder for the new session", properties: ["openDirectory", "createDirectory"] });
   return r.canceled ? null : r.filePaths[0];
 });
 
@@ -1047,13 +1048,39 @@ handle("settings:get", async () => ({
   contextTier: normalizeTier(loadSettings().contextTier) ?? "default",
   queueMidTurn: loadSettings().queueMidTurn === true,
   activityPanel: normalizePanelMode(loadSettings().activityPanel),
+  brokerRepo: loadSettings().brokerRepo ?? "",
+  brokerRepoDefault: defaultBrokerRepo(),
 }));
 handle("settings:set", async (s) => {
-  saveSettings({ ...loadSettings(), copilotCommand: String(s.copilotCommand ?? "").trim(), relay: s.relay !== false, contextTier: normalizeTier(s.contextTier) ?? "default", queueMidTurn: s.queueMidTurn === true, activityPanel: normalizePanelMode(s.activityPanel) });
+  saveSettings({ ...loadSettings(), copilotCommand: String(s.copilotCommand ?? "").trim(), relay: s.relay !== false, contextTier: normalizeTier(s.contextTier) ?? "default", queueMidTurn: s.queueMidTurn === true, activityPanel: normalizePanelMode(s.activityPanel), brokerRepo: String(s.brokerRepo ?? "").trim() });
   lister?.kill();
   lister = null;
   return true;
 });
+
+// ---------- broker restart ----------
+
+const restarter = createRestarter({
+  fx: realEffects({ reconnect: (ms) => reconnectClients([...open.values()].map((e) => e.relay).filter(Boolean), ms) }),
+  notify: (s) => send("broker:restart", s),
+});
+const defaultBrokerRepo = () => {
+  const script = relayConfig().brokerScript;
+  return script ? path.dirname(script) : "";
+};
+
+handle("broker:status", async () => {
+  const working = [...open.values()].filter((e) => e.prompting || e.permissions.size).length;
+  let acpSessions = 0;
+  try {
+    const health = await (await fetch(`${relayConfig().url}/health`, { signal: AbortSignal.timeout(2000) })).json();
+    acpSessions = Number.isInteger(health?.acpSessions) ? health.acpSessions : 0;
+  } catch {}
+  return { ...restarter.snapshot(), working, acpSessions };
+});
+handle("broker:restart", async (repo) =>
+  restarter.start({ repo: String(repo ?? "").trim() || defaultBrokerRepo(), url: relayConfig().url, copilotHome: process.env.COPILOT_HOME || undefined }),
+);
 
 // ---------- links ----------
 

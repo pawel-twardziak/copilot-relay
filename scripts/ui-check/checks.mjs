@@ -2,6 +2,7 @@
 // app is a driver (driver.mjs) launched with the check's scenario (default panel-scenario.mjs), its mode already set.
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { LATE_TEXT } from "../../electron/test/fixtures/acp/late-group-scenario.mjs";
@@ -150,6 +151,8 @@ async function followingPanel(app) {
 }
 
 // --- width, collapse and the narrow drawer (Task 5)
+// a folder that does not exist: the broker-restart check restarts nothing
+const NO_BROKER_REPO = path.join(os.tmpdir(), "copilot-relay-ui-check-no-such-repo");
 const LONG_WAIT_SCENARIO = path.join(FIXTURES, "panel-long-wait-scenario.mjs");
 /** The view's panel as you see it: its width in real pixels, 0 when it is not shown. */
 const panelWidth = (app, v = V) => app.ev(`(() => { const p = ${v}.panel; return p.checkVisibility() ? Math.round(p.getBoundingClientRect().width) : 0; })()`);
@@ -1116,6 +1119,55 @@ export const checks = [
       await assertHeaders("live");
       await app.reload();
       await assertHeaders("after the replay");
+    },
+  },
+  {
+    // Settings > Relay broker: the question before a restart, and the run's rows. The repository folder does not
+    // exist, so the run stops at its first step: the button is never clicked with a real folder in the field.
+    name: "broker-restart",
+    modes: ["off"],
+    scenario: LONG_WAIT_SCENARIO,
+    settings: { brokerRepo: NO_BROKER_REPO },
+    async run(app) {
+      const rows = () => app.ev(`[...document.querySelectorAll("#broker-steps li")].map((li) => ({ cls: li.className, text: li.textContent }))`);
+      const openSettings = async () => {
+        await app.ev(`document.querySelector("#btn-settings").click()`);
+        await app.check(`document.querySelector("#settings").open`, "the Settings dialog");
+        await app.check(`document.querySelector("#set-broker-repo").value !== ""`, "the repository field");
+        // safety: nothing below clicks the button unless the field holds the folder that does not exist
+        assert.equal(await app.ev(`document.querySelector("#set-broker-repo").value`), NO_BROKER_REPO, "the repository field");
+      };
+      await app.newSession();
+      await openSettings();
+      assert.equal(await app.ev(`document.querySelector("#broker-restart").disabled`), false, "the button enabled");
+      assert.deepStrictEqual(await rows(), [], "no steps before a run");
+      await app.ev(`document.querySelector("#settings").close()`);
+      // a working session: the question comes first, and "no" starts nothing
+      await app.send("Look around.");
+      await app.check(`${V}.busy`, "the turn to run");
+      await openSettings();
+      await app.ev(`(() => { window.confirm = (m) => ((window.__q = m), false); document.querySelector("#broker-restart").click(); })()`);
+      await app.check(`!!window.__q`, "the question");
+      assert.match(await app.ev(`window.__q`), /^1 session is working/, "the question");
+      assert.deepStrictEqual(await rows(), [], "no step after No");
+      await app.ev(`document.querySelector("#settings").close()`);
+      await app.ev(`${V}.cancel()`);
+      await app.idle();
+      // no turn: no question, the run stops at Check
+      await openSettings();
+      await app.ev(`(() => { window.__q = null; window.confirm = (m) => ((window.__q = m), false); document.querySelector("#broker-restart").click(); })()`);
+      await app.check(`document.querySelectorAll("#broker-steps li").length === 6 && !document.querySelector("#broker-restart").disabled`, "the run to stop");
+      assert.equal(await app.ev(`window.__q`), null, "no question without working sessions");
+      const stopped = await rows();
+      assert.equal(stopped[0].cls, "failed");
+      assert.ok(stopped[0].text.includes("Check: Not a copilot-relay folder:"), stopped[0].text);
+      assert.deepStrictEqual(stopped.slice(1).map((r) => r.cls), ["pending", "pending", "pending", "pending", "pending"]);
+      assert.equal(await app.ev(`document.querySelector("#broker-summary").textContent`), "Stopped at Check. The broker was not restarted.");
+      // reopened: the same rows and summary
+      await app.ev(`document.querySelector("#settings").close()`);
+      await openSettings();
+      assert.deepStrictEqual(await rows(), stopped, "the rows after reopening");
+      assert.equal(await app.ev(`document.querySelector("#broker-summary").textContent`), "Stopped at Check. The broker was not restarted.");
     },
   },
 ];
