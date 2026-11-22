@@ -23,6 +23,13 @@ function openViewerFrom(img) {
   );
 }
 
+/** Moves node into parent before ref; with moveBefore where it can (both in the page), which keeps the node's state
+ *  (focus, scroll offsets) that a removal and an insertion reset. */
+function moveNode(parent, node, ref) {
+  if (parent.moveBefore && parent.isConnected && node.isConnected) parent.moveBefore(node, ref);
+  else parent.insertBefore(node, ref);
+}
+
 /** Tiny DOM helper: h("div", { class: "x", onclick }, child, "text") */
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
@@ -232,6 +239,7 @@ let tree = SessionTree.index(links); // parent/child index over `links` (bare se
 const views = new Map(); // sessionId -> SessionView
 let activeId = null;
 let queueMidTurn = false; // setting: deliver queued messages while a turn runs
+let activityPanel = "off"; // setting: where activity group details open (off | subagents | all)
 /** Text of a replayed user message as the user sees it: a queued message comes back wrapped, the app's continue
  *  prompt as its label. */
 const shownUserText = (raw) => (MessageQueue.isContinuePrompt(raw) ? MessageQueue.CONTINUE_LABEL : MessageQueue.unwrap(raw) ?? raw);
@@ -252,6 +260,7 @@ api
   .getSettings()
   .then((s) => {
     queueMidTurn = s.queueMidTurn === true;
+    activityPanel = s.activityPanel ?? "off";
     for (const v of views.values()) v.settingChanged(); // views opened before the settings arrived
   })
   .catch(() => {});
@@ -313,6 +322,24 @@ class SessionView {
     this.usageLabel = h("span", { class: "label" }, "context: —");
     this.usageChip = h("span", { class: "usage-chip" }, h("span", { class: "meter" }, this.usageFill), this.usageLabel);
     this.log = h("div", { class: "log" });
+    // the activity panel beside the log: in a panel mode it holds the bodies of groups (place), each in an entry
+    this.panelBody = h("div", { class: "panel-body" }); // the panel's scroller, zoomed with the chat
+    this.panelClose = h("button", { onclick: () => this.hidePanel() }); // collapse, or close the drawer
+    const panelHead = h("div", { class: "panel-head" }, h("span", { class: "title" }, "Activity"), this.panelClose);
+    this.panel = h("aside", { class: "activity-panel", hidden: true }, panelHead, this.panelBody); // hidden: no entry
+    // Esc inside the open drawer closes it; listened to here only, so Esc elsewhere keeps its meaning (stop the
+    // turn, cancel an edit, close the command popup, the image viewer or the file preview). A held Esc's repeats do
+    // nothing: one press closes the drawer and no more
+    this.panel.addEventListener("keydown", (e) => {
+      if (e.key !== "Escape" || e.repeat || !this.row.classList.contains("drawer-open")) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.setDrawer(false);
+    });
+    this.panelHandle = h("div", { class: "panel-handle", hidden: true, onpointerdown: (e) => this.dragPanel(e) });
+    this.row = h("div", { class: "chat-row" }, this.log, this.panelHandle, this.panel);
+    this.drawerOpen = false; // the narrow layout's drawer: per view, not stored (layoutPanel)
+    new ResizeObserver(() => this.layoutPanel()).observe(this.row); // the layout follows the view's width
     this.follow = true; // follow streamed output: off once you scroll up, on again near the bottom
     this.lastTop = 0;
     this.log.addEventListener("scroll", () => {
@@ -320,6 +347,21 @@ class SessionView {
       this.follow = ScrollFollow.followAfterScroll(this.follow, this.lastTop, { top, height, client });
       this.lastTop = top;
     });
+    // the panel follows its own output on the same rule; panel content never changes the log's follow
+    this.panelFollow = true;
+    this.panelLastTop = 0;
+    this.panelOwnTop = null; // where the app's own scroll (showInPanel, an entry opened) left the panel: not your scroll
+    this.panelBody.addEventListener("scroll", () => {
+      const { scrollTop: top, scrollHeight: height, clientHeight: client } = this.panelBody;
+      if (top !== this.panelOwnTop) this.panelFollow = ScrollFollow.followAfterScroll(this.panelFollow, this.panelLastTop, { top, height, client });
+      this.panelOwnTop = null;
+      this.panelLastTop = top;
+    });
+    // a size change (a resize, the panel showing or hiding, the view becoming visible) fires no scroll event: a
+    // following log or panel goes back to its bottom
+    const resized = new ResizeObserver(() => this.followBottom());
+    resized.observe(this.log);
+    resized.observe(this.panelBody);
     this.input = h("textarea", { rows: 2, placeholder: "Message Copilot…  (Enter to send, Shift+Enter for a new line, Left Shift+↑/↓ for your earlier messages, Esc to stop)" });
     this.sendBtn = h("button", { class: "primary", onclick: () => this.send() }, "Send");
     this.stopBtn = h("button", { onclick: () => this.cancel(), disabled: true }, "Stop");
@@ -339,6 +381,8 @@ class SessionView {
     this.cmdIndex = 0;
     this.cmdToken = null;
     this.filesBtn = h("button", { title: "Files opened from this conversation", hidden: true, onclick: () => filePreview.show(this) });
+    // shown while the view has a panel entry: shows or hides the panel (wide layout) or the drawer (narrow)
+    this.activityBtn = h("button", { title: "Show or hide the activity panel", hidden: true, onclick: () => this.togglePanel() }, "Activity");
     this.cmdPopup = h("div", { class: "cmd-popup", role: "listbox", hidden: true, onmousedown: (e) => e.preventDefault() });
     this.editText = h("span");
     this.queueEl = h("div", { class: "queue-strip", hidden: true });
@@ -356,12 +400,13 @@ class SessionView {
         this.selects,
         this.closeChildrenBtn,
         this.filesBtn,
+        this.activityBtn,
         h("button", { title: "Copy the whole conversation as Markdown", onclick: (e) => this.copyThread(e.currentTarget) }, "Copy thread"),
         h("button", { class: "danger", title: "Close this session in the app (it stays resumable)", onclick: () => closeView(this.sessionId) }, "Close"),
         h("button", { class: "danger", title: "Delete this whole session from disk", onclick: () => deleteSessionFlow({ sessionId: this.sessionId, cwd: this.cwd, title: this.title }) }, "Delete"),
       ),
       this.relationsEl,
-      this.log,
+      this.row,
       this.editBar,
       this.queueEl,
       h("div", { class: "composer" }, this.cmdPopup, this.input, this.agentPicker, h("div", { class: "btns" }, this.sendBtn, this.stopBtn)),
@@ -369,7 +414,8 @@ class SessionView {
     );
     this.bgEl.onclick = () => {
       const first = this.activity.running().map((id) => this.groupEls.get(id)).find(Boolean);
-      first?.scrollIntoView({ block: "nearest" });
+      if (first?.classList.contains("in-panel")) this.showInPanel(first);
+      else first?.scrollIntoView({ block: "nearest" });
     };
     // Left Shift+Up/Down walks through your earlier messages, with the draft as the newest entry; registered first,
     // so it also works while the command popup is open. Right Shift+arrows still extend the text selection.
@@ -423,17 +469,8 @@ class SessionView {
     this.input.addEventListener("paste", (e) => this.onFiles(e, e.clipboardData));
     this.input.addEventListener("dragover", (e) => e.preventDefault());
     this.input.addEventListener("drop", (e) => this.onFiles(e, e.dataTransfer));
-    // left click, Enter on a focused link (fires "click") and middle click all go through openLink
-    const onLink = (e) => {
-      if (e.type === "auxclick" && e.button !== 1) return;
-      const a = e.target.closest("a[href]");
-      const p = e.target.closest("[data-path]");
-      if (!a && !p) return;
-      e.preventDefault();
-      this.openLink(a ? a.getAttribute("href") : p.dataset.path, a?._base ?? this.cwd);
-    };
-    this.log.addEventListener("click", onLink);
-    this.log.addEventListener("auxclick", onLink);
+    this.bindLinks(this.log);
+    this.bindLinks(this.panelBody);
     this.setTitle(title);
     this.updateFilesBtn();
     $("#main").append(this.el);
@@ -496,6 +533,21 @@ class SessionView {
       const src = ref.dataset.src;
       ref.replaceWith(h("span", { class: "thumbs inline" }, src ? this.thumb(src, ref.dataset.alt) : null));
     }
+  }
+
+  /** Links and file paths in el: left click, Enter on a focused link (fires "click") and middle click all go
+   *  through openLink. */
+  bindLinks(el) {
+    const onLink = (e) => {
+      if (e.type === "auxclick" && e.button !== 1) return;
+      const a = e.target.closest("a[href]");
+      const p = e.target.closest("[data-path]");
+      if (!a && !p) return;
+      e.preventDefault();
+      this.openLink(a ? a.getAttribute("href") : p.dataset.path, a?._base ?? this.cwd);
+    };
+    el.addEventListener("click", onLink);
+    el.addEventListener("auxclick", onLink);
   }
 
   async openLink(href, base = this.cwd) {
@@ -715,6 +767,17 @@ class SessionView {
     this.follow = true;
     this.log.scrollTop = this.log.scrollHeight;
   }
+  panelToBottom() {
+    this.panelFollow = true;
+    this.panelBody.scrollTop = this.panelBody.scrollHeight;
+  }
+  /** After new content or a size change: the log and the panel, each at its bottom if it follows. Nothing during a
+   *  replay: the end of the replay takes both to their bottoms once (a layout per replayed block slowed every open). */
+  followBottom() {
+    if (this.resuming) return;
+    if (this.follow) this.toBottom();
+    if (this.panelFollow) this.panelToBottom();
+  }
   /** Your messages in this thread, oldest first. Relay messages from other sessions are not yours: live ones are
    *  .msg.relay, replayed ones are .msg.user with the broker's "[from <name>]" prefix. */
   ownMessages() {
@@ -750,7 +813,8 @@ class SessionView {
   append(el) {
     this.markTurn(el);
     this.log.append(el);
-    if (this.follow) this.toBottom();
+    if (el._info) this.place(el); // a group: its body goes where the mode says
+    this.followBottom();
     return el;
   }
   /** Number user/relay messages (turn ordinals, as in events.jsonl) and give them and the first reply block of
@@ -866,6 +930,7 @@ class SessionView {
     const ownText = String((el._ownText ?? el._matchText)());
     this.edit = { el, ordinal: el._turn, matchText, ownText, draft };
     el.classList.add("edit-from");
+    this.dimEntries();
     this.editText.textContent = EditMessage.editBanner(count.removedUserMessages);
     this.editBar.hidden = false;
     this.input.value = ownText;
@@ -880,8 +945,18 @@ class SessionView {
     if (!this.edit) return;
     this.edit.el.classList.remove("edit-from");
     this.edit = null;
+    this.dimEntries();
     this.editBar.hidden = true;
     if (!this.busy) queueMicrotask(() => this.pump());
+  }
+
+  /** Edit mode dims the panel entries of the groups after the message being edited, as the log dims those groups
+   *  (.edit-from ~ *, a sibling rule that cannot reach the panel); no entry is dimmed when not editing. */
+  dimEntries() {
+    const from = this.edit?.el;
+    for (const g of this.log.querySelectorAll(":scope > .group")) {
+      g._entry?.classList.toggle("dim", !!from && !!(from.compareDocumentPosition(g) & Node.DOCUMENT_POSITION_FOLLOWING));
+    }
   }
 
   /** Leave edit mode and bring back what was typed before it. */
@@ -997,9 +1072,11 @@ class SessionView {
     return this.append(h("div", { class: "msg error" }, text));
   }
 
-  /** A setting changed: re-apply the busy state so the Send button and status line follow it. */
+  /** A setting changed: re-apply the busy state so the Send button and status line follow it, and put the groups'
+   *  bodies where activityPanel says. */
   settingChanged() {
     this.setBusy(this.busy);
+    this.placeAll();
   }
 
   /** A prompt of this view is pending (the user_message_chunk of a live prompt is not shown again). */
@@ -1290,7 +1367,7 @@ class SessionView {
       if (!this.dirty.size) return;
       for (const r of this.dirty) renderRun(r);
       this.dirty.clear();
-      if (this.follow) this.toBottom();
+      this.followBottom();
     });
   }
   /** Before something else is appended to the log: finish the streamed blocks (finishRuns); chunks without a
@@ -1304,9 +1381,12 @@ class SessionView {
     // rendered yet is rendered now (final render, with links); one whose last frame rendered everything only gets
     // the links, so the message is not parsed again and a text selection in it survives. A message that streams on
     // later (a background subagent) is rendered again in its own block and finished at the next flush.
+    let rendered = false;
     for (const r of this.touched) {
-      if (this.dirty.has(r)) renderRun(r, true);
-      else if (r.type === "agent") linkify(r.body, { codeOnly: true });
+      if (this.dirty.has(r)) {
+        renderRun(r, true);
+        rendered = true;
+      } else if (r.type === "agent") linkify(r.body, { codeOnly: true });
       else if (r.type === "user") linkify(r.body);
       if (r.type === "agent") this.imageRefs(r.body);
       else if (r.type === "user") this.mentionThumbs(r.el, r.text);
@@ -1318,6 +1398,7 @@ class SessionView {
     }
     this.touched.clear();
     this.dirty.clear();
+    if (rendered) this.followBottom(); // a block rendered here (the turn's last text, at its end) grew: no frame follows it
   }
 
   // --- groups: the main agent's work (tools, thinking) and each subagent, collapsed (Activity decides the place)
@@ -1326,7 +1407,13 @@ class SessionView {
     const mark = h("span", { class: "mark" });
     const name = h("span", { class: "title" });
     const body = h("div", { class: "group-body" });
-    const el = h("details", { class: `group ${kind}` }, h("summary", {}, mark, name), body);
+    const summary = h("summary", {}, mark, name);
+    const el = h("details", { class: `group ${kind}` }, summary, body);
+    summary.addEventListener("click", (e) => {
+      if (!el.classList.contains("in-panel")) return;
+      e.preventDefault(); // its body is in the panel: no toggle, the panel shows it
+      this.showInPanel(el);
+    });
     // (the kind is in _info: el._kind is the turn mark's "user"/"reply")
     el._info = { kind, title, prompt, status: "running", tools: 0, thoughts: 0, running: new Map(), failed: new Set(), leftover: new Set(), waiting: false, lastLine: "" }; // running: toolCallId -> title
     Object.assign(el, { _body: body, _runs: StreamRuns.create(), _anchored: anchored });
@@ -1342,11 +1429,15 @@ class SessionView {
       const i = el._info;
       // work: ● while a tool runs, then ✗ if one failed, ○ if one never ended or was interrupted, else ✓
       const status = kind === "work" ? (i.running.size ? "running" : i.failed.size ? "failed" : i.leftover.size ? "quiet" : "completed") : i.status;
-      mark.className = `mark ${status}`;
-      mark.textContent = Activity.MARKS[status] ?? Activity.MARKS.running;
-      mark.title = MARK_TITLES[status] ?? MARK_TITLES.running;
       const runningTitle = [...i.running.values()].pop();
-      name.textContent = name.title = Activity.headerText({ kind, title: i.title, tools: i.tools, thoughts: i.thoughts, runningTitle, lastLine: i.status === "running" ? i.lastLine : "", waiting: i.waiting });
+      const text = Activity.headerText({ kind, title: i.title, tools: i.tools, thoughts: i.thoughts, runningTitle, lastLine: i.status === "running" ? i.lastLine : "", waiting: i.waiting });
+      // the group's summary in the chat, and its entry's in the panel once it has one
+      for (const [m, n] of el._entry ? [[mark, name], [el._entry._mark, el._entry._name]] : [[mark, name]]) {
+        m.className = `mark ${status}`;
+        m.textContent = Activity.MARKS[status] ?? Activity.MARKS.running;
+        m.title = MARK_TITLES[status] ?? MARK_TITLES.running;
+        n.textContent = n.title = text;
+      }
     };
     el._renderHeader();
     return el;
@@ -1360,11 +1451,11 @@ class SessionView {
     return this.append(this.groupElement("work"));
   }
 
-  /** An item into a group's body: never a turn mark; the log still follows the bottom. */
+  /** An item into a group's body: never a turn mark; the log and the panel still follow their bottoms. */
   groupAppend(group, el) {
     group._body.append(el);
     group._renderHeader();
-    if (this.follow) this.toBottom();
+    this.followBottom();
   }
 
   /** Route an update (Activity) and apply the group changes it brings. */
@@ -1440,7 +1531,7 @@ class SessionView {
       g._info.running.delete(replacesTool);
       g._info.failed.delete(replacesTool);
       if (g._body.childElementCount || g._turn) g._renderHeader();
-      else g.remove();
+      else this.removeGroup(g);
     }
     this.groupEls.set(groupId, el);
     this.renderTask(el);
@@ -1455,7 +1546,7 @@ class SessionView {
     const items = [...from._body.childNodes];
     if (into._prompt) into._prompt.after(...items);
     else into._body.prepend(...items);
-    if (from.open) into.open = true; // you opened it: it stays open
+    if (this.isOpen(from)) this.setOpen(into, true); // you opened it: it stays open
     into._runs = from._runs; // a continuing message keeps its block (an unlinked task group never streamed: no runs of its own)
     into._info.tools += from._info.tools;
     into._info.thoughts += from._info.thoughts;
@@ -1463,8 +1554,162 @@ class SessionView {
     for (const id of from._info.failed) into._info.failed.add(id);
     for (const id of from._info.leftover) into._info.leftover.add(id);
     for (const t of this.tools.values()) if (t.group === from) t.group = into;
-    from.remove();
+    this.removeGroup(from);
     into._renderHeader();
+  }
+
+  // --- the activity panel: a group's body inside the group (inline) or inside its entry in the panel
+  /** Put the group's body where the mode says (Activity.inPanel, read here only): inside the group, or inside the
+   *  group's entry in the panel, the entries in the order of their groups in the log. Only what changes place is
+   *  moved; the open state goes with the body. dim false: the caller dims the entries (placeAll, once for all). */
+  place(group, dim = true) {
+    const inPanel = Activity.inPanel(activityPanel, group._info.kind);
+    if (inPanel && !group._entry) {
+      const mark = h("span", { class: "mark" });
+      const name = h("span", { class: "title" });
+      const summary = h("summary", {}, mark, name);
+      // you open it to read it: the panel stops following. Opened here rather than by the default action, so that
+      // the browser's scroll anchoring for the grown entry happens when scrollTop is read, and its scroll is the app's
+      summary.addEventListener("click", (e) => {
+        if (group._entry.open) return;
+        e.preventDefault();
+        group._entry.open = true;
+        this.panelFollow = false;
+        this.panelOwnTop = this.panelBody.scrollTop;
+      });
+      group._entry = Object.assign(h("details", { class: `panel-entry ${group._info.kind}` }, summary), { _mark: mark, _name: name });
+      group._renderHeader();
+    }
+    const holder = inPanel ? group._entry : group;
+    if (inPanel) {
+      // before the entry of the next group in the log that has one in the panel
+      let next = group.nextElementSibling;
+      while (next && next._entry?.parentNode !== this.panelBody) next = next.nextElementSibling;
+      const ref = next?._entry ?? null;
+      if (holder.parentNode !== this.panelBody || holder.nextElementSibling !== ref) moveNode(this.panelBody, holder, ref);
+    }
+    const from = group._body.parentNode;
+    if (from !== holder) {
+      const open = from.open;
+      moveNode(holder, group._body, null);
+      from.open = false;
+      holder.open = open;
+    }
+    if (!inPanel) group._entry?.remove();
+    group.classList.toggle("in-panel", inPanel);
+    if (dim && this.edit) this.dimEntries(); // a group created or moved during an edit (none is dimmed otherwise)
+    this.updatePanelShown();
+  }
+
+  /** place() for every group of the log, in log order (the mode changed). */
+  placeAll() {
+    for (const g of this.log.querySelectorAll(":scope > .group")) this.place(g, false);
+    if (this.edit) this.dimEntries(); // once for all the groups, not once per group
+    this.followBottom(); // bodies that moved changed the content of the log and the panel, not always their size
+  }
+
+  /** The panel shows while it has an entry. */
+  updatePanelShown() {
+    const hidden = !this.panelBody.firstElementChild;
+    if (hidden === this.panel.hidden) return;
+    this.panel.hidden = this.panelHandle.hidden = hidden;
+    this.layoutPanel();
+  }
+
+  /** The panel's geometry for the view's width (UiState.panelLayout): its width, the narrow layout (a drawer over
+   *  the log) and what shows: in the wide layout the panel unless collapsed (ui.panelCollapsed), in the narrow one
+   *  the drawer while open (drawerOpen). panel.hidden keeps meaning "no entry"; the rest is classes on the row. */
+  layoutPanel() {
+    this.activityBtn.hidden = this.panel.hidden;
+    const viewWidth = this.row.clientWidth;
+    if (!viewWidth) return; // not shown: laid out when it shows (the row's ResizeObserver)
+    const { narrow, width } = UiState.panelLayout(viewWidth, ui.panelWidth);
+    this.panel.style.width = `${width}px`;
+    this.row.classList.toggle("narrow", narrow);
+    this.row.classList.toggle("collapsed", !narrow && ui.panelCollapsed);
+    this.row.classList.toggle("drawer-open", narrow && this.drawerOpen);
+    this.panelClose.textContent = narrow ? "✕" : "»";
+    this.panelClose.title = narrow ? "Close (Esc)" : "Hide the activity panel";
+  }
+  /** The layout applied: the panel is a drawer over the log. */
+  isNarrow() {
+    return this.row.classList.contains("narrow");
+  }
+  setDrawer(open) {
+    const closing = !open && this.row.classList.contains("drawer-open") && this.panel.contains(document.activeElement);
+    this.drawerOpen = open;
+    this.layoutPanel();
+    // the focus leaves the drawer it was in for the button that opens it again (not the message box, where the next
+    // Esc would stop the turn)
+    if (closing) this.activityBtn.focus();
+  }
+  /** The "Activity" button. */
+  togglePanel() {
+    if (this.isNarrow()) this.setDrawer(!this.drawerOpen);
+    else setPanelCollapsed(!ui.panelCollapsed);
+  }
+  /** The panel head's button. */
+  hidePanel() {
+    if (this.isNarrow()) this.setDrawer(false);
+    else setPanelCollapsed(true);
+  }
+  /** A group is shown: the panel un-collapsed, or the drawer opened. */
+  revealPanel() {
+    if (this.isNarrow()) this.setDrawer(true);
+    else if (ui.panelCollapsed) setPanelCollapsed(false);
+  }
+  /** The handle dragged: the width follows the pointer in real pixels, kept within the layout's limits; stored and
+   *  applied to every view when the drag ends. */
+  dragPanel(e) {
+    if (e.button !== 0) return;
+    e.preventDefault(); // no text selection while dragging
+    const startX = e.clientX;
+    const start = this.panel.getBoundingClientRect().width;
+    const move = (m) => {
+      ui.panelWidth = UiState.panelLayout(this.row.clientWidth, start + startX - m.clientX).width;
+      this.layoutPanel();
+    };
+    const end = () => {
+      removeEventListener("pointermove", move);
+      removeEventListener("pointerup", end);
+      removeEventListener("pointercancel", end);
+      document.body.classList.remove("panel-resizing");
+      saveUi();
+      layoutPanels();
+    };
+    addEventListener("pointermove", move);
+    addEventListener("pointerup", end);
+    addEventListener("pointercancel", end);
+    document.body.classList.add("panel-resizing");
+  }
+
+  /** Whether the group is open: the state of whatever holds its body (the group, or its entry in the panel). */
+  isOpen(group) {
+    return group._body.parentNode.open;
+  }
+  setOpen(group, open) {
+    group._body.parentNode.open = open;
+  }
+
+  /** A group leaves the log, and its entry the panel. */
+  removeGroup(group) {
+    group.remove();
+    group._entry?.remove();
+    this.updatePanelShown();
+  }
+
+  /** An in-panel group's header clicked in the chat (or "N subagents running"): its entry opened, scrolled into view
+   *  and highlighted for a second. The panel stops following, and the scroll made here does not turn it back on. */
+  showInPanel(group) {
+    this.revealPanel();
+    const entry = group._entry;
+    entry.open = true;
+    this.panelFollow = false;
+    entry.scrollIntoView({ block: "nearest" });
+    this.panelOwnTop = this.panelBody.scrollTop;
+    entry.classList.add("flash");
+    clearTimeout(entry._flash);
+    entry._flash = setTimeout(() => entry.classList.remove("flash"), 1000);
   }
 
   /** A task call's update: no badge, its prompt and error are in its group (the status comes with the changes). */
@@ -1802,6 +2047,7 @@ class SessionView {
   }
 
   openCard(card) {
+    this.setDrawer(false); // the question must be visible (permission, delegation and reopen cards)
     this.openCards.add(card);
     renderList();
   }
@@ -2088,6 +2334,7 @@ class SessionView {
     }
     this.append(bubble);
     this.toBottom();
+    this.panelToBottom();
     // a mid-turn prompt owns the turn's updates (and is acknowledged) only from its switch point on (the record
     // keeps its delivery until then)
     const record = this.chain.start({ midTurn, delivery });
@@ -2216,6 +2463,9 @@ function activate(id, { keepSchedules = false } = {}) {
   if (v && !v.dead) v.input.focus();
 }
 
+let replaySeq = 0;
+const replayEnds = new Map(); // id of an open -> resolves its wait for main's acp:replayed (sent after its last update)
+
 /** activate false: resumed in the background (a reopen the user approved in another session's view). */
 async function openSession(s, { activate: show = true } = {}) {
   const existing = views.get(s.sessionId);
@@ -2238,21 +2488,28 @@ async function openSession(s, { activate: show = true } = {}) {
   if (show) activate(s.sessionId);
   v.statusEl.textContent = "Resuming session…";
   v.resuming = true;
+  const replayId = ++replaySeq;
+  const replayed = new Promise((resolve) => replayEnds.set(replayId, resolve));
   try {
-    const res = await api.openSession(s.sessionId, s.cwd);
+    const res = await api.openSession(s.sessionId, s.cwd, replayId);
+    await replayed; // the answer may overtake the last replayed updates, the marker cannot
     v.resuming = false;
     v.flush();
     v.settleGroups();
     v.setConfig(res.configOptions);
     v.toBottom();
+    v.panelToBottom();
     v.setBusy(false);
     if (!v.log.childElementCount) v.system("No messages yet.");
   } catch (e) {
+    await replayed; // a failed load may have replayed too
     v.resuming = false;
     v.dead = true;
     v.settleGroups(); // what was replayed before the failure keeps no ●
     v.error(`Could not resume this session: ${e.message}`);
     v.setBusy(false);
+  } finally {
+    replayEnds.delete(replayId);
   }
 }
 
@@ -2670,7 +2927,8 @@ function askDeleteTree(s, idx, below) {
   });
 }
 
-// Sidebar state kept across restarts: pinned sessions, collapsed project folders, chat text scale.
+// Sidebar state kept across restarts: pinned sessions, collapsed project folders, chat text scale, the activity
+// panel's width and collapsed state.
 const UI_KEY = "copilot-sessions.ui.v1";
 function loadUi() {
   let raw = {};
@@ -2678,7 +2936,13 @@ function loadUi() {
     raw = JSON.parse(localStorage.getItem(UI_KEY) ?? "{}") ?? {};
   } catch {}
   const set = (a) => new Set(Array.isArray(a) ? a.filter((x) => typeof x === "string") : []);
-  return { pinned: set(raw.pinned), collapsed: set(raw.collapsed), chatScale: Number.isFinite(raw.chatScale) ? raw.chatScale : 1 };
+  return {
+    pinned: set(raw.pinned),
+    collapsed: set(raw.collapsed),
+    chatScale: Number.isFinite(raw.chatScale) ? raw.chatScale : 1,
+    panelWidth: Number.isFinite(raw.panelWidth) ? raw.panelWidth : UiState.PANEL.def, // the activity panel's width, every view's
+    panelCollapsed: raw.panelCollapsed === true, // applies to the wide layout only
+  };
 }
 const ui = loadUi();
 // The image viewer, opened from a thumbnail: wheel zooms around the cursor, drag pans, double-click toggles fit / 100 %.
@@ -2828,8 +3092,18 @@ const viewer = (() => {
 })();
 function saveUi() {
   try {
-    localStorage.setItem(UI_KEY, JSON.stringify({ pinned: [...ui.pinned], collapsed: [...ui.collapsed], chatScale: ui.chatScale }));
+    const { pinned, collapsed, chatScale, panelWidth, panelCollapsed } = ui;
+    localStorage.setItem(UI_KEY, JSON.stringify({ pinned: [...pinned], collapsed: [...collapsed], chatScale, panelWidth, panelCollapsed }));
   } catch {}
+}
+/** The activity panel's stored width or collapsed state changed: every view lays its panel out again. */
+function layoutPanels() {
+  for (const v of views.values()) v.layoutPanel();
+}
+function setPanelCollapsed(collapsed) {
+  ui.panelCollapsed = collapsed;
+  saveUi();
+  layoutPanels();
 }
 
 /** Collapse / expand one project in place (no re-render, so the transition runs). */
@@ -2926,6 +3200,7 @@ async function openSettings() {
   $("#set-relay").checked = s.relay;
   $("#set-queue").checked = s.queueMidTurn;
   $("#set-context").value = s.contextTier;
+  $("#set-activity").value = s.activityPanel ?? "off";
   $("#set-relay").disabled = !s.relayAvailable;
   $("#set-relay-hint").textContent = s.relayAvailable
     ? `Open sessions can message each other and terminal sessions through the broker at ${s.relayUrl}. Applies to sessions opened after saving.`
@@ -2964,8 +3239,9 @@ $("#store-clear").addEventListener("click", async (e) => {
 
 $("#settings").addEventListener("close", async () => {
   if ($("#settings").returnValue !== "save") return;
-  await api.setSettings({ copilotCommand: $("#set-command").value, relay: $("#set-relay").checked, contextTier: $("#set-context").value, queueMidTurn: $("#set-queue").checked });
+  await api.setSettings({ copilotCommand: $("#set-command").value, relay: $("#set-relay").checked, contextTier: $("#set-context").value, queueMidTurn: $("#set-queue").checked, activityPanel: $("#set-activity").value });
   queueMidTurn = $("#set-queue").checked;
+  activityPanel = $("#set-activity").value;
   for (const v of views.values()) v.settingChanged();
   refresh();
 });
@@ -2978,6 +3254,7 @@ api.onUpdate(({ sessionId, update }) => {
   if (update?.sessionUpdate === "available_commands_update") lastCommands.set(sessionId, update.availableCommands ?? []);
   views.get(sessionId)?.onUpdate(update);
 });
+api.onReplayed(({ replayId }) => replayEnds.get(replayId)?.());
 api.onPermission((p) => views.get(p.sessionId)?.permission(p));
 api.onExit((e) => views.get(e.sessionId)?.markDead(e));
 api.onNotice((n) => views.get(n.sessionId)?.system(n.text));

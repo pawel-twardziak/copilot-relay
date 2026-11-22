@@ -197,6 +197,12 @@ function headerText({ kind, title = "", tools = 0, thoughts = 0, runningTitle = 
   return ["subagent", title === "subagent" ? "" : title, plural(tools, "tool"), tail].filter(Boolean).join(" · ");
 }
 
-const Activity = { create: createActivity, headerText, MARKS };
+/** Whether a group of this kind opens in the side panel under the setting: all takes both kinds, subagents only the
+ *  subagent groups, off (or anything else) none. */
+function inPanel(mode, kind) {
+  return mode === "all" || (mode === "subagents" && kind === "subagent");
+}
+
+const Activity = { create: createActivity, inPanel, headerText, MARKS };
 globalThis.Activity = Activity;
 if (typeof module !== "undefined") module.exports = Activity;

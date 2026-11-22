@@ -18,6 +18,7 @@ import { PendingRequests, childPrompt, findModelOption, reloadWarning, resolveCo
 import { readLinksCache, writeLinksCache } from "./links-cache.mjs";
 import { listAllPages } from "./session-list.mjs";
 import { beginPrompt, endPrompt } from "./prompt-count.mjs";
+import { normalizePanelMode } from "./activity-panel.mjs";
 import { createTierStore, effectiveTier, normalizeTier, switchTier, tierArgs, withContextOption } from "./context-tier.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -405,7 +406,18 @@ const deleting = new Set();
 const historyBusy = new Set(); // a truncate is closing the session and rewriting its files
 const lingering = new Map(); // id -> connection whose Copilot would not exit: may still write the session's files
 
-handle("sessions:open", async (sessionId, cwd) => {
+// replayId: the window's id for this open. Every open ends with acp:replayed for it, sent the way the updates are, so
+// it cannot overtake a replayed update (the invoke answer can): the window ends the replay on both, also after a
+// failed load.
+handle("sessions:open", async (sessionId, cwd, replayId) => {
+  try {
+    return await resumeSession(sessionId, cwd);
+  } finally {
+    send("acp:replayed", { replayId });
+  }
+});
+
+async function resumeSession(sessionId, cwd) {
   if (open.has(sessionId)) {
     // after a window reload the view is new: show the reopen cards it had again (a live view ignores known ids)
     for (const card of reopenCards.values()) if (card.sessionId === sessionId) send("reopen:request", card);
@@ -422,7 +434,7 @@ handle("sessions:open", async (sessionId, cwd) => {
     if (n > 0) opening.set(sessionId, n);
     else opening.delete(sessionId);
   }
-});
+}
 
 async function openSession(sessionId, cwd) {
   requireDir(cwd);
@@ -1034,9 +1046,10 @@ handle("settings:get", async () => ({
   relayUrl: relayConfig().url,
   contextTier: normalizeTier(loadSettings().contextTier) ?? "default",
   queueMidTurn: loadSettings().queueMidTurn === true,
+  activityPanel: normalizePanelMode(loadSettings().activityPanel),
 }));
 handle("settings:set", async (s) => {
-  saveSettings({ ...loadSettings(), copilotCommand: String(s.copilotCommand ?? "").trim(), relay: s.relay !== false, contextTier: normalizeTier(s.contextTier) ?? "default", queueMidTurn: s.queueMidTurn === true });
+  saveSettings({ ...loadSettings(), copilotCommand: String(s.copilotCommand ?? "").trim(), relay: s.relay !== false, contextTier: normalizeTier(s.contextTier) ?? "default", queueMidTurn: s.queueMidTurn === true, activityPanel: normalizePanelMode(s.activityPanel) });
   lister?.kill();
   lister = null;
   return true;

@@ -17,7 +17,7 @@ contextBridge.exposeInMainWorld("api", {
   // { sessions, complete }: complete is false when Copilot had more pages than main fetches
   listSessionsChecked: () => call("sessions:listChecked"),
   newSession: (cwd) => call("sessions:new", cwd),
-  openSession: (sessionId, cwd) => call("sessions:open", sessionId, cwd),
+  openSession: (sessionId, cwd, replayId) => call("sessions:open", sessionId, cwd, replayId),
   // source: "app" (typed here), "human" (relay web GUI) or "relay" (another session) – see sessions:prompt
   prompt: (sessionId, text, source = "relay") => call("sessions:prompt", sessionId, text, source),
   relayRename: (sessionId, name) => call("relay:rename", sessionId, name),
@@ -88,6 +88,7 @@ contextBridge.exposeInMainWorld("api", {
   onJobRunFinished: on("jobs:runFinished"),
   onJobOpenRun: on("jobs:openRun"),
   onUpdate: on("acp:update"),
+  onReplayed: on("acp:replayed"),
   onPermission: on("acp:permission"),
   onExit: on("acp:exit"),
   onUsage: on("usage:update"),

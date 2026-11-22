@@ -14,6 +14,16 @@ It runs on Windows, macOS and Linux.
   and no one confirmed it finished, or a tool never ended or was interrupted) and ⊘ means the main turn was stopped
   while a subagent ran: it may still be working, and what it sends later is still shown in its group.
   Press **Stop** (or `Esc`) to cancel a turn.
+- **⚙ Settings → Tool and subagent details** puts the content of the groups in an Activity panel beside the chat:
+  **In the chat** (the default) keeps every group inline, **Subagents in a side panel** moves the subagent groups,
+  **Everything in a side panel** the tool and thinking groups too. Saving applies it to the open sessions, also while
+  a turn runs. Each group keeps its one-line header in the chat (mark, ⏸, Fork/Delete); a click on it, or on
+  "N subagents running", opens the group in the panel. Permission cards stay in the chat. The panel appears with its
+  first group and follows its output while you are at its bottom; opening an entry or scrolling up stops that.
+  Drag its left edge to resize it, » hides it and **Activity** in the header brings it back; the width and the hidden
+  state are kept for all sessions. In a view narrower than 760 px the panel is a drawer over the chat, opened by
+  **Activity** or a header click and closed by ✕, `Esc` inside it, or a permission card. While you edit a message,
+  the panel entries of the groups after it are dimmed with them.
 - Links are clickable. Web and `mailto:` links open in your browser or mail app. File links and file paths in
   tool calls and diffs open in the default app. Relative paths resolve against the session folder, and `:line` /
   `#L12` suffixes are ignored. Only plain text, Markdown, data files (JSON, YAML, CSV, TOML…), diffs, images and PDF are opened, after
@@ -274,6 +284,11 @@ npm start
 ```
 
 From the repo root, run `npm run app:install` once and then `npm run app`.
+
+Checks, from the repo root: `npm test` runs the unit tests. `node scripts/ui-check/run.mjs [name…]` runs the UI checks
+(all, or the named ones): it starts the real app under Xvfb (`xvfb-run`, Linux) against a scripted Copilot
+(`electron/test/fixtures/acp/`), drives its window in each activity panel mode a check lists and exits with 1 if one
+fails. All of them take about 3.5 minutes.
 
 The first `npm start` downloads the Electron binary (about 100 MB, from GitHub). Behind a corporate proxy, set
 `HTTPS_PROXY`, or point `ELECTRON_MIRROR` at an internal mirror, e.g. `ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/`.
