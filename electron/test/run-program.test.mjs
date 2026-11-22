@@ -79,3 +79,12 @@ test("the timeout rejects at once, also when a descendant holds the pipes", asyn
   });
   assert.ok(Date.now() - t0 < 5000, `took ${Date.now() - t0} ms`);
 });
+test("keep start: the first characters, truncated", async () => {
+  const r = await runProgram(node, ["-e", "process.stdout.write('a'.repeat(50) + 'b'.repeat(50))"], { outputLimit: 60, keep: "start" });
+  assert.equal(r.stdout, "a".repeat(50) + "b".repeat(10));
+  assert.equal(r.truncated, true);
+});
+test("a short output is not truncated", async () => {
+  const r = await runProgram(node, ["-e", "process.stdout.write('ok')"]);
+  assert.deepEqual({ stdout: r.stdout, truncated: r.truncated }, { stdout: "ok", truncated: false });
+});

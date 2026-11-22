@@ -1,13 +1,14 @@
 // The UI checks run by scripts/ui-check/run.mjs: { name, scenario?, modes?, run(app) }, each throwing on failure.
 // app is a driver (driver.mjs) launched with the check's scenario (default panel-scenario.mjs), its mode already set.
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { LATE_TEXT } from "../../electron/test/fixtures/acp/late-group-scenario.mjs";
 import { PARTS } from "../../electron/test/fixtures/acp/panel-scroll-scenario.mjs";
 import { RUNNING_TITLE } from "../../electron/test/fixtures/acp/tool-split-scenario.mjs";
+import { gitIn } from "../../electron/test/git-helper.mjs";
 import { launch } from "./driver.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -44,6 +45,7 @@ const V = `views.get("scripted-work")`; // the view of the scenario's session (d
 const HISTORY_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"; // a session Copilot's history files can belong to (a UUID)
 const WAIT_SCENARIO = path.join(FIXTURES, "panel-wait-scenario.mjs");
 const SPLIT_SCENARIO = path.join(FIXTURES, "tool-split-scenario.mjs");
+const CHANGES_SCENARIO = path.join(FIXTURES, "changes-scenario.mjs");
 const PANEL_MODES = ["subagents", "all"];
 const savedMode = (app) => app.ev(`api.getSettings().then((s) => s.activityPanel)`);
 
@@ -314,6 +316,51 @@ const STOP_MARKS = [
   { kind: "work", chat: "✓" },
   { kind: "subagent", chat: "⊘" },
 ];
+
+/** The changes checks' repository in the launch's work folder: one commit of README.md, b.txt and a .gitignore that
+ *  hides the scripted agent's file. git runs only there, isolated and with a test identity. */
+async function changesRepo(app) {
+  const work = path.join(app.dir, "work");
+  writeFileSync(path.join(work, "README.md"), "# work\n");
+  writeFileSync(path.join(work, "b.txt"), "b\n");
+  writeFileSync(path.join(work, ".gitignore"), ".scripted-agent.json\n");
+  await gitIn(work, ["init", "-q", "-b", "main"]);
+  await gitIn(work, ["add", "README.md", "b.txt", ".gitignore"]);
+  await gitIn(work, ["commit", "-q", "-m", "first"]);
+  return work;
+}
+
+/** A new session's turn of changes-scenario.mjs, then notes.txt as its edit wrote it, recorded as touched. */
+async function notesWritten(app, work) {
+  const id = await app.newSession();
+  await app.send("Write the notes.");
+  await app.idle();
+  // written after the turn: it did not exist at the start point
+  writeFileSync(path.join(work, "notes.txt"), "hello\n");
+  await app.check(`api.changesList(${JSON.stringify(id)}).then((l) => l.repos[0]?.files.some((f) => f.path === "notes.txt" && f.touched))`, "the edit to be recorded");
+  return id;
+}
+
+const FP = `document.querySelector("#file-preview")`;
+/** The changes browser's list: per group its name and rows (state letter, marks, path, selected). */
+const fpGroups = (app) => app.ev(`[...${FP}.querySelectorAll(".fp-group")].map((g) => ({
+  name: g.querySelector(".fp-group-name").textContent,
+  rows: [...g.querySelectorAll(".fp-row")].map((r) => ({
+    state: r.querySelector(".fp-state").textContent,
+    flags: [...r.querySelectorAll(".fp-flag")].map((f) => f.textContent).join(""),
+    path: r.querySelector(".fp-row-path").textContent,
+    active: r.classList.contains("active"),
+  })),
+}))`);
+const fpRow = (rel) => `[...${FP}.querySelectorAll(".fp-row")].find((r) => r.querySelector(".fp-row-path").textContent === ${JSON.stringify(rel)})`;
+const fpStrip = (app) => app.ev(`[...${FP}.querySelectorAll(".fp-versions:not([hidden]) .fp-version")].map((b) => ({ label: b.textContent, active: b.classList.contains("active") }))`);
+const fpDiffTypes = (app) => app.ev(`[...${FP}.querySelectorAll(".fp-diff .dv-line")].map((l) => l.className.replace("dv-line ", ""))`);
+const fpListed = (app) => app.check(`!${FP}.hidden && ${FP}.querySelector(".fp-loading").hidden && ${FP}.querySelectorAll(".fp-row").length > 0`, "the list of changes");
+/** Clicks the row of rel and waits for its diff (or a message) in the diff pane. */
+async function fpSelect(app, rel) {
+  await app.ev(`${fpRow(rel)}.click()`);
+  await app.check(`${fpRow(rel)}.classList.contains("active") && !!${FP}.querySelector(".fp-diff .dv, .fp-diff .fp-msg")`, `the diff of ${rel}`);
+}
 
 export const checks = [
   {
@@ -1359,6 +1406,217 @@ export const checks = [
       assert.ok(refused[0].text.includes(emptied), refused[0].text);
       assert.deepStrictEqual(refused.slice(1).map((r) => r.cls), ["pending", "pending", "pending", "pending", "pending"]);
       assert.equal(await app.ev(`document.querySelector("#broker-summary").textContent`), "Stopped at Check. The broker was not restarted.");
+    },
+  },
+  {
+    // the agent's first tool call records the session folder's repository (start point, the edited file touched) and
+    // api.changesList serves it; the replay of a reopen records nothing: the record keeps its time, and a removed
+    // repository stays removed. git runs only in the launch's work folder, isolated and with a test identity.
+    name: "changes-records",
+    modes: ["off"],
+    scenario: CHANGES_SCENARIO,
+    async run(app) {
+      const work = await changesRepo(app);
+      const id = await notesWritten(app, work);
+      const list = `api.changesList(${JSON.stringify(id)})`;
+      const live = await app.ev(list);
+      assert.equal(live.repos.length, 1, "one repository");
+      const [repo] = live.repos;
+      assert.equal(repo.root, realpathSync(work), "the session folder's repository");
+      assert.equal(repo.source, "auto");
+      assert.equal(repo.error, null);
+      assert.deepStrictEqual(repo.files, [{ path: "notes.txt", state: "?", uncommitted: true, committed: false, touched: true, dirtyAtStart: false }]);
+      // removed while the session runs: the agent's next edit there records it again, with a later start point
+      await app.ev(`api.changesRemove(${JSON.stringify(id)}, ${JSON.stringify(repo.root)})`);
+      await app.send("Write the notes again.");
+      await app.idle();
+      await app.check(`${list}.then((l) => l.repos[0]?.files.some((f) => f.path === "notes.txt" && f.touched))`, "the repository to come back");
+      const back = (await app.ev(list)).repos;
+      assert.equal(back.length, 1, "one repository after the second edit");
+      assert.ok(back[0].at > repo.at, `a later start point: ${back[0].at} after ${repo.at}`);
+      await app.reload();
+      const replayed = await app.ev(list);
+      assert.equal(replayed.repos.length, 1, "one repository after the replay");
+      assert.equal(replayed.repos[0].at, back[0].at, "the start point's time after the replay");
+      await app.ev(`api.changesRemove(${JSON.stringify(id)}, ${JSON.stringify(repo.root)})`);
+      await app.reload();
+      assert.deepStrictEqual((await app.ev(list)).repos, [], "a removed repository after another replay");
+    },
+  },
+  {
+    // the Changes button opens the browser on the session's repository: rows with their marks, a file's versions and
+    // its git diff; a file link in the chat opens that file alone with its row selected; ⟳ keeps the selection.
+    name: "changes-browser",
+    modes: ["off"],
+    scenario: CHANGES_SCENARIO,
+    async run(app) {
+      const work = await changesRepo(app);
+      await notesWritten(app, work);
+      writeFileSync(path.join(work, "README.md"), "# changed\n"); // stays uncommitted
+      writeFileSync(path.join(work, "b.txt"), "b\nc\n");
+      await gitIn(work, ["add", "b.txt"]);
+      await gitIn(work, ["commit", "-q", "-m", "second"]);
+
+      await app.ev(`[...${V}.el.querySelectorAll(".head button")].find((b) => b.textContent === "Changes").click()`);
+      await fpListed(app);
+      const groups = await fpGroups(app);
+      assert.deepStrictEqual(groups.map((g) => g.name), ["work"], "one group named after the session folder");
+      assert.deepStrictEqual(groups[0].rows.map(({ state, flags, path: p }) => ({ state, flags, path: p })), [
+        { state: "M", flags: "", path: "README.md" },
+        { state: "M", flags: "✓", path: "b.txt" },
+        { state: "?", flags: "●", path: "notes.txt" },
+      ]);
+
+      await fpSelect(app, "README.md");
+      assert.equal((await fpStrip(app))[0]?.label, "Uncommitted", "README.md's first version");
+      assert.ok((await fpDiffTypes(app)).includes("del") && (await fpDiffTypes(app)).includes("add"), "README.md's diff has a removed and an added line");
+      // selected as Ctrl+A does: each line's sign stays on that line in the copied text
+      const copied = await app.ev(`(() => { getSelection().selectAllChildren(${FP}.querySelector(".fp-diff .dv")); const t = getSelection().toString(); getSelection().removeAllRanges(); return t; })()`);
+      assert.ok(copied.includes("-# work") && copied.includes("+# changed"), `README.md's copied diff: ${JSON.stringify(copied)}`);
+
+      await fpSelect(app, "b.txt");
+      const strip = await fpStrip(app);
+      assert.equal(strip.length, 1, "b.txt has one version");
+      assert.match(strip[0].label, /^[0-9a-f]{7} second$/, "b.txt's commit");
+      assert.ok((await fpDiffTypes(app)).includes("add"), "b.txt's diff has an added line");
+
+      await fpSelect(app, "notes.txt");
+      const types = await fpDiffTypes(app);
+      assert.ok(types.length > 0 && types.every((t) => t === "add"), `notes.txt is all added: ${types}`);
+
+      await app.ev(`document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))`);
+      await app.check(`${FP}.hidden`, "the browser to close");
+      await app.ev(`${V}.log.querySelector('.diff-path[data-path="notes.txt"]').click()`);
+      await app.check(`!${FP}.hidden && ${FP}.querySelector(".fp-content").textContent.includes("hello")`, "notes.txt alone");
+      await fpListed(app);
+      await app.check(`${fpRow("notes.txt")}.classList.contains("active")`, "notes.txt's row selected");
+      assert.equal(await app.ev(`${FP}.querySelector(".fp-diff").hidden`), true, "no diff pane for a file link");
+      assert.equal(await app.ev(`${FP}.querySelector(".fp-content").hidden`), false, "the file's content");
+
+      await fpSelect(app, "b.txt");
+      await gitIn(work, ["add", "-A"]);
+      await gitIn(work, ["commit", "-q", "-m", "third"]);
+      const loader = await app.ev(`(() => { ${FP}.querySelector('[data-act="refresh"]').click(); return !${FP}.querySelector(".fp-loading").hidden; })()`);
+      assert.equal(loader, true, "the loader while the list is read");
+      await fpListed(app);
+      const after = (await fpGroups(app))[0].rows;
+      assert.equal(after.find((r) => r.path === "README.md").flags, "✓", "README.md committed");
+      assert.deepStrictEqual(after.filter((r) => r.active).map((r) => r.path), ["b.txt"], "the selection after ⟳");
+    },
+  },
+  {
+    // Show file puts the file on disk beside its diff; the divider drags, the split is kept for the next opening; a
+    // change on disk reads the file and its uncommitted diff again in place, without reading the list again
+    name: "changes-split",
+    modes: ["off"],
+    scenario: CHANGES_SCENARIO,
+    async run(app) {
+      const work = await changesRepo(app);
+      await notesWritten(app, work);
+      writeFileSync(path.join(work, "README.md"), "# changed\n"); // stays uncommitted
+      const openBrowser = async () => {
+        await app.ev(`[...${V}.el.querySelectorAll(".head button")].find((b) => b.textContent === "Changes").click()`);
+        await fpListed(app);
+      };
+      const fileBtn = `${FP}.querySelector('[data-act="file"]')`;
+      const panes = (a = app) => a.ev(`(() => {
+        const w = (s) => { const e = ${FP}.querySelector(s); return e.checkVisibility() ? e.getBoundingClientRect() : null; };
+        const d = w(".fp-diff"), c = w(".fp-content"), p = w(".fp-panes");
+        return { diff: d?.width ?? 0, content: c?.width ?? 0, beside: !!(d && c && c.left >= d.right), ratio: d ? d.width / p.width : 0 };
+      })()`);
+      const contentShows = (text) => app.check(`${FP}.querySelector(".fp-content").textContent.includes(${JSON.stringify(text)})`, `the file pane to show ${text}`);
+
+      await openBrowser();
+      await fpSelect(app, "README.md");
+      assert.equal(await app.ev(`${fileBtn}.textContent`), "Show file");
+      assert.equal((await panes()).content, 0, "no file pane before Show file");
+      await app.ev(`${fileBtn}.click()`);
+      await contentShows("changed");
+      const split = await panes();
+      assert.ok(split.beside && split.diff > 100 && split.content > 100, `the file beside its diff: ${JSON.stringify(split)}`);
+      assert.equal(await app.ev(`${fileBtn}.textContent`), "Hide file");
+
+      await app.ev(`(() => {
+        const s = ${FP}.querySelector(".fp-split"), r = s.getBoundingClientRect();
+        const x = r.left + r.width / 2, y = r.top + r.height / 2;
+        const ev = (type, clientX) => new PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 1, isPrimary: true, pointerType: "mouse", button: 0, buttons: type === "pointerup" ? 0 : 1, clientX, clientY: y });
+        s.dispatchEvent(ev("pointerdown", x));
+        document.elementFromPoint(x - 100, y)?.dispatchEvent(ev("pointermove", x - 100));
+        document.body.dispatchEvent(ev("pointermove", x - 200));
+        document.body.dispatchEvent(ev("pointerup", x - 200));
+      })()`);
+      await frames(app);
+      const dragged = await panes();
+      assert.ok(Math.abs(split.diff - 200 - dragged.diff) <= 2, `dragged 200 px left: ${split.diff} → ${dragged.diff}`);
+
+      await app.reload();
+      await openBrowser();
+      await app.check(`${fpRow("README.md")}.classList.contains("active") && !!${FP}.querySelector(".fp-diff .dv")`, "README.md's diff again");
+      await contentShows("changed");
+      const again = await panes();
+      assert.ok(again.content > 100, "the file pane after the reload");
+      assert.ok(Math.abs(again.ratio - dragged.ratio) <= 0.01, `the ratio after the reload: ${dragged.ratio} → ${again.ratio}`);
+      const stored = await app.ev(`ChangesModel.parsePrefs(localStorage.getItem("copilot-sessions.changes.v1"))`);
+      assert.equal(stored.showFile, true, "stored: the file pane shows");
+      assert.ok(Math.abs(stored.ratio - again.ratio) <= 0.01, `stored ratio ${stored.ratio}`);
+
+      const adds = `${FP}.querySelectorAll(".fp-diff .dv-line.add").length`;
+      const addsBefore = await app.ev(adds);
+      await app.ev(`window.__fpRows = [...${FP}.querySelectorAll(".fp-row")]`);
+      const t0 = Date.now();
+      appendFileSync(path.join(work, "README.md"), "appended on disk\n");
+      await contentShows("appended on disk");
+      await app.check(`${adds} === ${addsBefore + 1}`, "one more added line in the diff");
+      assert.ok(Date.now() - t0 < 2000, `followed the disk in ${Date.now() - t0} ms`);
+      const sameRows = await app.ev(`(() => { const now = [...${FP}.querySelectorAll(".fp-row")]; return now.length === window.__fpRows.length && now.every((r, i) => r === window.__fpRows[i]); })()`);
+      assert.equal(sameRows, true, "the list's rows are the same nodes");
+
+      // Ctrl+A selects the pane that has the focus
+      const selectAllIn = (pane) => app.ev(`(() => {
+        ${FP}.querySelector(${JSON.stringify(pane)}).focus();
+        document.dispatchEvent(new KeyboardEvent("keydown", { key: "a", ctrlKey: true, bubbles: true }));
+        const s = getSelection(), where = s.rangeCount ? s.getRangeAt(0).commonAncestorContainer : null;
+        const r = { content: !!where && ${FP}.querySelector(".fp-content").contains(where), diff: !!where && ${FP}.querySelector(".fp-diff").contains(where) };
+        s.removeAllRanges();
+        return r;
+      })()`);
+      assert.deepStrictEqual(await selectAllIn(".fp-content .fp-md"), { content: true, diff: false }, "Ctrl+A in the file pane");
+      assert.deepStrictEqual(await selectAllIn(".fp-diff"), { content: false, diff: true }, "Ctrl+A in the diff pane");
+
+      await app.ev(`${fileBtn}.click()`);
+      const single = await panes();
+      assert.ok(single.content === 0 && Math.abs(single.ratio - 1) < 0.01, `Hide file: the diff alone ${JSON.stringify(single)}`);
+      assert.equal(await app.ev(`${fileBtn}.textContent`), "Show file");
+      assert.equal((await app.ev(`ChangesModel.parsePrefs(localStorage.getItem("copilot-sessions.changes.v1"))`)).showFile, false, "stored: hidden");
+
+      // a file link shows the file alone, without the button; a version of its row brings the stored split back
+      await app.ev(`${fileBtn}.click()`);
+      await app.ev(`document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))`);
+      await app.check(`${FP}.hidden`, "the browser to close");
+      await app.ev(`${V}.log.querySelector('.diff-path[data-path="notes.txt"]').click()`);
+      await contentShows("hello");
+      await app.check(`${fpRow("notes.txt")}.classList.contains("active") && !!${FP}.querySelector(".fp-versions:not([hidden]) .fp-version")`, "notes.txt's versions");
+      assert.equal(await app.ev(`${fileBtn}.hidden`), true, "no Show file for a file link");
+      assert.equal((await panes()).diff, 0, "no diff pane for a file link");
+      await app.ev(`${FP}.querySelector(".fp-version").click()`);
+      await app.check(`!!${FP}.querySelector(".fp-diff .dv")`, "notes.txt's diff");
+      const linked = await panes();
+      assert.ok(linked.beside && Math.abs(linked.ratio - again.ratio) <= 0.01, `the stored split for the linked file: ${JSON.stringify(linked)}`);
+      assert.ok(await app.ev(`${FP}.querySelector(".fp-content").textContent.includes("hello")`), "the linked file beside its diff");
+      assert.equal(await app.ev(`${fileBtn}.textContent`), "Hide file");
+      rmSync(path.join(work, "notes.txt"));
+      await contentShows("This file is deleted.");
+
+      // a file deleted while shown alone, then a version entry and its file: the pane keeps the note
+      writeFileSync(path.join(work, "notes.txt"), "hello\n");
+      await app.ev(`${V}.log.querySelector('.diff-path[data-path="notes.txt"]').click()`);
+      await contentShows("hello");
+      rmSync(path.join(work, "notes.txt"));
+      await app.check(`!${FP}.querySelector(".fp-content").textContent.includes("hello")`, "the file pane to drop notes.txt's text");
+      await app.ev(`${FP}.querySelector(".fp-version").click()`);
+      await app.ev(`${fileBtn}.click()`); // hide, then show again: the pane is painted from cur
+      await app.ev(`${fileBtn}.click()`);
+      await contentShows("This file is deleted.");
     },
   },
 ];

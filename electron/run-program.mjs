@@ -23,7 +23,7 @@ function defaultLabel(program, args) {
 // After the program exits, how long its pipes may stay open (held by a descendant) before the result is taken as is.
 const CLOSE_GRACE_MS = 1000;
 
-export function runProgram(program, args, { cwd, env, timeoutMs, shell = false, label } = {}) {
+export function runProgram(program, args, { cwd, env, timeoutMs, shell = false, label, outputLimit = CAP, keep = "end" } = {}) {
   const name = label ?? defaultLabel(program, args);
   return new Promise((resolve, reject) => {
     let stdout = "";
@@ -31,7 +31,15 @@ export function runProgram(program, args, { cwd, env, timeoutMs, shell = false, 
     let timer;
     let grace;
     let settled = false;
+    let truncated = false;
     const cap = (s) => (s.length > CAP ? s.slice(-CAP) : s);
+    // stdout: "end" keeps the last outputLimit characters, "start" the first ones (the rest is dropped).
+    const addStdout = (d) => {
+      const all = stdout + d;
+      if (all.length <= outputLimit) { stdout = all; return; }
+      truncated = true;
+      stdout = keep === "start" ? all.slice(0, outputLimit) : all.slice(-outputLimit);
+    };
     const spawnFailed = (e) => {
       // Node reports a nonexistent cwd as ENOENT on the spawn too.
       if (e.code === "ENOENT" && cwd != null && !fs.existsSync(cwd)) return fail(`Folder does not exist: ${cwd}`, "NOCWD", stdout, stderr);
@@ -63,11 +71,11 @@ export function runProgram(program, args, { cwd, env, timeoutMs, shell = false, 
     const finish = (code, signal) => {
       if (settled) return;
       if (!isWin) killTree(child, "SIGKILL"); // sweep stragglers in the group
-      if (code === 0) return settle(null, { stdout, stderr });
+      if (code === 0) return settle(null, { stdout, stderr, truncated });
       const tail = (stderr.trim() ? stderr : stdout).slice(-400).trim();
       settle(fail(`${name} failed (exit ${code ?? signal}): ${tail}`, "EXIT", stdout, stderr));
     };
-    child.stdout.setEncoding("utf8").on("data", (d) => { stdout = cap(stdout + d); });
+    child.stdout.setEncoding("utf8").on("data", (d) => { addStdout(d); });
     child.stderr.setEncoding("utf8").on("data", (d) => { stderr = cap(stderr + d); });
     child.on("error", (e) => settle(spawnFailed(e)));
     // A descendant that holds the pipes keeps "close" from coming: after the exit, wait for it only so long.

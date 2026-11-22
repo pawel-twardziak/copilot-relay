@@ -67,6 +67,14 @@ contextBridge.exposeInMainWorld("api", {
   // watch the file on show (a path files:read returned; null stops); onFileChanged gets the changed path
   watchFile: (p) => call("files:watch", p),
   onFileChanged: on("files:changed"),
+  // the changes browser (electron/repo-changes.mjs): { repos, loose } of a session, a file's commits since the start
+  // point, one diff (version "uncommitted" or a commit sha), adding a repository by a folder dialog (null when
+  // cancelled, else { root } or { message }) and removing one
+  changesList: (sessionId) => call("changes:list", sessionId),
+  changesCommits: (sessionId, root, rel) => call("changes:commits", sessionId, root, rel),
+  changesDiff: (sessionId, root, rel, version) => call("changes:diff", sessionId, root, rel, version),
+  changesAdd: (sessionId) => call("changes:add", sessionId),
+  changesRemove: (sessionId, root) => call("changes:remove", sessionId, root),
   storage: () => call("storage:get"),
   openPastes: () => call("storage:openPastes"),
   clearPastes: () => call("storage:clearPastes"),

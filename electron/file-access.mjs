@@ -192,6 +192,19 @@ async function realpathGuarded(p, allow, depth) {
   return cur;
 }
 
+/**
+ * Does `abs` pass the automatic-check rule `allow` the way files:check applies it: every component and every link
+ * target on the way, before it is touched? A path that does not exist yet passes once its existing part has.
+ */
+export async function passesAutomaticCheck(abs, allow) {
+  try {
+    await localRealpath(abs, { allow });
+    return true;
+  } catch {
+    return false; // refused by allow(), a network link target, or unreadable
+  }
+}
+
 const MAX_CONCURRENT_CHECKS = 16;
 const SNIFF_BYTES = 64 * 1024;
 const HIGHLIGHT_MAX = 2 * 1024 * 1024;

@@ -26,9 +26,10 @@ It runs on Windows, macOS and Linux.
   **Activity** or a header click and closed by ✕, `Esc` inside it, or a permission card. While you edit a message,
   the panel entries of the groups after it are dimmed with them.
 - Links are clickable. Web and `mailto:` links open in your browser or mail app. File links and file paths in
-  tool calls and diffs open in the default app. Relative paths resolve against the session folder, and `:line` /
-  `#L12` suffixes are ignored. Only plain text, Markdown, data files (JSON, YAML, CSV, TOML…), diffs, images and PDF are opened, after
-  resolving symlinks. Everything else is only shown in the file manager: source code and scripts (an installed
+  tool calls and diffs open in the app's preview (see "File links and preview" below); a file that is not text goes
+  to the default app. Relative paths resolve against the session folder. In the default app `:line` / `#L12`
+  suffixes are ignored, and only plain text, Markdown, data files (JSON, YAML, CSV, TOML…), diffs, images and PDF
+  are opened, after resolving symlinks. Everything else is only shown in the file manager: source code and scripts (an installed
   interpreter could run them), files without an extension, installers, shortcuts, app bundles, HTML/SVG/XML,
   Office/RTF documents and unknown types. `~/` paths and `file:line` links such as `main.mjs:42` work. Network paths (`\\server\share`, `file://host/…`)
   are never opened.
@@ -135,15 +136,42 @@ identity it has in a terminal (`cli:<sessionId>`), so it keeps its relay name. I
 ## File links and preview
 
 File paths in the chat (`src/app.mjs`, `src/app.mjs:42`, `~/notes.md`, Markdown `file://` links) become links when the file exists.
-A click opens a full-screen preview instead of the system app.
+A click opens a full-screen preview instead of the system app: the changes browser, showing that file alone.
 
 - Text up to 2 MB is shown highlighted, up to 20 MB as plain text, larger files only offer **Open in system app**.
   Markdown can be switched between rendered and source. A `:42` suffix marks that line and scrolls to it.
-- The files opened in a session stay in a list on the left of the preview (20 per session, kept between runs).
-  The **Files (n)** button in the session header reopens it.
-- The preview refreshes when the file changes on disk, including an atomic save, and keeps the scroll position. A deleted
-  file is marked unavailable and stays in the list until you close it.
-- A file outside the session's folder is not opened in the preview without your confirmation. A binary file inside the
+- **Changes** in the session header opens the browser on the session's changes. Its list is read again each time
+  it opens (with a loader) and with ⟳; it does not refresh in the background.
+- What starts the tracking: the first file the agent edits in a repository records that repository with a start
+  point (its `HEAD` commit and the files that already had uncommitted changes). If the session folder is inside a
+  repository, that one is recorded at the agent's first tool call of any kind. Only live tool calls count: an old
+  session that you open records nothing until the agent works again.
+- What is listed, one group per repository: every file with uncommitted changes now, and every file changed by a
+  commit since the start point, whether the agent changed it or not. Files the agent edited outside any repository
+  are under **No repository**. Files that git ignores are not listed.
+- Each row has git's state letter (`M` modified, `A` added, `D` deleted, `R` renamed, `?` untracked) and marks:
+  `●` edited by the agent, `⏱` changed before the session (its uncommitted diff then also holds those earlier
+  changes), `✓` committed, with no uncommitted change now.
+- Versions: selecting a file shows a strip with **Uncommitted** (when it has uncommitted changes) and one entry per
+  commit since the start point that touched it, newest first. The entry's diff is git's own diff: staged and
+  unstaged changes together, a merge commit against its first parent, an untracked file as its whole content added.
+- **Show file** puts the file as it is on disk beside the diff, whichever version is selected (a deleted file shows
+  a message); **Hide file** takes it away. Drag the divider to resize the two panes. Whether the file shows and the
+  divider's place are kept for all sessions.
+- The file on show follows the disk: when it changes, including an atomic save, its content and, with
+  **Uncommitted** selected, its diff are read again in place, keeping the scroll positions. The list does not follow.
+  When a file opened from a link is in the list, its row is selected and its versions are one click away.
+- `+` adds a repository through a folder dialog; its start point is where `HEAD` was when the session was created.
+  `✕` on a group removes the repository from the list; one recorded automatically comes back, with a new start
+  point, at the agent's next edit there.
+- `Esc` closes the browser, `Ctrl/Cmd+A` selects the text of the pane that has the focus.
+- Limits: a diff up to 2 MB (a larger one says so; **Show file** still works) and at most 20000 lines shown, 2000
+  files per repository. Git is only read: nothing is written to a repository (not even `index.lock`), and a
+  repository's config cannot make the app run an fsmonitor hook, an external diff, a textconv driver or a signature
+  check (clean and process filters such as git-lfs still run). In a partial clone a commit's diff may show git's
+  error instead of fetching the missing objects.
+- A file outside the session's folder is not opened from a link without your confirmation; the files of the list
+  are shown without it (the agent edited them, or you added their repository). A binary file inside the
   folder skips the preview and goes straight to the usual open behaviour. A plain-text `file://` URL is not linked. Paths on a network
   location (NFS, SMB, mapped drives) are never checked or read automatically and are not linked; file text from the agent
   never makes the app touch one.

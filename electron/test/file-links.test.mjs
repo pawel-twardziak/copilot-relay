@@ -1,4 +1,4 @@
-// Tests for the pure file link and recent-list helpers in electron/renderer/file-links.js.
+// Tests for the pure file link helpers in electron/renderer/file-links.js.
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { test } from "node:test";
@@ -8,9 +8,6 @@ const {
   pathCandidates,
   splitPathSuffix,
   parseRelayHeader,
-  parseRecent,
-  recentAdd,
-  recentRemove,
   previewLanguage,
 } = FileLinks;
 
@@ -102,20 +99,6 @@ test("not a relay message", () =>
     folder: null,
     display: "hello",
   }));
-test("corrupted recent data is empty", () => {
-  for (const bad of [null, "{", "[]", '{"s":"x"}', '{"s":[1,{"path":5}]}'])
-    assert.deepEqual(Object.values(parseRecent(bad)).flat(), []);
-});
-test("recentAdd moves to the top and caps", () => {
-  let l = [];
-  for (let i = 0; i < 25; i++) l = recentAdd(l, { path: `/f${i}`, line: null });
-  assert.equal(l.length, 20);
-  l = recentAdd(l, { path: "/f10", line: 3 });
-  assert.deepEqual(l[0], { path: "/f10", line: 3 });
-  assert.equal(l.filter((e) => e.path === "/f10").length, 1);
-});
-test("recentRemove", () =>
-  assert.deepEqual(recentRemove([{ path: "/a", line: null }], "/a"), []));
 test("language by name", () => {
   assert.equal(previewLanguage("a.ts"), "typescript");
   assert.equal(previewLanguage("Makefile"), "makefile");
