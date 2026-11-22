@@ -16,6 +16,9 @@ export function sameRoot(a, b, platform = process.platform) {
 
 const clone = (x) => JSON.parse(JSON.stringify(x));
 
+/** The string members of an array; [] for anything else. */
+const strings = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string") : []);
+
 /** The stored data as { [sessionId]: { repos, loose } }; {} when the file is missing, unreadable or malformed. */
 function load(file) {
   let raw;
@@ -29,8 +32,12 @@ function load(file) {
   for (const [id, entry] of Object.entries(raw)) {
     if (!entry || typeof entry !== "object") continue;
     data[id] = {
-      repos: Array.isArray(entry.repos) ? entry.repos.filter((r) => r && typeof r.root === "string") : [],
-      loose: Array.isArray(entry.loose) ? entry.loose.filter((x) => typeof x === "string") : [],
+      repos: Array.isArray(entry.repos)
+        ? entry.repos
+            .filter((r) => r && typeof r.root === "string")
+            .map((r) => ({ ...r, dirtyAtStart: strings(r.dirtyAtStart), touched: strings(r.touched) }))
+        : [],
+      loose: strings(entry.loose),
     };
   }
   return data;
@@ -40,11 +47,16 @@ function load(file) {
 export function createRecordStore(file) {
   const data = load(file);
 
+  // Memory is the truth: a failed write is reported and the next successful save writes the whole state.
   const save = () => {
-    mkdirSync(path.dirname(file), { recursive: true });
-    const tmp = `${file}.tmp`;
-    writeFileSync(tmp, JSON.stringify(data));
-    renameSync(tmp, file);
+    try {
+      mkdirSync(path.dirname(file), { recursive: true });
+      const tmp = `${file}.tmp`;
+      writeFileSync(tmp, JSON.stringify(data));
+      renameSync(tmp, file);
+    } catch (err) {
+      console.warn(`[changes] could not save the repository records: ${err?.message ?? err}`);
+    }
   };
   const find = (sessionId, root) => data[sessionId]?.repos.find((r) => sameRoot(r.root, root));
   const entry = (sessionId) => (data[sessionId] ??= { repos: [], loose: [] });
@@ -58,15 +70,15 @@ export function createRecordStore(file) {
       return r ? clone(r) : null;
     },
     addRepo(sessionId, record) {
-      if (find(sessionId, record.root)) return false;
-      entry(sessionId).repos.push(clone(record));
+      if (typeof record?.root !== "string" || !record.root || find(sessionId, record.root)) return false;
+      const r = clone(record);
+      entry(sessionId).repos.push({ ...r, dirtyAtStart: strings(r.dirtyAtStart), touched: strings(r.touched) });
       save();
       return true;
     },
     touch(sessionId, root, rel) {
       const r = find(sessionId, root);
       if (!r) return;
-      r.touched ??= [];
       if (r.touched.includes(rel)) return;
       r.touched.push(rel);
       save();
