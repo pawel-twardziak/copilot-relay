@@ -25,6 +25,8 @@ contextBridge.exposeInMainWorld("api", {
   renameSession: (sessionId, name) => call("sessions:rename", sessionId, name),
   // number of user messages recorded in the Copilot session history
   userMessages: (sessionId) => call("sessions:userMessages", sessionId),
+  // times (ms) of the recorded messages: { users: in order, agents: by messageId }, see electron/history.mjs
+  messageTimes: (sessionId) => call("sessions:messageTimes", sessionId),
   cancel: (sessionId) => call("sessions:cancel", sessionId),
   closeSession: (sessionId) => call("sessions:close", sessionId),
   // target: { ordinal, text, where } – the message to cut at, see electron/history.mjs
