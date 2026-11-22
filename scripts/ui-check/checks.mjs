@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { PARTS } from "../../electron/test/fixtures/acp/panel-scroll-scenario.mjs";
 import { launch } from "./driver.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -78,6 +79,38 @@ async function untilHalfway(app) {
   await app.check(`!!${HALF_BLOCK}`, "the subagent's message to stop halfway");
   assert.equal(await app.ev(`${HALF_BLOCK}._md().trim()`), "a.txt has", "the pause of panel-wait-scenario");
 }
+
+// --- scrolling (panel-scroll-scenario.mjs, in a window 500 px high so that the log and the panel overflow)
+const SCROLL_SCENARIO = path.join(FIXTURES, "panel-scroll-scenario.mjs");
+const LOG = `${V}.log`;
+const PANEL = `${V}.panelBody`;
+const FIRST_GROUP = `${V}.log.querySelector(":scope > .group")`; // the work group (the thought and the tool)
+const SUB_GROUP = `${V}.log.querySelector(":scope > .group.subagent")`;
+/** The subagent's message block (null before it exists). */
+const SUB_BLOCK = `(${SUB_GROUP}?._body.querySelector(".msg.agent") ?? null)`;
+/** dist: how far (px) the scroller is from its bottom; over: how much its content is taller than it; top: scrollTop. */
+const scrollState = (app, el) => app.ev(`(() => { const e = ${el}; return { top: e.scrollTop, dist: e.scrollHeight - e.scrollTop - e.clientHeight, over: e.scrollHeight - e.clientHeight }; })()`);
+const frames = (app) => app.ev("new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))");
+/** Scrolls el as you would (the app sees only the scroll event), then waits for that event to have been handled. */
+async function scrollTo(app, el, top) {
+  await app.ev(`${el}.scrollTop = ${top}`);
+  await frames(app);
+}
+const untilPart = (app, k) => app.check(`!!${SUB_BLOCK}?.textContent.includes("Part ${k}.")`, `the subagent's part ${k}`);
+async function assertAtBottom(app, el, what) {
+  const s = await scrollState(app, el);
+  assert.ok(s.dist <= 2, `${what}: ${s.dist} px from the bottom`);
+  return s;
+}
+/** The first prompt of panel-scroll-scenario in the short window, until the subagent's group exists. */
+async function untilSubagent(app) {
+  await app.resize(1280, 500);
+  await app.newSession();
+  await app.send("Explain the files.");
+  await app.check(`!!${SUB_GROUP}`, "the subagent's group");
+}
+/** Opens the subagent's entry as a mode switch carries an open group over: not a click, which stops the follow. */
+const openSubEntry = (app) => app.ev(`${SUB_GROUP}._entry.open = true`);
 
 export const checks = [
   {
@@ -344,6 +377,124 @@ export const checks = [
       })()`);
       assert.deepStrictEqual(shown, { entry: true, entryOpen: true, groupOpen: false });
       await app.idle();
+    },
+  },
+  {
+    // a following panel stays at its bottom while a subagent streams into an open entry
+    name: "panel-follows",
+    modes: ["all"],
+    scenario: SCROLL_SCENARIO,
+    async run(app) {
+      await untilSubagent(app);
+      await openSubEntry(app);
+      let s;
+      for (let k = 1; k <= PARTS; k++) {
+        await untilPart(app, k);
+        s = await assertAtBottom(app, PANEL, `the panel after part ${k}`);
+      }
+      assert.ok(s.over > 100, `the panel overflows (${s.over} px)`);
+      await app.idle();
+    },
+  },
+  {
+    // a group shown from the chat stops the panel's follow (its own scroll does not turn it back on); scrolling to
+    // the end follows again; opening an entry by its own header stops it too
+    name: "panel-stops-after-show",
+    modes: ["all"],
+    scenario: SCROLL_SCENARIO,
+    async run(app) {
+      await untilSubagent(app);
+      await openSubEntry(app);
+      await untilPart(app, 4);
+      const before = await assertAtBottom(app, PANEL, "the panel after part 4");
+      assert.ok(before.over > 0, `the panel overflows after part 4 (${before.over} px)`);
+      const top = await app.ev(`(() => { ${FIRST_GROUP}.querySelector(":scope > summary").click(); return ${PANEL}.scrollTop; })()`);
+      assert.ok(top < before.top, "the shown entry scrolled into view");
+      for (const k of [5, 6]) {
+        await untilPart(app, k);
+        assert.deepStrictEqual(await app.ev(`({ top: ${PANEL}.scrollTop, follow: ${V}.panelFollow })`), { top, follow: false }, `the panel after part ${k}`);
+      }
+      await scrollTo(app, PANEL, `${PANEL}.scrollHeight`);
+      await untilPart(app, 7);
+      await assertAtBottom(app, PANEL, "the panel after part 7, scrolled to its end");
+      // the work entry's own header: a click closes it, the next one opens it
+      await app.ev(`${FIRST_GROUP}._entry.querySelector(":scope > summary").click()`);
+      await frames(app);
+      const opened = await app.ev(`(() => { ${FIRST_GROUP}._entry.querySelector(":scope > summary").click(); return { top: ${PANEL}.scrollTop, open: ${FIRST_GROUP}._entry.open }; })()`);
+      assert.equal(opened.open, true, "the entry opened by its header");
+      await untilPart(app, 9);
+      assert.deepStrictEqual(await app.ev(`({ top: ${PANEL}.scrollTop, follow: ${V}.panelFollow })`), { top: opened.top, follow: false }, "the panel after part 9");
+      await app.idle();
+    },
+  },
+  {
+    // a following log keeps its bottom when the panel first shows (the log gets narrower) and through mode switches
+    name: "log-keeps-bottom",
+    modes: ["subagents"],
+    scenario: SCROLL_SCENARIO,
+    async run(app) {
+      await untilSubagent(app);
+      assert.equal(await app.ev(`${V}.panel.hidden`), false, "the panel shows");
+      const s = await assertAtBottom(app, LOG, "the log when the first subagent group appears");
+      assert.ok(s.over > 100, `the log overflows (${s.over} px)`);
+      await app.idle();
+      for (const mode of ["off", "subagents"]) {
+        await app.setMode(mode);
+        await frames(app);
+        assert.equal(await app.ev(`${V}.follow`), true, `the log follows after the switch to ${mode}`);
+        await assertAtBottom(app, LOG, `the log after the switch to ${mode}`);
+      }
+    },
+  },
+  {
+    // a scrolled-up log stays put while groups are created, a header shows its group and the mode switches
+    name: "log-keeps-place",
+    modes: ["all"],
+    scenario: SCROLL_SCENARIO,
+    async run(app) {
+      await app.resize(1280, 500);
+      await app.newSession();
+      await app.send("Explain the files.");
+      await app.check(`${LOG}.scrollHeight - ${LOG}.clientHeight > 100`, "the long answer");
+      await scrollTo(app, LOG, 0);
+      const place = (when) => app.ev(`({ top: ${LOG}.scrollTop, follow: ${V}.follow })`).then((s) => assert.deepStrictEqual(s, { top: 0, follow: false }, `the log ${when}`));
+      await place("scrolled to the top");
+      await app.check(`!!${SUB_GROUP}`, "the subagent's group");
+      await place("when the groups appear");
+      await app.ev(`${FIRST_GROUP}.querySelector(":scope > summary").click()`);
+      await frames(app);
+      await place("after a header showed its group");
+      await app.idle();
+      await place("after the turn");
+      for (const mode of ["subagents", "off", "all"]) {
+        await app.setMode(mode);
+        await frames(app);
+        await place(`after the switch to ${mode}`);
+      }
+    },
+  },
+  {
+    // sending and the end of a replay take the log and the panel to their bottoms
+    name: "forced-scroll",
+    modes: ["all"],
+    scenario: SCROLL_SCENARIO,
+    async run(app) {
+      await untilSubagent(app);
+      await app.idle();
+      await openSubEntry(app);
+      await frames(app);
+      assert.ok((await scrollState(app, PANEL)).over > 100, "the panel overflows");
+      await scrollTo(app, PANEL, 0);
+      await scrollTo(app, LOG, 0);
+      await app.send("Again.");
+      await assertAtBottom(app, LOG, "the log after sending");
+      await assertAtBottom(app, PANEL, "the panel after sending");
+      await app.idle();
+      await app.reload();
+      await frames(app);
+      assert.ok((await scrollState(app, LOG)).over > 100, "the replayed log overflows");
+      await assertAtBottom(app, LOG, "the log after the replay");
+      await assertAtBottom(app, PANEL, "the panel after the replay");
     },
   },
 ];

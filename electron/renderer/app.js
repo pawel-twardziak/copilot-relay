@@ -334,6 +334,21 @@ class SessionView {
       this.follow = ScrollFollow.followAfterScroll(this.follow, this.lastTop, { top, height, client });
       this.lastTop = top;
     });
+    // the panel follows its own output on the same rule; panel content never changes the log's follow
+    this.panelFollow = true;
+    this.panelLastTop = 0;
+    this.panelOwnTop = null; // where the app's own scroll (showInPanel, an entry opened) left the panel: not your scroll
+    this.panelBody.addEventListener("scroll", () => {
+      const { scrollTop: top, scrollHeight: height, clientHeight: client } = this.panelBody;
+      if (top !== this.panelOwnTop) this.panelFollow = ScrollFollow.followAfterScroll(this.panelFollow, this.panelLastTop, { top, height, client });
+      this.panelOwnTop = null;
+      this.panelLastTop = top;
+    });
+    // a size change (a resize, the panel showing or hiding, the view becoming visible) fires no scroll event: a
+    // following log or panel goes back to its bottom
+    const resized = new ResizeObserver(() => this.followBottom());
+    resized.observe(this.log);
+    resized.observe(this.panelBody);
     this.input = h("textarea", { rows: 2, placeholder: "Message Copilot…  (Enter to send, Shift+Enter for a new line, Left Shift+↑/↓ for your earlier messages, Esc to stop)" });
     this.sendBtn = h("button", { class: "primary", onclick: () => this.send() }, "Send");
     this.stopBtn = h("button", { onclick: () => this.cancel(), disabled: true }, "Stop");
@@ -736,6 +751,15 @@ class SessionView {
     this.follow = true;
     this.log.scrollTop = this.log.scrollHeight;
   }
+  panelToBottom() {
+    this.panelFollow = true;
+    this.panelBody.scrollTop = this.panelBody.scrollHeight;
+  }
+  /** After new content or a size change: the log and the panel, each at its bottom if it follows. */
+  followBottom() {
+    if (this.follow) this.toBottom();
+    if (this.panelFollow) this.panelToBottom();
+  }
   /** Your messages in this thread, oldest first. Relay messages from other sessions are not yours: live ones are
    *  .msg.relay, replayed ones are .msg.user with the broker's "[from <name>]" prefix. */
   ownMessages() {
@@ -772,7 +796,7 @@ class SessionView {
     this.markTurn(el);
     this.log.append(el);
     if (el._info) this.place(el); // a group: its body goes where the mode says
-    if (this.follow) this.toBottom();
+    this.followBottom();
     return el;
   }
   /** Number user/relay messages (turn ordinals, as in events.jsonl) and give them and the first reply block of
@@ -1314,7 +1338,7 @@ class SessionView {
       if (!this.dirty.size) return;
       for (const r of this.dirty) renderRun(r);
       this.dirty.clear();
-      if (this.follow) this.toBottom();
+      this.followBottom();
     });
   }
   /** Before something else is appended to the log: finish the streamed blocks (finishRuns); chunks without a
@@ -1394,11 +1418,11 @@ class SessionView {
     return this.append(this.groupElement("work"));
   }
 
-  /** An item into a group's body: never a turn mark; the log still follows the bottom. */
+  /** An item into a group's body: never a turn mark; the log and the panel still follow their bottoms. */
   groupAppend(group, el) {
     group._body.append(el);
     group._renderHeader();
-    if (this.follow) this.toBottom();
+    this.followBottom();
   }
 
   /** Route an update (Activity) and apply the group changes it brings. */
@@ -1510,7 +1534,17 @@ class SessionView {
     if (inPanel && !group._entry) {
       const mark = h("span", { class: "mark" });
       const name = h("span", { class: "title" });
-      group._entry = Object.assign(h("details", { class: `panel-entry ${group._info.kind}` }, h("summary", {}, mark, name)), { _mark: mark, _name: name });
+      const summary = h("summary", {}, mark, name);
+      // you open it to read it: the panel stops following. Opened here rather than by the default action, so that
+      // the browser's scroll anchoring for the grown entry happens when scrollTop is read, and its scroll is the app's
+      summary.addEventListener("click", (e) => {
+        if (group._entry.open) return;
+        e.preventDefault();
+        group._entry.open = true;
+        this.panelFollow = false;
+        this.panelOwnTop = this.panelBody.scrollTop;
+      });
+      group._entry = Object.assign(h("details", { class: `panel-entry ${group._info.kind}` }, summary), { _mark: mark, _name: name });
       group._renderHeader();
     }
     const holder = inPanel ? group._entry : group;
@@ -1536,6 +1570,7 @@ class SessionView {
   /** place() for every group of the log, in log order (the mode changed). */
   placeAll() {
     for (const g of this.log.querySelectorAll(":scope > .group")) this.place(g);
+    this.followBottom(); // bodies that moved changed the content of the log and the panel, not always their size
   }
 
   /** The panel shows while it has an entry. */
@@ -1559,11 +1594,13 @@ class SessionView {
   }
 
   /** An in-panel group's header clicked in the chat (or "N subagents running"): its entry opened, scrolled into view
-   *  and highlighted for a second. */
+   *  and highlighted for a second. The panel stops following, and the scroll made here does not turn it back on. */
   showInPanel(group) {
     const entry = group._entry;
     entry.open = true;
+    this.panelFollow = false;
     entry.scrollIntoView({ block: "nearest" });
+    this.panelOwnTop = this.panelBody.scrollTop;
     entry.classList.add("flash");
     clearTimeout(entry._flash);
     entry._flash = setTimeout(() => entry.classList.remove("flash"), 1000);
@@ -2190,6 +2227,7 @@ class SessionView {
     }
     this.append(bubble);
     this.toBottom();
+    this.panelToBottom();
     // a mid-turn prompt owns the turn's updates (and is acknowledged) only from its switch point on (the record
     // keeps its delivery until then)
     const record = this.chain.start({ midTurn, delivery });
@@ -2353,6 +2391,7 @@ async function openSession(s, { activate: show = true } = {}) {
     v.settleGroups();
     v.setConfig(res.configOptions);
     v.toBottom();
+    v.panelToBottom();
     v.setBusy(false);
     if (!v.log.childElementCount) v.system("No messages yet.");
   } catch (e) {
