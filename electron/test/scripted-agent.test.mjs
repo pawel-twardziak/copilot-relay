@@ -19,7 +19,8 @@ const PROMPTS = [
 ];
 
 const tmp = mkdtempSync(path.join(os.tmpdir(), "scripted-agent-"));
-after(() => rmSync(tmp, { recursive: true, force: true }));
+// the children are killed and gone by then (start: t.after); the retries cover a handle Windows releases late
+after(() => rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }));
 const scenario = path.join(tmp, "scenario.mjs");
 writeFileSync(scenario, `export default { prompts: ${JSON.stringify(PROMPTS)} };\n`);
 const failingLoad = path.join(tmp, "failing-load.mjs");
@@ -31,12 +32,19 @@ const freshCwd = () => {
   return dir;
 };
 
-/** The agent as the app starts it (with flags it must ignore), and a client that keeps every message it sent. */
-function start(cwd, scenarioFile = scenario) {
+/** The agent as the app starts it (with flags it must ignore), and a client that keeps every message it sent. The
+ *  test t kills it when it ends, and waits for its exit, also after a failed assertion or a timeout (a child left
+ *  running would keep node --test from exiting). */
+function start(t, cwd, scenarioFile = scenario) {
   const proc = spawn(process.execPath, [AGENT, "--acp", "--stdio", "--context", "long_context"], {
     cwd,
     env: { ...process.env, SCRIPTED_SCENARIO: scenarioFile },
     stdio: ["pipe", "pipe", "inherit"],
+  });
+  const exited = new Promise((resolve) => proc.once("exit", resolve));
+  t.after(() => {
+    proc.kill();
+    return exited;
   });
   const seen = [];
   const waiters = new Set();
@@ -74,8 +82,8 @@ function start(cwd, scenarioFile = scenario) {
   return { proc, seen, waitFor, request, write, updates, stop: () => proc.kill() };
 }
 
-async function newSession(cwd) {
-  const a = start(cwd);
+async function newSession(t, cwd) {
+  const a = start(t, cwd);
   await a.request("initialize", { protocolVersion: 1 });
   const sessionId = a.seen[await a.request("session/new", { cwd, mcpServers: [] })].result.sessionId;
   return { ...a, sessionId };
@@ -83,15 +91,15 @@ async function newSession(cwd) {
 
 const prompt = (a, t) => a.request("session/prompt", { sessionId: a.sessionId, prompt: [{ type: "text", text: t }] });
 
-test("session/new answers with scripted- and the folder's name", async () => {
+test("session/new answers with scripted- and the folder's name", async (t) => {
   const cwd = freshCwd();
-  const a = await newSession(cwd);
+  const a = await newSession(t, cwd);
   a.stop();
   assert.equal(a.sessionId, `scripted-${path.basename(cwd)}`);
 });
 
-test("a prompt's updates arrive in order before its answer; steps after end follow the answer", async () => {
-  const a = await newSession(freshCwd());
+test("a prompt's updates arrive in order before its answer; steps after end follow the answer", async (t) => {
+  const a = await newSession(t, freshCwd());
   const from = a.seen.length;
   const answer = await prompt(a, "first");
   assert.deepEqual(a.seen[answer].result, { stopReason: "end_turn" });
@@ -104,8 +112,8 @@ test("a prompt's updates arrive in order before its answer; steps after end foll
   assert.ok(late > answer);
 });
 
-test("a perm step holds the next update until the request is answered", async () => {
-  const a = await newSession(freshCwd());
+test("a perm step holds the next update until the request is answered", async (t) => {
+  const a = await newSession(t, freshCwd());
   await prompt(a, "first");
   await a.waitFor((m) => m.params?.update?.messageId === "m2");
   const answered = prompt(a, "second");
@@ -122,8 +130,8 @@ test("a perm step holds the next update until the request is answered", async ()
   assert.deepEqual(a.seen[answer].result, { stopReason: "end_turn" });
 });
 
-test("session/cancel ends the running prompt at once: it answers cancelled and plays none of its remaining steps", async () => {
-  const a = await newSession(freshCwd());
+test("session/cancel ends the running prompt at once: it answers cancelled and plays none of its remaining steps", async (t) => {
+  const a = await newSession(t, freshCwd());
   await prompt(a, "first");
   await a.waitFor((m) => m.params?.update?.messageId === "m2");
   const answered = prompt(a, "second");
@@ -138,11 +146,11 @@ test("session/cancel ends the running prompt at once: it answers cancelled and p
   assert.ok(!a.seen.some((m) => m.params?.update?.sessionUpdate === "tool_call_update"), "a step after the cancel was played");
 });
 
-test("session/cancel during a wait step ends the prompt without waiting", async () => {
+test("session/cancel during a wait step ends the prompt without waiting", async (t) => {
   const cwd = freshCwd();
   const waiting = path.join(tmp, "waiting.mjs");
   writeFileSync(waiting, `export default { prompts: ${JSON.stringify([[{ u: text("m1", "before") }, { wait: 5000 }, { u: text("m1", "after") }, { end: "end_turn" }]])} };\n`);
-  const a = start(cwd, waiting);
+  const a = start(t, cwd, waiting);
   await a.request("initialize", { protocolVersion: 1 });
   const sessionId = a.seen[await a.request("session/new", { cwd, mcpServers: [] })].result.sessionId;
   const answered = a.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "go" }] });
@@ -156,9 +164,9 @@ test("session/cancel during a wait step ends the prompt without waiting", async 
   assert.ok(!a.seen.some((m) => m.params?.update?.content?.text === "after"));
 });
 
-test("session/load in a new process replays the prompts and updates in order before its answer", async () => {
+test("session/load in a new process replays the prompts and updates in order before its answer", async (t) => {
   const cwd = freshCwd();
-  const a = await newSession(cwd);
+  const a = await newSession(t, cwd);
   await prompt(a, "first");
   await a.waitFor((m) => m.params?.update?.messageId === "m2");
   const answered = prompt(a, "second");
@@ -167,7 +175,7 @@ test("session/load in a new process replays the prompts and updates in order bef
   await answered;
   a.stop();
 
-  const b = start(cwd);
+  const b = start(t, cwd);
   await b.request("initialize", { protocolVersion: 1 });
   const from = b.seen.length;
   const loaded = await b.request("session/load", { sessionId: a.sessionId, cwd, mcpServers: [] });
@@ -180,20 +188,20 @@ test("session/load in a new process replays the prompts and updates in order bef
   );
 });
 
-test("a scenario's load option holds the load's answer back and makes it an error, after the replay", async () => {
+test("a scenario's load option holds the load's answer back and makes it an error, after the replay", async (t) => {
   const cwd = freshCwd();
-  const a = await newSession(cwd);
+  const a = await newSession(t, cwd);
   await prompt(a, "first");
   await a.waitFor((m) => m.params?.update?.messageId === "m2");
   a.stop();
 
-  const b = start(cwd, failingLoad);
+  const b = start(t, cwd, failingLoad);
   await b.request("initialize", { protocolVersion: 1 });
   const from = b.seen.length;
   const started = Date.now();
   const loaded = await b.request("session/load", { sessionId: a.sessionId, cwd, mcpServers: [] });
   b.stop();
-  assert.ok(Date.now() - started >= 150);
+  assert.ok(Date.now() - started >= 140); // the delay is 150 ms; a margin for the two processes' clocks
   assert.equal(b.seen[loaded].error?.message, "no luck");
   assert.equal(b.updates(from, loaded).length, 4); // the prompt and its three updates
 });

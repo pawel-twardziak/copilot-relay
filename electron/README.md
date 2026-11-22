@@ -288,7 +288,7 @@ From the repo root, run `npm run app:install` once and then `npm run app`.
 Checks, from the repo root: `npm test` runs the unit tests. `node scripts/ui-check/run.mjs [name…]` runs the UI checks
 (all, or the named ones): it starts the real app under Xvfb (`xvfb-run`, Linux) against a scripted Copilot
 (`electron/test/fixtures/acp/`), drives its window in each activity panel mode a check lists and exits with 1 if one
-fails. All of them take about 3 minutes.
+fails. All of them take about 3.5 minutes.
 
 The first `npm start` downloads the Electron binary (about 100 MB, from GitHub). Behind a corporate proxy, set
 `HTTPS_PROXY`, or point `ELECTRON_MIRROR` at an internal mirror, e.g. `ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/`.
