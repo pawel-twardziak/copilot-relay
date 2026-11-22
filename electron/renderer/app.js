@@ -23,6 +23,13 @@ function openViewerFrom(img) {
   );
 }
 
+/** Moves node into parent before ref; with moveBefore where it can (both in the page), which keeps the node's state
+ *  (focus, scroll offsets) that a removal and an insertion reset. */
+function moveNode(parent, node, ref) {
+  if (parent.moveBefore && parent.isConnected && node.isConnected) parent.moveBefore(node, ref);
+  else parent.insertBefore(node, ref);
+}
+
 /** Tiny DOM helper: h("div", { class: "x", onclick }, child, "text") */
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
@@ -315,6 +322,11 @@ class SessionView {
     this.usageLabel = h("span", { class: "label" }, "context: —");
     this.usageChip = h("span", { class: "usage-chip" }, h("span", { class: "meter" }, this.usageFill), this.usageLabel);
     this.log = h("div", { class: "log" });
+    // the activity panel beside the log: in a panel mode it holds the bodies of groups (place), each in an entry
+    this.panelBody = h("div", { class: "panel-body" }); // the panel's scroller, zoomed with the chat
+    this.panel = h("aside", { class: "activity-panel", hidden: true }, this.panelBody); // hidden: no entry
+    this.panelHandle = h("div", { class: "panel-handle", hidden: true });
+    this.row = h("div", { class: "chat-row" }, this.log, this.panelHandle, this.panel);
     this.follow = true; // follow streamed output: off once you scroll up, on again near the bottom
     this.lastTop = 0;
     this.log.addEventListener("scroll", () => {
@@ -363,7 +375,7 @@ class SessionView {
         h("button", { class: "danger", title: "Delete this whole session from disk", onclick: () => deleteSessionFlow({ sessionId: this.sessionId, cwd: this.cwd, title: this.title }) }, "Delete"),
       ),
       this.relationsEl,
-      this.log,
+      this.row,
       this.editBar,
       this.queueEl,
       h("div", { class: "composer" }, this.cmdPopup, this.input, this.agentPicker, h("div", { class: "btns" }, this.sendBtn, this.stopBtn)),
@@ -371,7 +383,8 @@ class SessionView {
     );
     this.bgEl.onclick = () => {
       const first = this.activity.running().map((id) => this.groupEls.get(id)).find(Boolean);
-      first?.scrollIntoView({ block: "nearest" });
+      if (first?.classList.contains("in-panel")) this.showInPanel(first);
+      else first?.scrollIntoView({ block: "nearest" });
     };
     // Left Shift+Up/Down walks through your earlier messages, with the draft as the newest entry; registered first,
     // so it also works while the command popup is open. Right Shift+arrows still extend the text selection.
@@ -425,17 +438,8 @@ class SessionView {
     this.input.addEventListener("paste", (e) => this.onFiles(e, e.clipboardData));
     this.input.addEventListener("dragover", (e) => e.preventDefault());
     this.input.addEventListener("drop", (e) => this.onFiles(e, e.dataTransfer));
-    // left click, Enter on a focused link (fires "click") and middle click all go through openLink
-    const onLink = (e) => {
-      if (e.type === "auxclick" && e.button !== 1) return;
-      const a = e.target.closest("a[href]");
-      const p = e.target.closest("[data-path]");
-      if (!a && !p) return;
-      e.preventDefault();
-      this.openLink(a ? a.getAttribute("href") : p.dataset.path, a?._base ?? this.cwd);
-    };
-    this.log.addEventListener("click", onLink);
-    this.log.addEventListener("auxclick", onLink);
+    this.bindLinks(this.log);
+    this.bindLinks(this.panelBody);
     this.setTitle(title);
     this.updateFilesBtn();
     $("#main").append(this.el);
@@ -498,6 +502,21 @@ class SessionView {
       const src = ref.dataset.src;
       ref.replaceWith(h("span", { class: "thumbs inline" }, src ? this.thumb(src, ref.dataset.alt) : null));
     }
+  }
+
+  /** Links and file paths in el: left click, Enter on a focused link (fires "click") and middle click all go
+   *  through openLink. */
+  bindLinks(el) {
+    const onLink = (e) => {
+      if (e.type === "auxclick" && e.button !== 1) return;
+      const a = e.target.closest("a[href]");
+      const p = e.target.closest("[data-path]");
+      if (!a && !p) return;
+      e.preventDefault();
+      this.openLink(a ? a.getAttribute("href") : p.dataset.path, a?._base ?? this.cwd);
+    };
+    el.addEventListener("click", onLink);
+    el.addEventListener("auxclick", onLink);
   }
 
   async openLink(href, base = this.cwd) {
@@ -752,6 +771,7 @@ class SessionView {
   append(el) {
     this.markTurn(el);
     this.log.append(el);
+    if (el._info) this.place(el); // a group: its body goes where the mode says
     if (this.follow) this.toBottom();
     return el;
   }
@@ -999,9 +1019,11 @@ class SessionView {
     return this.append(h("div", { class: "msg error" }, text));
   }
 
-  /** A setting changed: re-apply the busy state so the Send button and status line follow it. */
+  /** A setting changed: re-apply the busy state so the Send button and status line follow it, and put the groups'
+   *  bodies where activityPanel says. */
   settingChanged() {
     this.setBusy(this.busy);
+    this.placeAll();
   }
 
   /** A prompt of this view is pending (the user_message_chunk of a live prompt is not shown again). */
@@ -1328,7 +1350,13 @@ class SessionView {
     const mark = h("span", { class: "mark" });
     const name = h("span", { class: "title" });
     const body = h("div", { class: "group-body" });
-    const el = h("details", { class: `group ${kind}` }, h("summary", {}, mark, name), body);
+    const summary = h("summary", {}, mark, name);
+    const el = h("details", { class: `group ${kind}` }, summary, body);
+    summary.addEventListener("click", (e) => {
+      if (!el.classList.contains("in-panel")) return;
+      e.preventDefault(); // its body is in the panel: no toggle, the panel shows it
+      this.showInPanel(el);
+    });
     // (the kind is in _info: el._kind is the turn mark's "user"/"reply")
     el._info = { kind, title, prompt, status: "running", tools: 0, thoughts: 0, running: new Map(), failed: new Set(), leftover: new Set(), waiting: false, lastLine: "" }; // running: toolCallId -> title
     Object.assign(el, { _body: body, _runs: StreamRuns.create(), _anchored: anchored });
@@ -1344,11 +1372,15 @@ class SessionView {
       const i = el._info;
       // work: ● while a tool runs, then ✗ if one failed, ○ if one never ended or was interrupted, else ✓
       const status = kind === "work" ? (i.running.size ? "running" : i.failed.size ? "failed" : i.leftover.size ? "quiet" : "completed") : i.status;
-      mark.className = `mark ${status}`;
-      mark.textContent = Activity.MARKS[status] ?? Activity.MARKS.running;
-      mark.title = MARK_TITLES[status] ?? MARK_TITLES.running;
       const runningTitle = [...i.running.values()].pop();
-      name.textContent = name.title = Activity.headerText({ kind, title: i.title, tools: i.tools, thoughts: i.thoughts, runningTitle, lastLine: i.status === "running" ? i.lastLine : "", waiting: i.waiting });
+      const text = Activity.headerText({ kind, title: i.title, tools: i.tools, thoughts: i.thoughts, runningTitle, lastLine: i.status === "running" ? i.lastLine : "", waiting: i.waiting });
+      // the group's summary in the chat, and its entry's in the panel once it has one
+      for (const [m, n] of el._entry ? [[mark, name], [el._entry._mark, el._entry._name]] : [[mark, name]]) {
+        m.className = `mark ${status}`;
+        m.textContent = Activity.MARKS[status] ?? Activity.MARKS.running;
+        m.title = MARK_TITLES[status] ?? MARK_TITLES.running;
+        n.textContent = n.title = text;
+      }
     };
     el._renderHeader();
     return el;
@@ -1442,7 +1474,7 @@ class SessionView {
       g._info.running.delete(replacesTool);
       g._info.failed.delete(replacesTool);
       if (g._body.childElementCount || g._turn) g._renderHeader();
-      else g.remove();
+      else this.removeGroup(g);
     }
     this.groupEls.set(groupId, el);
     this.renderTask(el);
@@ -1457,7 +1489,7 @@ class SessionView {
     const items = [...from._body.childNodes];
     if (into._prompt) into._prompt.after(...items);
     else into._body.prepend(...items);
-    if (from.open) into.open = true; // you opened it: it stays open
+    if (this.isOpen(from)) this.setOpen(into, true); // you opened it: it stays open
     into._runs = from._runs; // a continuing message keeps its block (an unlinked task group never streamed: no runs of its own)
     into._info.tools += from._info.tools;
     into._info.thoughts += from._info.thoughts;
@@ -1465,8 +1497,76 @@ class SessionView {
     for (const id of from._info.failed) into._info.failed.add(id);
     for (const id of from._info.leftover) into._info.leftover.add(id);
     for (const t of this.tools.values()) if (t.group === from) t.group = into;
-    from.remove();
+    this.removeGroup(from);
     into._renderHeader();
+  }
+
+  // --- the activity panel: a group's body inside the group (inline) or inside its entry in the panel
+  /** Put the group's body where the mode says (Activity.inPanel, read here only): inside the group, or inside the
+   *  group's entry in the panel, the entries in the order of their groups in the log. Only what changes place is
+   *  moved; the open state goes with the body. */
+  place(group) {
+    const inPanel = Activity.inPanel(activityPanel, group._info.kind);
+    if (inPanel && !group._entry) {
+      const mark = h("span", { class: "mark" });
+      const name = h("span", { class: "title" });
+      group._entry = Object.assign(h("details", { class: `panel-entry ${group._info.kind}` }, h("summary", {}, mark, name)), { _mark: mark, _name: name });
+      group._renderHeader();
+    }
+    const holder = inPanel ? group._entry : group;
+    if (inPanel) {
+      // before the entry of the next group in the log that has one in the panel
+      let next = group.nextElementSibling;
+      while (next && next._entry?.parentNode !== this.panelBody) next = next.nextElementSibling;
+      const ref = next?._entry ?? null;
+      if (holder.parentNode !== this.panelBody || holder.nextElementSibling !== ref) moveNode(this.panelBody, holder, ref);
+    }
+    const from = group._body.parentNode;
+    if (from !== holder) {
+      const open = from.open;
+      moveNode(holder, group._body, null);
+      from.open = false;
+      holder.open = open;
+    }
+    if (!inPanel) group._entry?.remove();
+    group.classList.toggle("in-panel", inPanel);
+    this.updatePanelShown();
+  }
+
+  /** place() for every group of the log, in log order (the mode changed). */
+  placeAll() {
+    for (const g of this.log.querySelectorAll(":scope > .group")) this.place(g);
+  }
+
+  /** The panel shows while it has an entry. */
+  updatePanelShown() {
+    this.panel.hidden = this.panelHandle.hidden = !this.panelBody.firstElementChild;
+  }
+
+  /** Whether the group is open: the state of whatever holds its body (the group, or its entry in the panel). */
+  isOpen(group) {
+    return group._body.parentNode.open;
+  }
+  setOpen(group, open) {
+    group._body.parentNode.open = open;
+  }
+
+  /** A group leaves the log, and its entry the panel. */
+  removeGroup(group) {
+    group.remove();
+    group._entry?.remove();
+    this.updatePanelShown();
+  }
+
+  /** An in-panel group's header clicked in the chat (or "N subagents running"): its entry opened, scrolled into view
+   *  and highlighted for a second. */
+  showInPanel(group) {
+    const entry = group._entry;
+    entry.open = true;
+    entry.scrollIntoView({ block: "nearest" });
+    entry.classList.add("flash");
+    clearTimeout(entry._flash);
+    entry._flash = setTimeout(() => entry.classList.remove("flash"), 1000);
   }
 
   /** A task call's update: no badge, its prompt and error are in its group (the status comes with the changes). */

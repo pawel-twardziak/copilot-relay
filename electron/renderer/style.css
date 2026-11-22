@@ -151,27 +151,38 @@ details.thought > div { white-space: pre-wrap; padding: 4px 0 0 14px; border-lef
 .tool .body { border-top: 1px solid var(--border); padding: 8px 10px; max-height: 360px; overflow: auto; }
 .tool .body pre { margin: 0 0 6px; white-space: pre-wrap; }
 /* groups: the main agent's work (tools, thinking) and each subagent, collapsed; a one-line header of fixed height */
-.group { max-width: 920px; border: 1px solid var(--border); border-radius: 6px; font-size: 12.5px; }
-.group.subagent { background: var(--panel); }
-.group > summary {
+.group { max-width: 920px; }
+.group, .panel-entry { border: 1px solid var(--border); border-radius: 6px; font-size: 12.5px; }
+.group.subagent, .panel-entry.subagent { background: var(--panel); }
+.group > summary, .panel-entry > summary {
   height: 26px; box-sizing: border-box; padding: 0 10px; cursor: pointer; display: flex; gap: 8px; align-items: center;
   list-style: none; color: var(--muted);
 }
-.group > summary::-webkit-details-marker { display: none; }
-.group > summary::before { content: "▸"; flex: none; }
-.group[open] > summary::before { content: "▾"; }
-.group .mark { flex: none; font-size: 11px; }
-.group .mark.completed { color: var(--ok); }
-.group .mark.failed, .group .mark.interrupted { color: var(--err); }
-.group .mark.running { color: var(--warn); }
-.group .mark.quiet { color: var(--muted); }
+.group > summary::-webkit-details-marker, .panel-entry > summary::-webkit-details-marker { display: none; }
+.group > summary::before, .panel-entry > summary::before { content: "▸"; flex: none; }
+.group[open] > summary::before, .panel-entry[open] > summary::before { content: "▾"; }
+.group.in-panel > summary::before { content: "⇢"; } /* its body is in the panel: a click shows it there */
+.group .mark, .panel-entry .mark { flex: none; font-size: 11px; }
+.group .mark.completed, .panel-entry .mark.completed { color: var(--ok); }
+.group .mark.failed, .group .mark.interrupted, .panel-entry .mark.failed, .panel-entry .mark.interrupted { color: var(--err); }
+.group .mark.running, .panel-entry .mark.running { color: var(--warn); }
+.group .mark.quiet, .panel-entry .mark.quiet { color: var(--muted); }
 .bg-running { flex: none; font: inherit; padding: 0; border: 0; background: none; color: var(--muted); cursor: pointer; }
 .bg-running[hidden] { display: none; }
 .bg-running:hover:not(:disabled), .bg-running:focus-visible { color: var(--text); text-decoration: underline; }
-.group > summary .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group > summary .title, .panel-entry > summary .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .group:hover > summary .acts { opacity: 1; }
 .group-body { border-top: 1px solid var(--border); padding: 8px 10px; display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
 .group-body > .tool, .group-body > details.thought { font-size: 12.5px; }
+/* the activity panel beside the log (a panel mode): one entry per group whose body is there, in log order */
+.chat-row { flex: 1; display: flex; min-height: 0; }
+.chat-row > .log { min-width: 0; }
+.panel-handle { flex: none; width: 1px; background: var(--border); }
+.activity-panel { flex: none; width: 420px; display: flex; flex-direction: column; min-height: 0; }
+.panel-handle[hidden], .activity-panel[hidden] { display: none; }
+.panel-body { flex: 1; overflow-y: auto; padding: 16px 12px 24px; display: flex; flex-direction: column; gap: 8px; }
+.panel-entry { flex: none; }
+.panel-entry.flash { outline: 2px solid var(--accent); outline-offset: -1px; } /* shown from the chat: for a second */
 .task-prompt { color: var(--muted); font-size: 12.5px; }
 .task-prompt summary { cursor: pointer; }
 .task-prompt pre { margin: 4px 0 0; white-space: pre-wrap; padding-left: 14px; border-left: 2px solid var(--border); }
@@ -268,7 +279,7 @@ dialog label { display: flex; flex-direction: column; gap: 6px; }
 .msg, .tool .body, .perm, .plan { user-select: text; }
 
 /* ---------- links ---------- */
-.log a { color: var(--accent); cursor: pointer; }
+.log a, .panel-body a { color: var(--accent); cursor: pointer; }
 .path-link { cursor: pointer; }
 .path-link:hover { color: var(--accent); text-decoration: underline; }
 dialog h3 { font-size: 13px; margin: 16px 0 8px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
@@ -316,7 +327,7 @@ dialog .del-row label { flex-direction: row; align-items: center; gap: 6px; font
 .msg.recalled { outline: 2px solid #1f6feb99; outline-offset: 2px; }
 
 /* chat text size (Left Ctrl + wheel / + / - / 0) */
-.log, .composer textarea { zoom: var(--chat-scale); }
+.log, .panel-body, .composer textarea { zoom: var(--chat-scale); }
 
 /* images in messages */
 .thumbs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; white-space: normal; zoom: calc(1 / var(--chat-scale)); }
