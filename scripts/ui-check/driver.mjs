@@ -209,12 +209,13 @@ export async function launch({ scenario, settings = {}, width = 1280, height = 8
         await check(`!document.querySelector("#settings").open`, "the Settings dialog to close");
         await check(`api.getSettings().then((s) => s.activityPanel === ${JSON.stringify(mode)})`, "the mode to be saved");
       },
-      /** thread: what Copy thread builds, without its two header lines; log: one row per log child. */
+      /** thread: what Copy thread builds, without its two header lines; log: one row per log child (date lines left out). */
       async dump() {
         return ev(`(() => {
           const v = ${view()};
-          const thread = [...v.log.children].map((e) => e._md?.()?.trim()).filter(Boolean).join("\\n\\n");
-          const log = [...v.log.children].map((e) => [e.className.replace(/\\s*\\bin-panel\\b/, ""), e._turn ?? null, e._kind ?? null, !!e.querySelector(".acts")]);
+          const rows = [...v.log.children].filter((e) => !e.classList.contains("day-sep"));
+          const thread = rows.map((e) => e._md?.()?.trim()).filter(Boolean).join("\\n\\n");
+          const log = rows.map((e) => [e.className.replace(/\\s*\\bin-panel\\b/, ""), e._turn ?? null, e._kind ?? null, !!e.querySelector(".acts")]);
           return { thread, log };
         })()`);
       },

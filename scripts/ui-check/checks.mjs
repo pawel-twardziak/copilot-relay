@@ -331,6 +331,48 @@ export const checks = [
     },
   },
   {
+    // every top-level user/relay/agent message shows HH:MM inside its right padding, clear of its text; one date line
+    name: "message-times-live",
+    modes: ["off"],
+    async run(app) {
+      await playScenario(app);
+      const r = await app.ev(`(() => {
+        const v = ${V};
+        const rect = (e) => e.getBoundingClientRect();
+        const timed = [...v.log.querySelectorAll(":scope > .msg.user, :scope > .msg.relay, :scope > .msg.agent")].filter((e) => !e.hidden);
+        const seps = [...v.log.querySelectorAll(":scope > .day-sep")];
+        const bad = (e) => {
+          const t = e.querySelector(":scope > .time"), b = e.querySelector(":scope > .body, :scope > .md");
+          return !t || !b || rect(t).left < rect(b).right || rect(t).right > rect(e).right || rect(t).top < rect(e).top || rect(t).width === 0;
+        };
+        return {
+          timed: timed.length,
+          clocks: timed.map((e) => e.querySelector(":scope > .time")?.textContent ?? null),
+          bad: timed.filter(bad).length,
+          seps: seps.length,
+          sepFirst: seps[0]?.nextElementSibling === timed[0],
+          sepText: seps[0]?.textContent === MessageTimes.dayLabel(Date.now()),
+          elsewhere: v.el.querySelectorAll(".time").length - timed.length,
+        };
+      })()`);
+      assert.ok(r.timed > 3, "the scenario's three prompts and their answers");
+      assert.ok(r.clocks.every((c) => /^\d\d:\d\d$/.test(c ?? "")), JSON.stringify(r.clocks));
+      assert.deepEqual({ bad: r.bad, seps: r.seps, sepFirst: r.sepFirst, sepText: r.sepText, elsewhere: r.elsewhere }, { bad: 0, seps: 1, sepFirst: true, sepText: true, elsewhere: 0 });
+      // the first message of the next day gets its own date line
+      const next = await app.ev(`(() => {
+        const v = ${V};
+        const el = bubble("user", "after midnight");
+        v.log.append(el);
+        const d = new Date();
+        d.setDate(d.getDate() + 1);
+        v.stamp(el, d.getTime());
+        v.stamp(el, 0); // a second stamp changes nothing
+        return { seps: v.log.querySelectorAll(":scope > .day-sep").length, before: el.previousElementSibling?.className, times: el.querySelectorAll(".time").length };
+      })()`);
+      assert.deepEqual(next, { seps: 2, before: "day-sep", times: 1 });
+    },
+  },
+  {
     // the load replays the whole history, then fails: the dead view shows all of it, settled (the answer must not
     // end the replay before the last update); a few times, as the order of the two used to vary
     name: "failed-load-settles",
