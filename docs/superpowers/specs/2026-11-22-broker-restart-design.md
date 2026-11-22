@@ -35,6 +35,8 @@ Windows, Linux and macOS.
 
 ## How it works today
 
+This section describes the state before this feature.
+
 - The broker is a detached `node server.mjs` (port 7777 unless `COPILOT_RELAY_PORT` or `relay.config.json` say
   otherwise). It is started by the first session whose connection is refused (`RelayClient#autostart`, once per
   client), by `npm start`, or by a login service the user set up (README §7).
@@ -77,8 +79,10 @@ A was picked: the running broker has to be restarted by hand once anyway, to loa
 
 ### Setting
 
-- `brokerRepo`: absolute path of the copilot-relay repo. Empty by default; the field then shows the folder of
-  `brokerScript` from the installed `config.json` (or the repo the app runs from, in development) as its value.
+- `brokerRepo`: absolute path of the copilot-relay repo. Empty by default; when Settings opens, the field then shows
+  the folder of `brokerScript` from the installed `config.json` (or the repo the app runs from, in development) as
+  its value, and always shows it as its placeholder. A field the user empties is not replaced by that default: Check
+  refuses it.
 - Settings gets a "Relay broker" section: the path with a Browse button (existing folder picker), a button
   "Update and restart broker", and the list of steps of the current or last run.
 
@@ -87,21 +91,32 @@ A was picked: the running broker has to be restarted by hand once anyway, to loa
 Order agreed with the user: git, install, stop, start. Installing before stopping keeps the gap to a second or
 two, and a session's own autostart during the gap then starts the new version.
 
-0. **Check.** The path is a folder with `server.mjs` and `scripts/install-extension.mjs` and is the top level of a
-   git work tree. The broker URL is a loopback address. A Node is found: `nodePath` from `config.json` if it
-   exists, else `node` on PATH. Never Electron's own binary: the installer records the Node it runs under as the
+0. **Check.** An empty or non-absolute path fails with "Set the copilot-relay repository folder first (an absolute
+   path)." The path is a folder with `server.mjs` and `scripts/install-extension.mjs` and is the top level of a
+   git work tree. The broker URL is a loopback address. A Node is found: `nodePath` from `config.json` when that
+   Node binary exists, else `node` on PATH. Never Electron's own binary: the installer records the Node it runs under as the
    one that starts the broker.
-1. **Update.** When `git status --porcelain` is not empty, on any branch, `main` included (the user's decision):
-   `git stash push --include-untracked -m "copilot-sessions restart <ISO time>"`. If the current branch is not
-   `main`: `git checkout main`. Then `git pull --ff-only origin main`. The stash is not applied again: the new
+1. **Update.** `git status --porcelain -z --untracked-files=all` is read; `?? <path>/` entries (nested repositories
+   and linked worktrees, which `git stash` leaves alone) do not count. When another entry remains, on any branch,
+   `main` included (the user's decision):
+   `git stash push --include-untracked -m "copilot-sessions restart <ISO time>"`, so no empty stash entry is ever
+   created. The stash command carries its own identity (`Copilot Sessions <copilot-sessions@localhost>`), so a
+   machine without a git identity can stash. A stash entry stored by a stash command that then fails is still
+   named, with a note that the work tree may be partly cleaned. If the current branch is not `main`:
+   `git checkout main`. Then `git pull --ff-only --no-rebase origin main`. The stash is not applied again: the new
    broker runs the committed files. The result names the commit before and after (short hashes), or "already
-   up to date".
+   up to date", and says when the checkout moved from another branch ("was on <branch>").
 2. **Install.** `npm ci` in the repo, then `node scripts/install-extension.mjs`. Both run on every run (the
    user's decision): `npm ci` also when dependencies did not change, and the installer also when Copilot has no
-   copilot-relay extension yet, which installs it.
-3. **Stop.** `GET /health`: not reachable means nothing to stop. Otherwise keep its `pid`, `POST /api/shutdown`,
-   and wait (up to 10 s) until `/health` is refused or answers with another pid. A 404 means a broker without the
-   endpoint: the run stops with "stop the broker by hand once; it will then run the updated files".
+   copilot-relay extension yet, which installs it. A failed `npm ci` says that the dependencies may now be
+   incomplete and that the running broker is not affected (it will not start again until this step succeeds).
+3. **Stop.** `GET /health`: a refused connection means nothing to stop. An answer that is not a copilot-relay
+   broker, or a `/health` that cannot be read (a timeout, a body that is not a JSON object), fails the step with
+   "Something else answers at …". Otherwise keep its `pid`, `POST /api/shutdown`, and wait (up to 10 s) until
+   `/health` is refused or answers with another pid (an unreadable answer counts as still there). The shutdown
+   request is abandoned after 2 s and the polling decides. A 404 means a broker without the endpoint: the run
+   stops with "This broker is older than the restart button. Stop it by hand once, then press the button again."
+   Another refusal reads "The broker refused to stop: HTTP <n>."
 4. **Start.** Spawn the broker as `RelayClient#autostart` does (detached, no stdio, `windowsHide`, cwd = repo),
    then wait (up to 15 s) for `/health` to answer with a pid different from the stopped one and a `root` equal to
    the repo path. A session's autostart or a login service may take the port first; ours then exits (EADDRINUSE)
@@ -110,13 +125,15 @@ two, and a session's own autostart during the gap then starts the new version.
 5. **Reconnect** (part of this feature, the user's decision: without it relay tools give wrong answers for up to
    15 s after the restart). The app tells the relay client of each of its open sessions to reconnect now and
    waits (up to 20 s) until they have registered. The result says how many of them are back; sessions that are
-   not back yet are a warning, not a failure.
+   not back yet are a warning, not a failure. With no relay clients (no sessions, or the relay off in the app)
+   the step is skipped with "no sessions to reconnect".
 
 The result line names the broker's pid and the commit; a stash made in step 1 is named with its branch and
-message, also when the run fails after making it.
+message, also when the run fails after making it. On an Update failure the stash sentence appears in both the
+step's detail and the summary.
 
-A step that fails ends the run. Steps 0 to 2 leave the old broker running. A failed step 4 says that no broker is
-running and that opening a session starts it.
+A step that fails ends the run. Steps 0 to 2 leave the old broker running. A failed step 4 ends in one of two
+forms: "A different broker is running." or "No broker is running; press the button again to retry."
 
 ### Relay client (`extension/copilot-relay/relay-client.mjs`, shared by the app and the extension)
 
@@ -134,8 +151,8 @@ running and that opening a session starts it.
 ## My calls (not discussed; correct them if wrong)
 
 - **The installer keeps the current setup:** it is run with `COPILOT_RELAY_PORT` set to the port of the current
-  broker URL and with `--no-autostart` when the installed config had no `brokerScript`; the new broker is started
-  with the same port. With no extension installed there is no setup to keep: the port is the one the app uses
+  broker URL (and `COPILOT_HOME` when the app has it) and with `--no-autostart` when the installed config had no
+  `brokerScript`; the new broker is started with the same port. It always writes `url: http://127.0.0.1:<port>`. With no extension installed there is no setup to keep: the port is the one the app uses
   (`relayConfig()`), and autostart is on.
 - **The new broker starts with defaults:** no config-path argument and no state-file variables are carried over
   from the old process, as with today's autostart.
@@ -145,11 +162,13 @@ running and that opening a session starts it.
   git's message. (The user confirmed that `git pull` works without a prompt on the machine this is for.)
 - **Programs:** `git` from PATH; `npm` through the chosen Node (its `npm-cli.js`), else `npm` from PATH. No extra
   path settings. A program that is not found fails its step with its name.
-- **Timeouts:** git steps 60 s each, `npm ci` 5 min, installer 30 s, stop 10 s, start 15 s.
+- **Timeouts:** git steps 60 s each, `npm ci` 5 min, installer 30 s, stop 10 s, start 15 s, `/health` reads 2 s,
+  the shutdown request 2 s, the `node -p` lookup 10 s, Check's git call 60 s.
 
 ## Constraints
 
-- Commands are spawned with argument arrays; the repo path never goes into a shell string.
+- Commands are spawned with argument arrays; the repo path never goes into a shell string. On Windows, when
+  `npm-cli.js` is not found next to Node, `npm ci` runs through a shell with fixed text (no path in it).
 - The new main-process module must be listed in `electron/package.json` `build.files` (packaging test).
 - The shutdown endpoint adds no new trust: local processes can already end sessions through the API.
 
@@ -166,7 +185,8 @@ running and that opening a session starts it.
   fails; a start that never answers reports no broker; sessions that do not come back are a warning.
 - **Relay client:** the delay is 1 s again after a registration; reconnect-now ends a wait and a live stream.
 - **End to end:** a real broker restarted by the run from a temp repo copy, with a connected client that receives
-  a message before and after.
+  a message before and after. `npm ci` is recorded, not run, and the clone gets a neutral `{}`
+  `relay.config.json`.
 - **Window:** the section renders, the confirmation appears when a session works, steps update.
 
 ## Left to the builder
