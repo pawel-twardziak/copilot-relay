@@ -62,9 +62,17 @@ const LIST_LIMIT = 8 * 1024 * 1024;
 
 // On every call. core.fsmonitor=false: no fsmonitor hook program. diff.autoRefreshIndex=false: `diff` does not rewrite
 // the index for a file whose time changed and whose content did not (GIT_OPTIONAL_LOCKS=0 alone does not stop that).
-const CONFIG = ["-c", "core.fsmonitor=false", "-c", "core.quotepath=false", "-c", "diff.autoRefreshIndex=false"];
+// diff.submodule=short: a submodule is one "Subproject commit" line; "diff" would start a `git diff` inside the
+// submodule, without --no-ext-diff and --no-textconv, so the submodule's own diff programs would run.
+// log.showRoot=true: the first commit's files are listed also when a user's config says false.
+const CONFIG = [
+  "-c", "core.fsmonitor=false", "-c", "core.quotepath=false", "-c", "diff.autoRefreshIndex=false",
+  "-c", "diff.submodule=short", "-c", "log.showRoot=true",
+];
+// GIT_NO_LAZY_FETCH=1: a partial clone does not fetch a missing object from its promisor remote (a network call that
+// runs remote.*.uploadpack and writes a pack); the call fails instead. Older git ignores it.
 // LC_ALL=C: git's messages in English, by which `where`, `head` and NOBASE are recognised (git translates them).
-const ENV = { GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" };
+const ENV = { GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0", GIT_NO_LAZY_FETCH: "1", LC_ALL: "C" };
 // On calls that produce a diff: no external diff or textconv program, no colour codes.
 const NO_PROGRAMS = ["--no-ext-diff", "--no-textconv", "--no-color"];
 const NOBASE = /bad revision|unknown revision|Invalid revision range|bad object/;
@@ -122,7 +130,8 @@ export function createGit(run, { timeoutMs = 10_000 } = {}) {
         const [top, prefix = ""] = stdout.split(/\r?\n/);
         return { root: path.resolve(top), prefix };
       } catch (err) {
-        if (failedWith(err, /not a git repository/)) return null;
+        // In a .git folder or a bare repository: no work tree, so no files to show either.
+        if (failedWith(err, /not a git repository|must be run in a work tree/)) return null;
         throw err;
       }
     },

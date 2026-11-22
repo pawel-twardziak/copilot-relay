@@ -36,6 +36,7 @@ test("where: root and prefix of a nested folder; null outside a repository", asy
   assert.deepEqual(await git.where(nested), { root: real, prefix: "sub/deep/" });
   assert.deepEqual(await git.where(r.repo), { root: real, prefix: "" });
   assert.equal(await git.where(tempDir(t)), null);
+  assert.equal(await git.where(path.join(r.repo, ".git")), null);
 });
 
 test("where: through a symlinked folder", posixOnly, async (t) => {
@@ -83,6 +84,13 @@ test("commitFiles: the files of the commits after base; all of history for null;
   await gitIn(empty, ["init", "-b", "main"]);
   assert.deepEqual(await git.commitFiles(empty, null), []);
   assert.deepEqual(await git.commitFiles(empty, base), []);
+});
+
+test("commitFiles: base null lists the first commit's files under log.showRoot=false", async (t) => {
+  const r = await repoWithRemote(t); // the first commit has only README.md
+  await commit(r, { "x.txt": "x" }, "x");
+  await r.git("config", "log.showRoot", "false");
+  assert.deepEqual(await git.commitFiles(r.repo, null), [{ path: "x.txt", state: "A" }, { path: "README.md", state: "A" }]);
 });
 
 test("fileCommits: the commits after base that touched the file, newest first", async (t) => {
@@ -226,21 +234,110 @@ test("no writes: index, refs, stash and the .git folder stay as they were; an in
   assert.equal(readFileSync(path.join(dotGit, "index")).toString("base64"), before.index);
 });
 
+// Shell scripts that leave a marker file when they run: program(name) gives the script, ran() the markers left.
+function markers(dir) {
+  const program = (name, then = "") => {
+    const script = path.join(dir, `${name}.sh`);
+    writeFileSync(script, `#!/bin/sh\ntouch '${path.join(dir, `ran-${name}`)}'\n${then}`);
+    chmodSync(script, 0o755);
+    return script;
+  };
+  const ran = () => readdirSync(dir).filter((f) => f.startsWith("ran-")).map((f) => f.slice(4)).sort();
+  return { program, ran };
+}
+
+// Rewrites HEAD with a `gpgsig` header, so that a showSignature log calls gpg.program; returns the new hash.
+async function signHead(r) {
+  const raw = await r.git("cat-file", "commit", "HEAD");
+  const end = raw.indexOf("\n\n");
+  const signature = "gpgsig -----BEGIN PGP SIGNATURE-----\n \n iQEzBAABCAAdFiEE\n -----END PGP SIGNATURE-----";
+  const file = path.join(r.tmp, "signed-commit");
+  writeFileSync(file, `${raw.slice(0, end)}\n${signature}${raw.slice(end)}`);
+  const sha = (await r.git("hash-object", "-t", "commit", "-w", file)).trim();
+  await r.git("update-ref", "HEAD", sha);
+  return sha;
+}
+
 test("no programs from the repository's configuration", posixOnly, async (t) => {
   const w = await busyRepo(t);
-  const marker = path.join(w.r.tmp, "marker");
-  const script = path.join(w.r.tmp, "marker.sh");
-  writeFileSync(script, `#!/bin/sh\ntouch '${marker}'\n`);
-  chmodSync(script, 0o755);
+  w.last = await signHead(w.r);
+  write(w.r.repo, "c.txt", "c");
+  await w.r.git("add", "c.txt");
+  const { program, ran } = markers(w.r.tmp);
   for (const [key, value] of [
-    ["core.fsmonitor", script], ["diff.external", script], ["diff.marker.textconv", script],
-    ["gpg.program", script], ["log.showSignature", "true"],
+    ["core.fsmonitor", program("fsmonitor")], ["diff.external", program("external")],
+    ["diff.marker.textconv", program("textconv")], ["diff.marker.command", program("command")],
+    ["gpg.program", program("gpg")], ["log.showSignature", "true"],
   ]) await w.r.git("config", key, value);
   writeFileSync(path.join(w.r.repo, ".gitattributes"), "*.md diff=marker\n");
-  await Promise.all(allFive(w));
-  assert.equal(existsSync(marker), false);
-  await w.r.git("diff", "HEAD"); // the same configuration without the flags does run the script
-  assert.equal(existsSync(marker), true);
+  await Promise.all([...allFive(w), git.diffUncommitted(w.r.repo, "c.txt"), git.commitFiles(w.r.repo, null)]);
+  assert.deepEqual(ran(), []);
+  // The same configuration without the flags does run them.
+  await w.r.git("status");
+  await w.r.git("diff", "HEAD");
+  await w.r.git("diff", "--no-ext-diff", "HEAD", "--", "README.md");
+  await w.r.git("log", "-1");
+  assert.deepEqual(ran(), ["command", "external", "fsmonitor", "gpg", "textconv"]);
+});
+
+test("no programs from a submodule's configuration", posixOnly, async (t) => {
+  const r = await repoWithRemote(t);
+  const source = path.join(r.tmp, "sub-source");
+  mkdirSync(source);
+  await gitIn(source, ["init", "-b", "main"]);
+  writeFileSync(path.join(source, "s.txt"), "s1\n");
+  await gitIn(source, ["add", "."]);
+  await gitIn(source, ["commit", "-m", "s1"]);
+  await r.git("-c", "protocol.file.allow=always", "submodule", "add", source, "sub");
+  await r.git("commit", "-m", "add sub");
+  const sub = path.join(r.repo, "sub");
+  const bump = async (text) => {
+    writeFileSync(path.join(sub, "s.txt"), text);
+    await gitIn(sub, ["commit", "-am", text]);
+  };
+  await bump("s2\n");
+  await r.git("commit", "-am", "bump sub");
+  const sha = await headOf(r);
+  await bump("s3\n");
+  const { program, ran } = markers(r.tmp);
+  await r.git("config", "diff.submodule", "diff");
+  await gitIn(sub, ["config", "diff.external", program("external")]);
+  const [uncommitted, committed] = await Promise.all([git.diffUncommitted(r.repo, "sub"), git.diffCommit(r.repo, sha, "sub")]);
+  assert.deepEqual(ran(), []);
+  for (const { text } of [uncommitted, committed]) {
+    assert.ok(text.startsWith("diff --git a/sub b/sub\n"), text);
+    assert.match(text, /^\+Subproject commit [0-9a-f]{40}$/m);
+  }
+  await r.git("diff", "HEAD", "--", "sub"); // without the flags the submodule's diff.external runs
+  assert.deepEqual(ran(), ["external"]);
+});
+
+test("a partial clone does not fetch a missing object", posixOnly, async (t) => {
+  const tmp = tempDir(t);
+  const source = path.join(tmp, "source");
+  mkdirSync(source);
+  await gitIn(source, ["init", "-b", "main"]);
+  await gitIn(source, ["config", "uploadpack.allowFilter", "true"]);
+  const commitIn = async (text) => {
+    writeFileSync(path.join(source, "a.txt"), text);
+    await gitIn(source, ["add", "."]);
+    await gitIn(source, ["commit", "-m", text]);
+    return (await gitIn(source, ["rev-parse", "HEAD"])).trim();
+  };
+  await commitIn("one\n");
+  const sha = await commitIn("two\n");
+  const missing = (await gitIn(source, ["rev-parse", "HEAD~1:a.txt"])).trim();
+  await gitIn(tmp, ["clone", "--filter=blob:none", `file://${source}`, "clone"]);
+  const clone = path.join(tmp, "clone");
+  const probe = await gitIn(clone, ["cat-file", "-e", missing], { GIT_NO_LAZY_FETCH: "1" }).then(() => true, () => false);
+  if (probe) return t.skip("this git ignores GIT_NO_LAZY_FETCH");
+  const { program, ran } = markers(tmp);
+  await gitIn(clone, ["config", "remote.origin.uploadpack", program("upload-pack", 'exec git upload-pack "$@"\n')]);
+  const packs = () => readdirSync(path.join(clone, ".git", "objects", "pack")).sort();
+  const before = packs();
+  await assert.rejects(git.diffCommit(clone, sha, "a.txt"), /promisor remote/);
+  assert.deepEqual(packs(), before);
+  assert.deepEqual(ran(), []);
 });
 
 // A fake `run` that records every call and answers with canned output.
@@ -280,7 +377,11 @@ test("every call carries the read-only flags and environment", async () => {
     const name = sub(args);
     assert.equal(program, "git");
     assert.equal(args[0], "--literal-pathspecs", args.join(" "));
-    for (const c of ["core.fsmonitor=false", "core.quotepath=false", "diff.autoRefreshIndex=false"]) assert.ok(pair(args, "-c", c), `${c}: ${args.join(" ")}`);
+    for (const c of ["core.fsmonitor=false", "core.quotepath=false", "diff.autoRefreshIndex=false", "diff.submodule=short", "log.showRoot=true"]) {
+      assert.ok(pair(args, "-c", c), `${c}: ${args.join(" ")}`);
+    }
+    assert.equal(opts.env.GIT_NO_LAZY_FETCH, "1");
+    assert.equal(opts.env.LC_ALL, "C");
     assert.equal(opts.env.GIT_OPTIONAL_LOCKS, "0");
     assert.equal(opts.env.GIT_TERMINAL_PROMPT, "0");
     assert.equal(opts.timeoutMs, 10_000);
