@@ -1,6 +1,6 @@
 // Electron main process: owns the `copilot --acp` processes and bridges them to the window over IPC.
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, safeStorage, shell } from "electron";
-import { allowsAutomaticCheck, checkCandidates, createFileWatcher, createLocationTable, expandHome, isNetworkLocation, isRemote, localRealpath, resolvePreview, resolveTarget } from "./file-access.mjs";
+import { allowsAutomaticCheck, checkCandidates, createFileWatcher, createLocationTable, expandHome, isNetworkLocation, isRemote, localRealpath, passesAutomaticCheck, resolvePreview, resolveTarget } from "./file-access.mjs";
 import { isInside, lexicalPath } from "./paths.mjs";
 import { execFile, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -31,7 +31,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 let win = null;
 let scheduler = null;
 let lister = null; // one long-lived connection used for session/list
-const open = new Map(); // sessionId -> { conn, cwd, permissions: Map<reqId, rpcId>, relay, configOptions, parentSessionId?, reported? }
+const open = new Map(); // sessionId -> { conn, cwd, permissions: Map<reqId, rpcId>, relay, configOptions, parentSessionId?, reported?, replaying? }
 let permSeq = 0;
 const pendingRequests = new PendingRequests(); // delegated-session requests waiting for the user's answer
 // reopen cards shown and not answered yet (requestId -> the reopen:request payload): the broker asks again only when
@@ -86,9 +86,11 @@ const viewConfig = (sessionId, configOptions) => withContextOption(configOptions
 
 // Changes browser: the repositories each session worked in, recorded from its live tool calls (see repo-track.mjs),
 // and what the window reads of them (repo-changes.mjs). Git is read-only; the trigger's calls get 5 s, the window's 10 s.
+// The trigger follows the agent's paths, so it has the automatic-check rule; a repository added by hand is the user's
+// click through a folder dialog, so it has the click rule of files:read.
 const records = createRecordStore(path.join(app.getPath("userData"), "session-repos.json"));
 const tracker = createRepoTracker({ store: records, git: createGit(runProgram, { timeoutMs: 5000 }), allow: allowAutomatic });
-const changes = createChanges({ store: records, git: createGit(runProgram), createdAt: sessionCreatedAt, allow: allowAutomatic });
+const changes = createChanges({ store: records, git: createGit(runProgram), createdAt: sessionCreatedAt, allow: allowClicked });
 
 // Sign-in problems are recognized by ACP's auth_required error code, not by guessing from the wording (Copilot
 // uses other codes for other errors: -32002 resource not found, -32602 invalid params…).
@@ -1188,9 +1190,18 @@ async function automaticCheckRule() {
   return (p) => allowsAutomaticCheck(p, { table, trustedRoots: [...trustedRoots], platform: process.platform });
 }
 
-/** One path against that rule: the changes browser's trigger and its added repositories. */
+/** One path against that rule, applied as files:check applies it (every component and link target on the way): the
+ *  changes browser's trigger, which runs git where the path leads. */
 async function allowAutomatic(abs) {
-  return (await automaticCheckRule())(abs);
+  return passesAutomaticCheck(abs, await automaticCheckRule());
+}
+
+/** A folder the user picked (changes:add): its real local path exists and is not a network location (as files:read:
+ *  allowed when there is no location table). */
+async function allowClicked(dir) {
+  if (isRemote(dir)) return false; // a UNC start is refused by its text, before anything touches it
+  const real = await localRealpath(dir).catch(() => null);
+  return Boolean(real) && !(await isNetwork(real));
 }
 
 // Which file mentions of a message exist? Agent text decides the paths, so nothing is looked at on disk unless the
@@ -1203,15 +1214,25 @@ handle("files:check", async (base, candidates) => {
 
 // ---------- changes browser ----------
 
-handle("changes:list", async (sessionId) => changes.list(sessionId));
-handle("changes:commits", async (sessionId, root, rel) => changes.commits(sessionId, root, rel));
-handle("changes:diff", async (sessionId, root, rel, version) => changes.diff(sessionId, root, rel, version));
+/** The session id of a changes:* call: a Copilot session id or a session open in this app. */
+function knownSession(sessionId) {
+  if (typeof sessionId !== "string" || !(isSessionId(sessionId) || open.has(sessionId))) throw new Error("Unknown session");
+  return sessionId;
+}
+
+handle("changes:list", async (sessionId) => changes.list(knownSession(sessionId)));
+handle("changes:commits", async (sessionId, root, rel) => changes.commits(knownSession(sessionId), root, rel));
+handle("changes:diff", async (sessionId, root, rel, version) => changes.diff(knownSession(sessionId), root, rel, version));
 // null when the dialog is cancelled, else { root } or { message }
 handle("changes:add", async (sessionId) => {
+  knownSession(sessionId);
   const r = await dialog.showOpenDialog(win, { title: "Repository to add", properties: ["openDirectory"] });
   return r.canceled ? null : changes.add(sessionId, r.filePaths[0]);
 });
-handle("changes:remove", async (sessionId, root) => changes.remove(sessionId, root));
+handle("changes:remove", async (sessionId, root) => {
+  changes.remove(knownSession(sessionId), root);
+  tracker.closed(sessionId); // the agent's next edit there records the repository again, with a new start point
+});
 
 // Real paths files:read has returned in this run: the only ones files:watch accepts.
 const readablePaths = new Set();
