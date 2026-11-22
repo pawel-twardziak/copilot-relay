@@ -66,6 +66,9 @@ A wrong time. Where a replayed message can't be matched to its event it shows no
   fits the padding. Where a message has a bare Copy button (no fork/delete bar), the time fades out while the
   message is hovered and the button takes its place. The date line is a top-level `.day-sep` element: the date
   between two rules, `toLocaleDateString` with short weekday, day, short month and year (`Sat, 21 Nov 2026`).
+- **Wide content**: a table wider than the message scrolls inside it and an image shrinks to it (`style.css`), so
+  nothing of an answer reaches the right padding where the time is. Added after the final review, which found a
+  40-column table and a raw `<img width=2000>` running under the time.
 - **Nothing else changes**: `.msg` class names, turn ordinals, fork/delete/edit, Copy thread and the UI baselines
   stay as they are. The date line has no `_md`, `_turn` or `_kind`.
 
