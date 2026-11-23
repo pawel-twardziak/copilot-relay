@@ -1,6 +1,7 @@
 // The session prompt editor: the parts from Settings folded and read-only, a template select, and the session's own
 // part in a text area. One component for every place that edits an own part (the new-session dialog, the child
-// approval card, a running session's prompt). pickTemplate is pure; createPromptEditor and openPromptDialog build DOM.
+// approval card, a running session's prompt). pickTemplate is pure; createPromptEditor builds DOM with the app's h,
+// openPromptDialog fills the static #prompt-dialog.
 // Loaded as a classic <script> (sets globalThis.PromptEditor) and via require() in tests.
 (function () {
   "use strict";
@@ -12,51 +13,38 @@
     return { ask: true };
   }
 
-  /** A small DOM helper: el("div", { class: "x", onclick }, child, "text"). */
-  function el(tag, attrs = {}, ...children) {
-    const node = document.createElement(tag);
-    for (const [k, v] of Object.entries(attrs)) {
-      if (v == null || v === false) continue;
-      if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
-      else if (k === "class") node.className = v;
-      else node.setAttribute(k, v === true ? "" : v);
-    }
-    for (const c of children) if (c != null && c !== false) node.append(c);
-    return node;
-  }
-
-  /** A folded, read-only part from Settings. */
-  const fold = (label, text) =>
-    el("details", { class: "pe-fold" }, el("summary", {}, label), text ? el("pre", {}, text) : el("p", { class: "hint" }, "Empty. It is set in Settings."));
+  /** A folded, read-only part from Settings. h: the app's DOM helper. */
+  const fold = (h, label, text) =>
+    h("details", { class: "pe-fold" }, h("summary", {}, label), text ? h("pre", {}, text) : h("p", { class: "hint" }, "Empty. It is set in Settings."));
 
   /**
    * The editor. defaultPart / childPart: the Settings parts (childPart null: not a child, that fold is not shown);
-   * templates: [{ id, name, text }]; own: the text the area starts with. The session stores the text, never which
-   * template it came from.
+   * templates: [{ id, name, text }]; own: the text the area starts with; h: the app's DOM helper (app.js). The session
+   * stores the text, never which template it came from.
    * @returns {{ el: HTMLElement, value(): string, focus(): void }}
    */
-  function createPromptEditor({ defaultPart, childPart, templates, own }) {
+  function createPromptEditor({ defaultPart, childPart, templates, own, h }) {
     let lastTemplateText = null; // the text the last picked template put in, while it is untouched or edited
     let shown = ""; // the template the select shows ("" = — none —)
     let asked = null; // the template the Replace/Keep question is about
 
-    const area = el("textarea", { class: "pe-own", rows: "7", spellcheck: "false", placeholder: "This session's own instructions (optional)" });
+    const area = h("textarea", { class: "pe-own", rows: "7", spellcheck: "false", placeholder: "This session's own instructions (optional)" });
     area.value = own ?? "";
-    const select = el(
+    const select = h(
       "select",
       { class: "pe-template", disabled: !templates.length, title: templates.length ? null : "Templates are added in Settings" },
       // a placeholder, not a choice: picking "none" would have to drop or keep the text, and the text is what counts
-      el("option", { value: "", disabled: true }, "— none —"),
-      ...templates.map((t) => el("option", { value: t.id }, t.name)),
+      h("option", { value: "", disabled: true }, "— none —"),
+      ...templates.map((t) => h("option", { value: t.id }, t.name)),
     );
     select.value = "";
-    const question = el("span");
-    const ask = el(
+    const question = h("span");
+    const ask = h(
       "div",
       { class: "pe-ask", hidden: true },
       question,
-      el("button", { type: "button", class: "pe-replace", onclick: () => apply(asked) }, "Replace"),
-      el("button", { type: "button", class: "pe-keep", onclick: keep }, "Keep"),
+      h("button", { type: "button", class: "pe-replace", onclick: () => apply(asked) }, "Replace"),
+      h("button", { type: "button", class: "pe-keep", onclick: keep }, "Keep"),
     );
 
     function apply(t) {
@@ -89,12 +77,12 @@
       if (!asked) select.value = "";
     });
 
-    const root = el(
+    const root = h(
       "div",
       { class: "prompt-editor" },
-      fold("Default (from Settings)", defaultPart),
-      childPart == null ? null : fold("Working with the parent (from Settings)", childPart),
-      el("div", { class: "pe-template-row" }, el("span", {}, "Template:"), select),
+      fold(h, "Default (from Settings)", defaultPart),
+      childPart == null ? null : fold(h, "Working with the parent (from Settings)", childPart),
+      h("div", { class: "pe-template-row" }, h("span", {}, "Template:"), select),
       ask,
       area,
     );

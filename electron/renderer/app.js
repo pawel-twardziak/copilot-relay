@@ -2752,7 +2752,7 @@ async function newSession(cwd) {
     cwd ??= await api.pickDir();
     if (!cwd) return;
     const s = await api.getSettings();
-    const editor = PromptEditor.createPromptEditor({ defaultPart: s.promptDefault ?? "", childPart: null, templates: s.promptTemplates ?? [], own: "" });
+    const editor = PromptEditor.createPromptEditor({ defaultPart: s.promptDefault ?? "", childPart: null, templates: s.promptTemplates ?? [], own: "", h });
     const own = await PromptEditor.openPromptDialog({ title: `New session in ${cwd}`, okLabel: "Start", editor });
     if (own == null) return;
     setStatus(`Starting Copilot in ${cwd}…`);
