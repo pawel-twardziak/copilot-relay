@@ -1074,3 +1074,92 @@ test("an adopted child owes no report but can report once", () => {
   assert.match(s.d.report("cli:c", "gotowe"), /^Report delivered/);
   assert.match(s.d.report("cli:c", "znowu"), /already reported/);
 });
+
+// ---- held child replies: the broker marks what a child sends its parent ----
+
+test("a report is marked fromChild on the push and on the stored item", () => {
+  const { d, store, parentPush } = setup();
+  d.report("cli:child", "wynik");
+  assert.equal(parentPush[0].fromChild, true);
+  assert.equal(store.pending("cli:parent")[0].fromChild, true);
+  assert.equal(store.pending("cli:parent")[0].fromKey, "cli:child");
+});
+
+test("send_message from a child to an app parent is stored, marked and redelivered until acked", () => {
+  const s = setup();
+  s.registry.childMessage = (f, t, x) => s.d.childMessage(f, t, x);
+  const reply = s.registry.send("cli:child", s.registry.get("cli:parent").name, "pytanie");
+  assert.match(reply, /^Message to .* delivered/);
+  assert.equal(s.parentPush.length, 1);
+  assert.equal(s.parentPush[0].fromChild, true);
+  assert.ok(s.parentPush[0].deliveryId);
+  assert.equal(s.parentPush[0].wake, true);
+  assert.equal(s.store.pending("cli:parent").length, 1);
+  s.d.attached("cli:parent");
+  assert.equal(s.parentPush.length, 2);
+  assert.equal(s.parentPush[1].deliveryId, s.parentPush[0].deliveryId);
+  assert.ok(s.d.ack("cli:parent", s.parentPush[0].deliveryId));
+  assert.equal(s.store.pending("cli:parent").length, 0);
+});
+
+test("parent to child, non-relatives and relay notices carry no mark", () => {
+  const s = setup();
+  s.registry.childMessage = (f, t, x) => s.d.childMessage(f, t, x);
+  s.registry.send("cli:parent", s.registry.get("cli:child").name, "zadanie");
+  assert.equal(s.childPush[0].fromChild, undefined);
+  s.d.outcome("cli:parent", { kind: "rejected", text: "no" });
+  assert.equal(s.parentPush.at(-1).fromChild, undefined);
+  s.registry.upsert({ key: "cli:x", name: "obcy", kind: "cli", app: true, push: () => true });
+  s.registry.send("cli:x", s.registry.get("cli:parent").name, "hej");
+  assert.equal(s.parentPush.at(-1).fromChild, undefined);
+});
+
+test("a child message to a terminal (non-app) parent keeps today's path", () => {
+  const s = setup();
+  s.registry.get("cli:parent").app = false;
+  s.registry.childMessage = (f, t, x) => s.d.childMessage(f, t, x);
+  s.registry.send("cli:child", s.registry.get("cli:parent").name, "pytanie");
+  assert.equal(s.parentPush[0].fromChild, undefined);
+  assert.equal(s.store.pending("cli:parent").length, 0);
+});
+
+test("a child's message to a closed parent is marked when the reopen is approved", () => {
+  const s = setup();
+  s.registry.offlineRelative = (f, n, t) => s.d.messageClosed(f, n, t);
+  const parentName = s.registry.get("cli:parent").name;
+  s.d.nameOf = (k) => (k === "cli:parent" ? parentName : null); // a closed parent's name comes from the app's session list
+  s.registry.remove("cli:parent");
+  s.registry.send("cli:child", parentName, "pytanie");
+  const requestId = s.store.reopensFrom("cli:child")[0].requestId;
+  const held = s.store.awaitingFor(requestId)[0];
+  assert.equal(held.fromChild, true);
+  assert.equal(held.fromKey, "cli:child");
+  assert.equal(s.d.answerReopen("cli:child", requestId, true), true);
+  s.registry.upsert({ key: "cli:parent", name: "mama", kind: "cli", app: true, push: (m) => (s.parentPush.push(m), true), control: () => {} });
+  s.d.attached("cli:parent");
+  assert.equal(s.parentPush.at(-1).fromChild, true);
+});
+
+test("heldCounts counts marked, unacked, non-awaiting items per parent and changes fire", () => {
+  const s = setup();
+  let changes = 0;
+  s.d.onChange(() => changes++);
+  s.d.report("cli:child", "wynik");
+  assert.deepEqual(s.d.heldCounts(), { "cli:parent": 1 });
+  const before = changes;
+  s.d.ack("cli:parent", s.parentPush[0].deliveryId);
+  assert.deepEqual(s.d.heldCounts(), {});
+  assert.ok(changes > before, "an ack of a marked item is a change");
+});
+
+test("a marked item is counted for its parent after the child is renamed and released", () => {
+  const s = linkSetup();
+  s.adopt("cli:p", "cli:c");
+  s.d.answerLink("cli:p", s.cards("cli:p")[0].requestId, true);
+  s.d.report("cli:c", "wynik");
+  s.registry.rename("cli:c", "inna");
+  s.d.requestLink("cli:p", "release", s.nm("cli:c"));
+  assert.equal(s.d.answerLink("cli:p", s.cards("cli:p").at(-1).requestId, true).result, "released");
+  assert.equal(s.d.heldCounts()["cli:p"], 1);
+  assert.equal(s.store.pending("cli:p").find((i) => i.text === "wynik").fromChild, true);
+});

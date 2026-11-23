@@ -201,6 +201,8 @@ export class Delegation {
       ...(child.cwd ? { fromCwd: child.cwd } : {}),
       text,
       prompt: relayPrompt(child.name, child.cwd, text),
+      fromChild: true,
+      fromKey: callerKey,
     };
     this.store.enqueue(item); // on disk before any delivery attempt
     this.store.markReported(callerKey);
@@ -214,6 +216,35 @@ export class Delegation {
     return delivered
       ? "Report delivered to your parent session."
       : "Report stored. Your parent session will receive it when it returns.";
+  }
+
+  /**
+   * A child's send_message to its app parent: stored like a report (marked, redelivered until acked) and delivered.
+   * Always true: the message is taken over.
+   */
+  childMessage(fromKey, toKey, text) {
+    const child = this.registry.get(fromKey);
+    const item = {
+      id: this.newId(),
+      toKey,
+      from: child.name,
+      ...(child.cwd ? { fromCwd: child.cwd } : {}),
+      text,
+      prompt: relayPrompt(child.name, child.cwd, text),
+      fromChild: true,
+      fromKey,
+    };
+    this.store.enqueue(item); // on disk before any delivery attempt
+    this.#changed();
+    this.#deliver(item);
+    return true;
+  }
+
+  /** Parent key -> number of unacknowledged child messages (marked items) waiting for it. */
+  heldCounts() {
+    const counts = {};
+    for (const item of this.store.marked()) counts[item.toKey] = (counts[item.toKey] ?? 0) + 1;
+    return counts;
   }
 
   outcome(parentKey, { kind, text }) {
@@ -250,6 +281,7 @@ export class Delegation {
       text,
       prompt: relayPrompt(from.name, from.cwd, text),
       awaiting: reopen.requestId,
+      ...(targetKey === parent ? { fromChild: true, fromKey } : {}),
     };
     this.store.enqueue(item); // on disk before the user is asked
     if (!existing) this.store.addReopen(reopen);
@@ -475,7 +507,10 @@ export class Delegation {
 
   ack(key, id) {
     if (!this.store.pending(key).some((i) => i.id === id)) return false;
-    return this.store.remove(id);
+    const marked = this.store.pending(key).find((i) => i.id === id).fromChild;
+    const removed = this.store.remove(id);
+    if (marked) this.#changed();
+    return removed;
   }
 
   /**
@@ -501,6 +536,7 @@ export class Delegation {
       human: false,
       text: item.text,
       prompt: this.decorate(item.toKey, item.prompt),
+      ...(item.fromChild ? { fromChild: true } : {}),
       deliveryId: item.id,
       wake: true,
     });

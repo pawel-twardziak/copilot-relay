@@ -145,6 +145,11 @@ export class DelegationStore {
     return Object.values(this.data.outbox).filter((i) => i.toKey === toKey && !i.awaiting);
   }
 
+  /** Outbox items a child sent its parent (marked `fromChild`) that are not acknowledged and not awaiting a reopen. */
+  marked() {
+    return Object.values(this.data.outbox).filter((i) => i.fromChild === true && !i.awaiting);
+  }
+
   awaitingFor(requestId) {
     return Object.values(this.data.outbox).filter((i) => i.awaiting === requestId);
   }
