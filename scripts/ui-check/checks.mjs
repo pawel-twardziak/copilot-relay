@@ -1819,22 +1819,33 @@ export const checks = [
       await app.check(`${FP}.querySelector(".fp-loading").hidden && !${openedRow(outside)}`, "outside.txt's row to go");
       assert.ok(!(await recorded()).includes(outside), "outside.txt no longer recorded");
 
-      // a row whose path now leads outside the session folder asks the confirmation, as a link does
+      // a path on show that now leads outside the session folder: not shown, and its row asks the confirmation, as a
+      // link does
       if (process.platform !== "win32") {
+        const leadsOut = "This path now leads to a file outside the session folder.";
+        const secretShown = `${FP}.textContent.includes("second outside")`;
         await open("ig.txt");
         await contentShows("ignored");
         assert.equal(await app.ev(confirmShown), false, "no confirmation for ig.txt");
         await app.check(`${FP}.querySelector(".fp-loading").hidden && !!${openedRow("ig.txt")}`, "ig.txt's opened row");
-        await fpSelect(app, "README.md"); // ig.txt is not on show
+        await fpSelect(app, "README.md");
+        await app.ev(`${openedRow("ig.txt")}.click()`); // on show from its opened row, so watched
+        await contentShows("ignored");
         writeFileSync(path.join(app.dir, "second.txt"), "second outside\n");
         const second = realpathSync(path.join(app.dir, "second.txt"));
         rmSync(path.join(work, "ig.txt"));
         symlinkSync(second, path.join(work, "ig.txt"));
+        await app.check(`${FP}.querySelector(".fp-content").textContent.includes(${JSON.stringify(leadsOut)}) || ${secretShown}`, "the watcher's read of ig.txt");
+        assert.equal(await app.ev(secretShown), false, "the outside file is not shown by the watcher");
+        await contentShows(leadsOut);
+        assert.equal(await app.ev(confirmShown), false, "no confirmation from the watcher");
         await app.ev(`${openedRow("ig.txt")}.click()`);
         await app.check(confirmShown, "the confirmation for ig.txt's new target");
         assert.equal(await app.ev(`${FP}.querySelector(".fp-confirm-path").textContent`), second, "the confirmation names the file the path leads to");
-        assert.equal(await app.ev(`${FP}.querySelector(".fp-content").textContent.includes("second outside")`), false, "the outside file is not shown");
+        assert.equal(await app.ev(secretShown), false, "the outside file is not shown");
         await app.ev(`${FP}.querySelector('[data-act="deny"]').click()`);
+        await contentShows(leadsOut);
+        assert.equal(await app.ev(secretShown), false, "the outside file is not shown after Cancel");
       }
 
       // the opened files are kept for the session

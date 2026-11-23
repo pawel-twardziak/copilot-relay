@@ -288,9 +288,24 @@ function createFilePreview({ api, h, md, onStatus }) {
 
   const notText = (r) => r.notText || r.outside || r.tier === "binary";
 
-  /** Show an opened file's row (`recorded`: its real path when it was opened). Read unconfirmed; outside the session
-   *  folder it is read as confirmed only while its real path is still the recorded one, else the confirmation asks, as
-   *  for a link. `my` is its selection's seq. */
+  const LEADS_OUT = "This path now leads to a file outside the session folder.";
+
+  /** Read a path that should still be the file `expected` (a real path): unconfirmed; outside the session folder as
+   *  confirmed only while its real path is `expected`, before and after that read. Resolves the read's answer, or
+   *  { elsewhere: realPath } (nothing of that file) when the path now leads to another file outside the folder. */
+  async function readSame(v, expected) {
+    const same = (r) => ChangesModel.samePath(r.path, expected, PLATFORM);
+    const r = await api.readFile(v.cwd, expected, { viewingCwd: v.cwd });
+    if (!r.outside) return r;
+    if (!same(r)) return { elsewhere: r.path };
+    const again = await api.readFile(v.cwd, expected, { viewingCwd: v.cwd, confirmed: true });
+    // swapped between the two reads
+    if (again.path != null && !same(again)) return { elsewhere: again.path };
+    return again;
+  }
+
+  /** Show an opened file's row (`recorded`: its real path when it was opened), read by readSame; when it leads
+   *  elsewhere now the confirmation asks, as for a link, over the note. `my` is its selection's seq. */
   async function loadOpened(my, recorded) {
     setMode("file", "nodiff");
     const v = view;
@@ -300,17 +315,17 @@ function createFilePreview({ api, h, md, onStatus }) {
     paintFile(); // empty while it is read
     let r;
     try {
-      r = await api.readFile(v.cwd, recorded, { viewingCwd: v.cwd });
-      if (my === seq && r.outside && ChangesModel.samePath(r.path, recorded, PLATFORM)) {
-        r = await api.readFile(v.cwd, recorded, { viewingCwd: v.cwd, confirmed: true });
-      }
+      r = await readSame(v, recorded);
     } catch (e) {
       if (my !== seq) return;
       showUnavailable(recorded, readNote(e));
       return watch(recorded); // it may come back
     }
     if (my !== seq) return;
-    if (r.outside) return askConfirm(v, recorded, v.cwd, r.path); // the path leads elsewhere now
+    if (r.elsewhere) {
+      showUnavailable(recorded, LEADS_OUT); // what stays on Cancel
+      return askConfirm(v, recorded, v.cwd, r.elsewhere);
+    }
     if (notText(r)) return showUnavailable(recorded, "This file is not a text file.");
     cur = { path: r.path, line: null, result: r, note: null };
     watch(cur.path);
@@ -689,8 +704,9 @@ function createFilePreview({ api, h, md, onStatus }) {
     return true;
   }
 
-  /** The watched file changed: read it again and show it in place, and with its row's Uncommitted selected its diff
-   *  too (now if the diff pane shows, else when it next shows). The list, the mark and the scroll positions stay. */
+  /** The watched file changed: read it again (readSame: a path that now leads outside the folder shows a note, not the
+   *  file, and asks nothing) and show it in place, and with its row's Uncommitted selected its diff too (now if the
+   *  diff pane shows, else when it next shows). The list, the mark and the scroll positions stay. */
   async function refresh(changed) {
     if (el.hidden || !view || !mode || cur?.path !== changed) return;
     // a selected repository row is cur's file (in "file" mode the link's own row)
@@ -707,7 +723,7 @@ function createFilePreview({ api, h, md, onStatus }) {
     const stale = () => my !== seq || mine !== refreshSeq || cur?.path !== changed; // the user has moved on
     let r;
     try {
-      r = await api.readFile(v.cwd, changed, { viewingCwd: v.cwd, confirmed: true });
+      r = await readSame(v, changed);
     } catch (e) {
       if (stale()) return;
       if (mode === "file") return showUnavailable(changed, readNote(e));
@@ -716,6 +732,12 @@ function createFilePreview({ api, h, md, onStatus }) {
       return paintFile();
     }
     if (stale()) return;
+    if (r.elsewhere) {
+      if (mode === "file") return showUnavailable(changed, LEADS_OUT);
+      cur.result = null;
+      cur.note = LEADS_OUT;
+      return paintFile();
+    }
     if (!notText(r)) {
       cur.result = r;
       cur.note = null;
