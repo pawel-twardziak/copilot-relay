@@ -33,8 +33,8 @@ function createFilePreview({ api, h, md, onStatus }) {
   let dataOf = null;
   // the selection: key (a ChangesModel.key; find(sel.key) gives its file) and version ("uncommitted" or a commit's sha)
   let sel = null;
-  // "change": a repository file's row is on show (cur is its file); "file": a file without a diff (a loose row, a
-  // link; a link's row may be selected); null: nothing
+  // "change": a repository file's row is on show (cur is its file); "file": a file without a diff (a loose row, an
+  // opened row, a link; a link's row may be selected); null: nothing
   let mode = null;
   let shown = null; // the view on show, "diff", "file" or "both" (ChangesModel.viewFor); null with nothing on show
   let diffOf; // the selection whose diff the diff pane holds or reads; undefined: none (null is a selection too)
@@ -272,7 +272,7 @@ function createFilePreview({ api, h, md, onStatus }) {
     } catch (e) {
       if (my !== seq) return;
       cur = { path: filePath, line: null, result: null, note: null };
-      showUnavailable(filePath, e.message);
+      showUnavailable(filePath, readNote(e));
       return watch(filePath); // it may come back
     }
     if (my !== seq) return;
@@ -287,6 +287,36 @@ function createFilePreview({ api, h, md, onStatus }) {
   }
 
   const notText = (r) => r.notText || r.outside || r.tier === "binary";
+
+  /** Show an opened file's row (`recorded`: its real path when it was opened). Read unconfirmed; outside the session
+   *  folder it is read as confirmed only while its real path is still the recorded one, else the confirmation asks, as
+   *  for a link. `my` is its selection's seq. */
+  async function loadOpened(my, recorded) {
+    setMode("file", "nodiff");
+    const v = view;
+    cur = { path: recorded, line: null, result: null, note: null };
+    mdSource = false;
+    setHeader(baseName(recorded), recorded);
+    paintFile(); // empty while it is read
+    let r;
+    try {
+      r = await api.readFile(v.cwd, recorded, { viewingCwd: v.cwd });
+      if (my === seq && r.outside && ChangesModel.samePath(r.path, recorded, PLATFORM)) {
+        r = await api.readFile(v.cwd, recorded, { viewingCwd: v.cwd, confirmed: true });
+      }
+    } catch (e) {
+      if (my !== seq) return;
+      showUnavailable(recorded, readNote(e));
+      return watch(recorded); // it may come back
+    }
+    if (my !== seq) return;
+    if (r.outside) return askConfirm(v, recorded, v.cwd, r.path); // the path leads elsewhere now
+    if (notText(r)) return showUnavailable(recorded, "This file is not a text file.");
+    cur = { path: r.path, line: null, result: r, note: null };
+    watch(cur.path);
+    setHeader(r.name, cur.path);
+    paintFile();
+  }
 
   /** What the content pane shows of cur, when it shows. */
   function paintFile(keepScroll = false) {
@@ -357,11 +387,12 @@ function createFilePreview({ api, h, md, onStatus }) {
 
   // --- the list -----------------------------------------------------------------------------------------
 
-  /** { root, rel, file } of a key that is in the list, else null. */
+  /** { root, rel, file, opened } of a key that is in the list, else null; root null for a loose or an opened file. */
   function find(key) {
     if (key == null || !data) return null;
-    for (const r of data.repos) for (const f of r.files) if (ChangesModel.key(r.root, f.path) === key) return { root: r.root, rel: f.path, file: f };
-    for (const p of data.loose) if (ChangesModel.key(null, p) === key) return { root: null, rel: p, file: null };
+    for (const r of data.repos) for (const f of r.files) if (ChangesModel.key(r.root, f.path) === key) return { root: r.root, rel: f.path, file: f, opened: false };
+    for (const p of data.loose) if (ChangesModel.key(null, p) === key) return { root: null, rel: p, file: null, opened: false };
+    for (const p of ChangesModel.openedShown(data, PLATFORM)) if (ChangesModel.key(null, p) === key) return { root: null, rel: p, file: null, opened: true };
     return null;
   }
 
@@ -383,10 +414,12 @@ function createFilePreview({ api, h, md, onStatus }) {
       },
       remove: (root) => removeRepo(root),
       add: () => addRepo(),
+      forget: (path) => forgetOpened(path),
     };
     const isShut = (foldId) => collapsed.has(fold(foldId));
     const isUnfolded = (key) => unfolded.has(fold(key));
-    itemsEl.replaceChildren(...ChangesList.render(data, { h, sel, isShut, isUnfolded, commitsOf: (key) => commitCache.get(key), on }));
+    const opened = ChangesModel.openedShown(data, PLATFORM).map((p) => ({ path: p, ...ChangesModel.openedLabel(p, view?.cwd, PLATFORM) }));
+    itemsEl.replaceChildren(...ChangesList.render(data, { h, sel, isShut, isUnfolded, commitsOf: (key) => commitCache.get(key), opened, on }));
   }
 
   /** Read a listed file's commits into commitCache and redraw. Resolves to them ({ error } when the read failed), or to
@@ -459,6 +492,12 @@ function createFilePreview({ api, h, md, onStatus }) {
     api.changesRemove(v.sessionId, root).then(() => view === v && reloadList()).catch((e) => fail(e.message));
   }
 
+  /** ✕ on an opened file's row: it leaves the session's opened files. */
+  function forgetOpened(path) {
+    const v = view;
+    api.changesForgetOpened(v.sessionId, path).then(() => view === v && reloadList()).catch((e) => fail(e.message));
+  }
+
   function addRepo() {
     const v = view;
     errEl.hidden = true;
@@ -475,8 +514,8 @@ function createFilePreview({ api, h, md, onStatus }) {
   // --- selection ----------------------------------------------------------------------------------------
 
   /** Select a version of a row; with showDiff its diff and its file, in the view the stored one gives for it. A loose
-   *  file shows its content. Without showDiff only the row is marked (its diff read if the diff pane shows), and a
-   *  content read in flight is left alone. */
+   *  or an opened file shows its content. Without showDiff only the row is marked (its diff read if the diff pane
+   *  shows), and a content read in flight is left alone. */
   function select(key, version = "uncommitted", showDiff = true) {
     const my = showDiff ? ++seq : seq;
     const found = find(key);
@@ -488,7 +527,7 @@ function createFilePreview({ api, h, md, onStatus }) {
       setHeader("", "");
       return;
     }
-    if (found.root == null) return loadContent(my, found.rel);
+    if (found.root == null) return found.opened ? loadOpened(my, found.rel) : loadContent(my, found.rel);
     errEl.hidden = true;
     setHeader(ChangesModel.splitName(found.rel).name, absPath(found.root, found.rel));
     setMode("change", version === "uncommitted" ? "change" : "commit"); // reads the diff if its pane shows
@@ -503,12 +542,18 @@ function createFilePreview({ api, h, md, onStatus }) {
     setMode("change", "commit");
   }
 
-  /** The file on show came from a link: mark its row when it is listed (its diff is read if the diff pane shows). */
+  /** The file on show came from a link or a row without a diff: mark its row in the changes list when it is there, else
+   *  its opened row (its diff is read if the diff pane shows). */
   function locateCur() {
     const found = cur && ChangesModel.locate(data, cur.path, PLATFORM);
     let key = found ? ChangesModel.key(found.root, found.rel) : null;
     if (!find(key)) key = cur && data.loose.includes(cur.path) ? ChangesModel.key(null, cur.path) : null;
-    if (key == null && find(sel?.key)?.root === null) key = sel.key; // a loose row on show (its path may not be the real one)
+    // a loose or opened row on show (its path may not be the real one)
+    if (key == null && find(sel?.key)?.root === null) key = sel.key;
+    if (key == null && cur) {
+      const p = ChangesModel.openedShown(data, PLATFORM).find((o) => ChangesModel.samePath(o, cur.path, PLATFORM));
+      if (p !== undefined) key = ChangesModel.key(null, p);
+    }
     select(key, "uncommitted", false);
     itemsEl.querySelector(".fp-row.active")?.scrollIntoView({ block: "nearest" });
   }
@@ -637,7 +682,10 @@ function createFilePreview({ api, h, md, onStatus }) {
     // its row, when it is listed
     sel = null;
     renderList();
-    reloadList();
+    try {
+      await api.changesOpened(v.sessionId, r.path);
+    } catch {} // not recorded: the file still shows
+    if (my === seq) reloadList();
     return true;
   }
 
@@ -662,7 +710,7 @@ function createFilePreview({ api, h, md, onStatus }) {
       r = await api.readFile(v.cwd, changed, { viewingCwd: v.cwd, confirmed: true });
     } catch (e) {
       if (stale()) return;
-      if (mode === "file") return showUnavailable(changed, e.message);
+      if (mode === "file") return showUnavailable(changed, readNote(e));
       cur.result = null;
       cur.note = readNote(e);
       return paintFile();

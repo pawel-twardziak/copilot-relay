@@ -59,3 +59,20 @@ test("the arrow unfolds without selecting; the row and a commit select", () => {
   assert.equal(stopped, true);
   assert.deepEqual(calls, [["unfold", KA], ["select", KA], ["commit", KA, "a1b2c3d4"]]);
 });
+
+test("opened files: a block of its own, absent when empty; a row selects, its button forgets", () => {
+  assert.equal(all(draw(), "fp-opened").length, 0);
+  const calls = [];
+  const on = { select: (k) => calls.push(["select", k]), forget: (p) => calls.push(["forget", p]) };
+  const KO = ChangesModel.key(null, "/else/c.txt");
+  const root = draw({ on, sel: { key: KO, version: "uncommitted" }, opened: [{ path: "/w/docs/b.md", dir: "docs/", name: "b.md" }, { path: "/else/c.txt", dir: "/else/", name: "c.txt" }] });
+  const [block] = all(root, "fp-opened");
+  assert.equal(text(all(block, "fp-opened-title")[0]), "Opened files");
+  assert.deepEqual(all(block, "fp-row-path").map(text), ["docs/b.md", "/else/c.txt"]);
+  assert.deepEqual(all(block, "active").map((r) => text(all(r, "fp-row-path")[0])), ["/else/c.txt"]);
+  all(block, "fp-row")[0].props.onclick({});
+  let stopped = false;
+  all(block, "fp-forget")[1].props.onclick({ stopPropagation: () => (stopped = true) });
+  assert.equal(stopped, true);
+  assert.deepEqual(calls, [["select", ChangesModel.key(null, "/w/docs/b.md")], ["forget", "/else/c.txt"]]);
+});

@@ -1,7 +1,7 @@
 // The UI checks run by scripts/ui-check/run.mjs: { name, scenario?, modes?, run(app) }, each throwing on failure.
 // app is a driver (driver.mjs) launched with the check's scenario (default panel-scenario.mjs), its mode already set.
 import assert from "node:assert/strict";
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1728,6 +1728,122 @@ export const checks = [
       await app.ev(`${viewBtn("diff")}.click()`); // hide, then show again: the pane is painted from cur
       await app.ev(`${viewBtn("both")}.click()`);
       await contentShows("This file is deleted.");
+    },
+  },
+  {
+    // a file opened from a link that the session did not change is listed under Opened files, newest first, until
+    // the session changes it or its ✕; its row shows the file as File, read without the confirmation only while it is
+    // still the file that was opened
+    name: "changes-opened",
+    modes: ["off"],
+    scenario: CHANGES_SCENARIO,
+    async run(app) {
+      const work = await changesRepo(app);
+      appendFileSync(path.join(work, ".gitignore"), "ig.txt\n");
+      await gitIn(work, ["add", ".gitignore"]);
+      await gitIn(work, ["commit", "-q", "-m", "ignore"]);
+      writeFileSync(path.join(work, "ig.txt"), "ignored\n");
+      const id = await notesWritten(app, work);
+      writeFileSync(path.join(app.dir, "outside.txt"), "from outside\n");
+      const outside = realpathSync(path.join(app.dir, "outside.txt"));
+      const real = realpathSync(work);
+
+      const open = (href) => app.ev(`filePreview.open(${V}, ${JSON.stringify(href)})`);
+      const openBrowser = async () => {
+        await app.ev(`[...${V}.el.querySelectorAll(".head button")].find((b) => b.textContent === "Changes").click()`);
+        await fpListed(app);
+      };
+      const closeBrowser = async () => {
+        await app.ev(`document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))`);
+        await app.check(`${FP}.hidden`, "the browser to close");
+      };
+      const openedRows = () => app.ev(`[...${FP}.querySelectorAll(".fp-opened .fp-row")].map((r) => r.querySelector(".fp-row-path").textContent)`);
+      const openedRow = (label) => `[...${FP}.querySelectorAll(".fp-opened .fp-row")].find((r) => r.querySelector(".fp-row-path").textContent === ${JSON.stringify(label)})`;
+      const groupRow = (rel) => `[...${FP}.querySelectorAll(".fp-group .fp-row")].find((r) => r.querySelector(".fp-row-path").textContent === ${JSON.stringify(rel)})`;
+      const contentShows = (text) => app.check(`${FP}.querySelector(".fp-content").textContent.includes(${JSON.stringify(text)})`, `the file pane to show ${text}`);
+      const active = () => app.ev(`[...${FP}.querySelectorAll(".fp-view button.active")].map((b) => b.dataset.view).join()`);
+      const stored = () => app.ev(`localStorage.getItem("copilot-sessions.changes.v1")`);
+      const confirmShown = `!${FP}.querySelector(".fp-confirm").hidden`;
+      const recorded = () => app.ev(`api.changesList(${JSON.stringify(id)}).then((l) => l.opened)`);
+
+      // a file of the repository without changes: listed under Opened files and selected there
+      const before = await stored();
+      await open("README.md");
+      await app.check(`${FP}.querySelector(".fp-content .fp-md h1")?.textContent === "work"`, "README.md rendered");
+      await app.check(`${FP}.querySelector(".fp-loading").hidden && !!${openedRow("README.md")}?.classList.contains("active")`, "README.md's opened row selected");
+      assert.deepStrictEqual(await openedRows(), ["README.md"], "the opened files after README.md");
+      assert.equal(await active(), "file", "File for an opened file");
+      assert.equal(await stored(), before, "the stored view unchanged");
+
+      // a file of the changes list: recorded, but selected in its group and not listed under Opened files
+      await open("notes.txt");
+      await contentShows("hello");
+      await app.check(`${FP}.querySelector(".fp-loading").hidden && !!${groupRow("notes.txt")}?.classList.contains("active")`, "notes.txt's row selected in its group");
+      assert.deepStrictEqual(await openedRows(), ["README.md"], "notes.txt is not an opened row");
+      assert.equal((await recorded())[0], path.join(real, "notes.txt"), "notes.txt recorded first");
+
+      // a file outside the session folder: after the confirmation it is the newest opened row, by its absolute path
+      await open(path.join(app.dir, "outside.txt"));
+      await app.check(confirmShown, "the confirmation for outside.txt");
+      await app.ev(`${FP}.querySelector('[data-act="allow"]').click()`);
+      await contentShows("from outside");
+      await app.check(`${FP}.querySelector(".fp-loading").hidden && (${openedRow(outside)})?.classList.contains("active") === true`, "outside.txt's opened row selected");
+      assert.deepStrictEqual(await openedRows(), [outside, "README.md"], "the opened files, newest first");
+      await closeBrowser();
+      await openBrowser();
+      await app.ev(`${openedRow(outside)}.click()`);
+      await contentShows("from outside");
+      assert.equal(await app.ev(confirmShown), false, "no confirmation for the file that was opened");
+
+      // Diff on a row without a diff: no changes, and the stored view is Diff
+      await app.ev(`${FP}.querySelector('.fp-view button[data-view="diff"]').click()`);
+      await app.check(`${FP}.querySelector(".fp-diff .fp-msg")?.textContent === "No changes."`, "No changes. for an opened file");
+      assert.equal(JSON.parse(await stored()).view, "diff", "stored: Diff");
+
+      // changed by the session: README.md moves to its group
+      writeFileSync(path.join(work, "README.md"), "# changed\n");
+      await app.ev(`${FP}.querySelector('[data-act="refresh"]').click()`);
+      await app.check(`${FP}.querySelector(".fp-loading").hidden && !!${groupRow("README.md")}`, "README.md in its group");
+      assert.deepStrictEqual(await openedRows(), [outside], "README.md is no longer an opened row");
+
+      // deleted: the row says so and stays listed
+      await fpSelect(app, "README.md"); // outside.txt is not on show
+      rmSync(outside);
+      await app.ev(`${openedRow(outside)}.click()`);
+      await contentShows("This file is deleted.");
+      assert.equal(await active(), "file", "File again for an opened file");
+      assert.deepStrictEqual(await openedRows(), [outside], "the deleted file is still listed");
+
+      // ✕ takes it off the list
+      await app.ev(`${openedRow(outside)}.querySelector(".fp-forget").click()`);
+      await app.check(`${FP}.querySelector(".fp-loading").hidden && !${openedRow(outside)}`, "outside.txt's row to go");
+      assert.ok(!(await recorded()).includes(outside), "outside.txt no longer recorded");
+
+      // a row whose path now leads outside the session folder asks the confirmation, as a link does
+      if (process.platform !== "win32") {
+        await open("ig.txt");
+        await contentShows("ignored");
+        assert.equal(await app.ev(confirmShown), false, "no confirmation for ig.txt");
+        await app.check(`${FP}.querySelector(".fp-loading").hidden && !!${openedRow("ig.txt")}`, "ig.txt's opened row");
+        await fpSelect(app, "README.md"); // ig.txt is not on show
+        writeFileSync(path.join(app.dir, "second.txt"), "second outside\n");
+        const second = realpathSync(path.join(app.dir, "second.txt"));
+        rmSync(path.join(work, "ig.txt"));
+        symlinkSync(second, path.join(work, "ig.txt"));
+        await app.ev(`${openedRow("ig.txt")}.click()`);
+        await app.check(confirmShown, "the confirmation for ig.txt's new target");
+        assert.equal(await app.ev(`${FP}.querySelector(".fp-confirm-path").textContent`), second, "the confirmation names the file the path leads to");
+        assert.equal(await app.ev(`${FP}.querySelector(".fp-content").textContent.includes("second outside")`), false, "the outside file is not shown");
+        await app.ev(`${FP}.querySelector('[data-act="deny"]').click()`);
+      }
+
+      // the opened files are kept for the session
+      const listed = await openedRows();
+      assert.ok(listed.length > 0 || process.platform === "win32", "opened rows before the reload");
+      await closeBrowser();
+      await app.reload();
+      await openBrowser();
+      assert.deepStrictEqual(await openedRows(), listed, "the opened rows after the reload");
     },
   },
 ];

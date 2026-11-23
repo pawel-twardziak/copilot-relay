@@ -427,6 +427,11 @@ span.img-chip.off { border: 1px dashed var(--border); }
 .fp-dir { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; direction: rtl; color: var(--muted); }
 .fp-dir > span { direction: ltr; unicode-bidi: bidi-override; }
 .fp-file { flex: 0 0 auto; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+/* the files opened from links that the list above does not hold */
+.fp-opened { margin-top: 6px; border-top: 1px solid var(--border); }
+.fp-opened-title { padding: 6px 8px 3px 12px; color: var(--muted); font-size: 12px; letter-spacing: .04em; text-transform: uppercase; cursor: default; }
+.fp-forget { flex: none; padding: 0 4px; border: none; background: none; color: var(--muted); }
+.fp-forget:hover { color: var(--text); }
 .fp-panes { flex: 1; min-height: 0; display: flex; }
 .fp-panes > * { flex: 1; min-width: 0; }
 .fp-diff { overflow: auto; outline: none; }
