@@ -1263,6 +1263,86 @@ export const checks = [
     },
   },
   {
+    // replies of a child to its parent wait for the user (held): through a real broker the child's send_message and
+    // report_result arrive marked fromChild, the parent's view holds them (no turn), approving queues one, the
+    // broker's count follows the acknowledgements, a reopened view shows what is still unacknowledged, and the
+    // discard acknowledges. The parent is the driver's session, the child a second one in <app.dir>/child.
+    name: "held-e2e",
+    modes: ["off"],
+    scenario: LINK_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      const PARENT = "scripted-work";
+      const CHILD = "scripted-child";
+      const C = `views.get(${JSON.stringify(CHILD)})`;
+      await app.newSession();
+      const childDir = path.join(app.dir, "child");
+      mkdirSync(childDir);
+      await app.ev(`newSession(${JSON.stringify(childDir)})`);
+      await app.check(`!!${C} && !${C}.busy`, "the child session");
+      await app.ev(`activate(${JSON.stringify(PARENT)})`);
+      const connected = (v) => `(() => { const v = ${v}; return !!v?.relayName && !v.relayChip.hidden && !v.relayChip.classList.contains("off"); })()`;
+      await app.check(connected(V), "the parent to connect to the broker");
+      await app.check(connected(C), "the child to connect to the broker");
+      const parentName = await app.ev(`${V}.relayName`);
+      const childName = await app.ev(`${C}.relayName`);
+      const heldOnBroker = async () => (await (await fetch(`${app.broker.url}/api/links`)).json()).held?.[`cli:${PARENT}`] ?? 0;
+      const rows = () => app.ev(`${V}.el.querySelectorAll(".held-row").length`);
+      const rowTexts = () => app.ev(`[...${V}.el.querySelectorAll(".held-row .held-text")].map((e) => e.textContent.trim())`);
+      /** Types into the child's message box and presses Enter (the driver's send is for its own session). */
+      const sendInChild = async (text) => {
+        const mine = `${C}.log.querySelectorAll(":scope > .msg.user").length`;
+        const before = await app.ev(mine);
+        await app.ev(`(() => { const v = ${C}; v.input.value = ${JSON.stringify(text)}; v.input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); })()`);
+        await app.check(`${mine} > ${before}`, "the child's message to be sent");
+      };
+      const parentTurns = () => app.ev(`${V}.log.querySelectorAll(":scope > .msg.user, :scope > .msg.relay").length`);
+
+      // link them: the parent asks for adopt_session, the card is approved
+      await app.send(`adopt_session ${childName}`);
+      await app.check(`!!${V}.el.querySelector(".perm.link:not(.done)")`, "the link card");
+      await app.ev(`${V}.el.querySelector(".perm.link .opts button.primary").click()`);
+      await app.check(`${C}.parentSessionId === ${JSON.stringify(PARENT)}`, "the child's parent");
+      await app.idle();
+      const turns = await parentTurns();
+
+      // 1. send_message from the child: held, no turn in the parent
+      await sendInChild(`send_message ${parentName} hello parent`);
+      await app.check(`${V}.el.querySelectorAll(".held-row").length === 1`, "one held row in the parent");
+      assert.deepEqual(await rowTexts(), ["hello parent"]);
+      await until(async () => (await heldOnBroker()) === 1, "the broker to count 1 held reply");
+      await frames(app);
+      assert.equal(await app.ev(`${V}.busy`), false, "no turn in the parent");
+      assert.equal(await parentTurns(), turns, "nothing added to the parent's log");
+
+      // 2. report_result: a second row, oldest on top
+      await app.check(`!${C}.busy`, "the child's turn to end");
+      await sendInChild("report_result done");
+      await app.check(`${V}.el.querySelectorAll(".held-row").length === 2`, "two held rows");
+      assert.match((await rowTexts())[0], /^hello parent$/);
+      assert.match((await rowTexts())[1], /done/);
+      await until(async () => (await heldOnBroker()) === 2, "the broker to count 2 held replies");
+
+      // 3. approve the top row: a parent turn starts and the broker's count drops to 1
+      await app.ev(`${V}.el.querySelector(".held-row .held-approve").click()`);
+      await app.check(`${V}.log.querySelectorAll(":scope > .msg.user, :scope > .msg.relay").length > ${turns}`, "a turn from the approved reply");
+      await app.idle();
+      await until(async () => (await heldOnBroker()) === 1, "the broker to count 1 held reply after the approval");
+      assert.equal(await rows(), 1, "one row left");
+
+      // 4. the view reopened: the unacknowledged reply is there again
+      await app.reload();
+      await app.check(`${V}.el.querySelectorAll(".held-row").length === 1`, "the held row after the reopen");
+      assert.match((await rowTexts())[0], /done/);
+
+      // 5. discard acknowledges
+      await app.ev(`${V}.el.querySelector(".held-row .held-discard").click()`);
+      await app.check(`${V}.el.querySelectorAll(".held-row").length === 0`, "the row to go");
+      await until(async () => (await heldOnBroker()) === 0, "the broker to count 0 held replies after the discard");
+    },
+  },
+  {
     // a size change alone (nothing appended): a following log, and a following panel with an open entry, keep their
     // bottoms when the window gets narrower (the log's text reflows) and lower
     name: "resize-keeps-bottom",

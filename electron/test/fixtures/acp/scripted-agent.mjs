@@ -6,8 +6,11 @@
 //   { wait: ms }         a pause
 //   { end: stopReason }  the prompt's answer; the steps after it are played after the answer
 //   { relay: "prompt" }  a prompt "adopt_session <name>" or "release_session <name>" calls that tool of the MCP server
-//                        named relay (from session/new|load's mcpServers) with { name }, and sends its text reply as an
-//                        agent message chunk; any other prompt (a relay notice "[from relay]…") does nothing
+//                        named relay (from session/new|load's mcpServers) with { name }; "send_message <to> <text…>"
+//                        calls send_message with { to, text } and "report_result <text…>" report_result with { text }.
+//                        The prompt is one line, or the last paragraph after a waiting relay notice. The tool's text
+//                        reply is sent as an agent message chunk; any other prompt (a relay notice "[from relay]…")
+//                        does nothing
 // session/cancel (Stop) ends the running prompt as Copilot does: it answers "cancelled" (if not answered yet) and
 // plays none of its remaining steps; a pause or an unanswered permission request it waits on ends at once.
 // Every prompt (as a user_message_chunk, as Copilot replays it) and every update sent is recorded in
@@ -54,10 +57,17 @@ function ask(method, params) {
   return new Promise((resolve) => answers.set(id, resolve));
 }
 
-/** { relay: "prompt" }: the tool's text reply for a prompt that names adopt_session or release_session, else null. */
+/** { relay: "prompt" }: the tool's text reply for a prompt that names a relay tool (see the header), else null. */
 async function relayTool(text) {
-  const m = /^(adopt_session|release_session) ([\s\S]*)$/.exec(text);
+  // a relay notice that was waiting is put in front of the next prompt ("[from relay]…\n\n<prompt>"): the last paragraph counts
+  const m = /(?:^|\n\n)(adopt_session|release_session|send_message|report_result) ([^\n]*)$/.exec(text);
   if (!m) return null;
+  let args = { name: m[2] };
+  if (m[1] === "report_result") args = { text: m[2] };
+  if (m[1] === "send_message") {
+    const [to, ...rest] = m[2].split(" ");
+    args = { to, text: rest.join(" ") };
+  }
   const server = session.mcpServers.find((s) => s.name === "relay");
   if (!server) return "scripted agent: no MCP server named relay was given";
   // loaded here, so only the scenarios that call a relay tool pay for it
@@ -67,7 +77,7 @@ async function relayTool(text) {
   try {
     const headers = Object.fromEntries((server.headers ?? []).map((h) => [h.name, h.value]));
     await mcp.connect(new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers } }));
-    const r = await mcp.callTool({ name: m[1], arguments: { name: m[2] } });
+    const r = await mcp.callTool({ name: m[1], arguments: args });
     return r.content.filter((c) => c.type === "text").map((c) => c.text).join("");
   } catch (e) {
     return `scripted agent: ${m[1]} failed: ${e.message}`; // in the chat, so the check that waits for the reply shows it
