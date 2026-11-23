@@ -407,9 +407,18 @@ span.img-chip.off { border: 1px dashed var(--border); }
 .fp-group-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fp-note { padding: 2px 12px 6px 28px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .fp-note.err { color: var(--err); }
-.fp-row { display: flex; align-items: center; gap: 6px; padding: 3px 8px 3px 26px; cursor: pointer; border-left: 2px solid transparent; white-space: nowrap; }
+.fp-row { display: flex; align-items: center; gap: 6px; padding: 3px 8px 3px 12px; cursor: pointer; border-left: 2px solid transparent; white-space: nowrap; }
 .fp-row:hover { background: var(--panel-2); }
 .fp-row.active { background: var(--panel-2); border-left-color: var(--accent); }
+/* a commit of the file is selected: a weaker mark, so the file is findable while its commits are folded */
+.fp-row.current { border-left-color: var(--muted); }
+/* fixed width, also when empty (a file without commits), so the names line up */
+.fp-arrow { flex: none; width: 1em; color: var(--muted); text-align: center; }
+.fp-arrow:not(:empty):hover { color: var(--text); }
+.fp-commits .fp-note { padding: 2px 12px 4px 46px; }
+.fp-commit { padding: 2px 8px 2px 46px; cursor: pointer; border-left: 2px solid transparent; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; }
+.fp-commit:hover { background: var(--panel-2); color: var(--text); }
+.fp-commit.active { background: var(--panel-2); border-left-color: var(--accent); color: var(--text); }
 .fp-state { flex: none; width: 1.2ch; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted); }
 .fp-flags { flex: none; display: flex; min-width: 1.2em; color: var(--muted); font-size: 11px; }
 .fp-flag { width: 1.2em; text-align: center; }
@@ -418,10 +427,6 @@ span.img-chip.off { border: 1px dashed var(--border); }
 .fp-dir { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; direction: rtl; color: var(--muted); }
 .fp-dir > span { direction: ltr; unicode-bidi: bidi-override; }
 .fp-file { flex: 0 0 auto; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
-.fp-versions { display: flex; gap: 6px; padding: 6px 12px; overflow-x: auto; border-bottom: 1px solid var(--border); background: var(--panel); }
-.fp-versions[hidden] { display: none; }
-.fp-version { flex: none; max-width: 360px; padding: 2px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.fp-version.active { border-color: var(--accent); color: var(--text); background: var(--user); }
 .fp-panes { flex: 1; min-height: 0; display: flex; }
 .fp-panes > * { flex: 1; min-width: 0; }
 .fp-diff { overflow: auto; outline: none; }

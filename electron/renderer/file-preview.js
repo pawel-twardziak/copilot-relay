@@ -1,5 +1,5 @@
-// Full-screen changes browser: the files changed in the session's repositories (main's changes:* records), the
-// versions of the selected file and its git diff; a file link from the chat opens that file alone. This file holds
+// Full-screen changes browser: the files changed in the session's repositories (main's changes:* records), their
+// commits and the git diff of the selected one; a file link from the chat opens that file alone. This file holds
 // the state; changes-list.js draws the list. Show file puts the file on disk beside the diff; the file on show is
 // watched. Loaded before app.js; app.js calls createFilePreview once. File and diff text reach the DOM only as
 // textContent, as escaped highlight.js output, or through md() (marked + DOMPurify).
@@ -17,7 +17,6 @@ function createFilePreview({ api, h, md, onStatus }) {
   const loadingEl = el.querySelector(".fp-loading");
   const nameEl = el.querySelector(".fp-name");
   const pathEl = el.querySelector(".fp-path");
-  const stripEl = el.querySelector(".fp-versions");
   const panesEl = el.querySelector(".fp-panes");
   const diffEl = el.querySelector(".fp-diff");
   const splitEl = el.querySelector(".fp-split");
@@ -30,14 +29,16 @@ function createFilePreview({ api, h, md, onStatus }) {
   const confirmPath = el.querySelector(".fp-confirm-path");
 
   let view = null; // the SessionView the overlay belongs to
-  let data = null; // the last list of dataOf's session: { repos, loose }; kept while closed, for the next show
+  let data = null; // the last list of dataOf's session: { repos, loose, opened }; kept while closed, for the next show
   let dataOf = null;
-  let selKey = null; // ChangesModel.key of the selected row; find(selKey) gives its file
-  let versions = []; // the strip of the selected row
-  let version = null; // the strip entry on show in the diff pane
+  // the selection: key (a ChangesModel.key; find(sel.key) gives its file) and version ("uncommitted" or a commit's sha)
+  let sel = null;
   // "change": the diff pane shows, with Show file the content pane too; "file": the content pane shows; null: nothing
   let mode = null;
   const collapsed = new Set(); // `${sessionId}\n${root}` of the folded groups
+  const unfolded = new Set(); // `${sessionId}\n${key}` of the files that show their commits
+  // key -> "loading", { error } or the file's commits, for the list on show; every list answer empties it
+  const commitCache = new Map();
   let cur = null; // { path, line, result, note } of the file on show; in "change" mode the selected row's file
   let mdSource = false;
   let pending = null; // { view, href, base } waiting for the user's answer to the confirmation
@@ -46,8 +47,8 @@ function createFilePreview({ api, h, md, onStatus }) {
   let allSelected = false;
   let seq = 0; // a newer read or selection, a close or another session makes older content answers stale
   let diffSeq = 0; // a newer diff request (another version, a refresh) makes older diff answers stale
-  let stripSeq = 0; // a newer selection (also one that only builds the strip), a close or another session makes older commit lists stale
-  let listSeq = 0; // a newer list request, a close or another session makes an older list stale
+  // a newer list request, a close or another session makes an older list, and the commits read for it, stale
+  let listSeq = 0;
   let refreshSeq = 0; // a newer refresh makes older refreshes stale
   let prefs = { showFile: false, ratio: 0.5 };
   try {
@@ -69,7 +70,6 @@ function createFilePreview({ api, h, md, onStatus }) {
     errEl.hidden = false;
   };
   const message = (text) => content.replaceChildren(h("div", { class: "fp-msg" }, text));
-  const diffMessage = (text) => diffEl.replaceChildren(h("div", { class: "fp-msg" }, text));
   const isMd = (r) => /\.(md|markdown)$/i.test(r?.name ?? "") && r.tier === "highlight";
   /** The Markdown toggle: shown for a Markdown file in the content pane while that pane shows. */
   const syncMd = () => {
@@ -354,9 +354,17 @@ function createFilePreview({ api, h, md, onStatus }) {
   }
 
   function renderList() {
-    const fold = (foldId) => `${dataOf}\n${foldId}`;
+    const fold = (id) => `${dataOf}\n${id}`; // a group's foldId or a file's key
     const on = {
       select: (key) => select(key),
+      commit: (key, sha) => selectCommit(key, sha),
+      unfold(key) {
+        if (!unfolded.delete(fold(key))) {
+          unfolded.add(fold(key));
+          if (!commitCache.has(key)) readCommits(key);
+        }
+        renderList();
+      },
       toggle(foldId) {
         if (!collapsed.delete(fold(foldId))) collapsed.add(fold(foldId));
         renderList();
@@ -364,10 +372,33 @@ function createFilePreview({ api, h, md, onStatus }) {
       remove: (root) => removeRepo(root),
       add: () => addRepo(),
     };
-    itemsEl.replaceChildren(...ChangesList.render(data, { h, selKey, isShut: (foldId) => collapsed.has(fold(foldId)), on }));
+    const isShut = (foldId) => collapsed.has(fold(foldId));
+    const isUnfolded = (key) => unfolded.has(fold(key));
+    itemsEl.replaceChildren(...ChangesList.render(data, { h, sel, isShut, isUnfolded, commitsOf: (key) => commitCache.get(key), on }));
   }
 
-  /** Ask for the session's list; until it answers the loader shows above the list it had. `after` runs on the answer. */
+  /** Read a listed file's commits into commitCache and redraw. Resolves to them ({ error } when the read failed), or to
+   *  undefined when the answer came for an older list or another session and was dropped. */
+  async function readCommits(key) {
+    const found = find(key);
+    if (found?.root == null) return undefined;
+    const my = listSeq;
+    const d = data;
+    commitCache.set(key, "loading");
+    let value;
+    try {
+      value = await api.changesCommits(dataOf, found.root, found.rel);
+    } catch (e) {
+      value = { error: e.message };
+    }
+    if (my !== listSeq || d !== data) return undefined;
+    commitCache.set(key, value);
+    renderList();
+    return value;
+  }
+
+  /** Ask for the session's list; until it answers the loader shows above the list it had. `after(reads)` runs on the
+   *  answer, `reads` the commit reads (key -> readCommits) of the unfolded files that are still listed. */
   async function loadList(after) {
     const my = ++listSeq;
     const v = view;
@@ -385,11 +416,29 @@ function createFilePreview({ api, h, md, onStatus }) {
     loadingEl.hidden = true;
     data = d;
     dataOf = v.sessionId;
-    after();
+    commitCache.clear();
+    const reads = new Map();
+    for (const id of unfolded) {
+      const key = id.startsWith(`${dataOf}\n`) ? id.slice(dataOf.length + 1) : null;
+      if (key != null && find(key)?.file?.committed) reads.set(key, readCommits(key));
+    }
+    after(reads);
   }
 
-  /** After a list: the file on show from a link keeps showing and gets its row; otherwise the selection is kept or the first file is picked. */
-  const afterList = () => (mode === "file" ? locateCur() : select(ChangesModel.pick(data, selKey)));
+  /** After a list: the file on show from a link keeps showing and gets its row; otherwise the selection is kept or the
+   *  first file is picked. A selected commit is kept while its file's commits still hold it, else the file's
+   *  uncommitted version is shown. */
+  function afterList(reads) {
+    if (mode === "file") return locateCur();
+    const key = ChangesModel.pick(data, sel?.key, PLATFORM);
+    if (key == null || key !== sel?.key || sel.version === "uncommitted") return select(key);
+    const { version } = sel;
+    renderList();
+    (reads.get(key) ?? readCommits(key)).then((commits) => {
+      if (commits === undefined || sel?.key !== key || sel.version !== version) return; // dropped, or the user moved on
+      select(key, ChangesModel.keepVersion(version, Array.isArray(commits) ? commits : []));
+    });
+  }
   const reloadList = () => loadList(afterList);
 
   function removeRepo(root) {
@@ -410,66 +459,41 @@ function createFilePreview({ api, h, md, onStatus }) {
       .catch((e) => fail(e.message));
   }
 
-  // --- versions -----------------------------------------------------------------------------------------
+  // --- selection ----------------------------------------------------------------------------------------
 
-  function renderStrip() {
-    stripEl.hidden = !versions.length; // never an empty strip
-    stripEl.replaceChildren(
-      ...versions.map((ver) => h("button", { class: `fp-version${ver.id === version ? " active" : ""}`, title: ver.title || null, onclick: () => loadDiff(ver.id) }, ver.label)),
-    );
-  }
-
-  /** Select a row: its versions in the strip, then (showDiff) the first one's diff. A loose file shows its content. */
-  async function select(key, showDiff = true) {
-    const mine = ++stripSeq;
-    const my = showDiff ? ++seq : seq; // building only the strip leaves a content read in flight alone
-    const sel = find(key);
-    selKey = sel ? key : null;
-    versions = [];
-    version = null;
+  /** Select a version of a row; with showDiff its diff and the file beside it. A loose file shows its content. Without
+   *  showDiff only the row is marked, and a content read in flight is left alone. */
+  function select(key, version = "uncommitted", showDiff = true) {
+    const my = showDiff ? ++seq : seq;
+    const found = find(key);
+    sel = found ? { key, version } : null;
     renderList();
-    renderStrip();
-    if (!sel) {
-      if (showDiff) {
-        setMode(null);
-        setHeader("", "");
-      }
+    if (!showDiff) return;
+    if (!found) {
+      setMode(null);
+      setHeader("", "");
       return;
     }
-    if (sel.root == null) {
-      if (showDiff) loadContent(my, sel.rel);
-      return;
-    }
-    const { root, rel, file } = sel;
-    if (showDiff) {
-      setMode("change");
-      errEl.hidden = true;
-      setHeader(ChangesModel.splitName(rel).name, absPath(root, rel));
-      diffEl.replaceChildren();
-      loadPaneFile(my, root, rel);
-    }
-    let commits;
-    try {
-      commits = await api.changesCommits(view.sessionId, root, rel);
-    } catch (e) {
-      if (mine !== stripSeq || my !== seq) return;
-      return showDiff ? diffMessage(e.message) : fail(e.message);
-    }
-    if (mine !== stripSeq) return;
-    versions = ChangesModel.versions(file, commits);
-    renderStrip();
-    if (!showDiff || my !== seq) return;
-    if (versions.length) loadDiff(versions[0].id);
-    else diffMessage("No changes.");
+    if (found.root == null) return loadContent(my, found.rel);
+    loadDiff(version); // switches to the diff pane
+    loadPaneFile(my, found.root, found.rel);
   }
 
-  /** The file on show came from a link: select its row when it is listed (the strip shows, no diff yet). */
+  /** A commit row: of the file whose diff is on show only the diff changes (the file pane keeps its file). */
+  function selectCommit(key, sha) {
+    if (mode !== "change" || sel?.key !== key) return select(key, sha);
+    sel = { key, version: sha };
+    renderList();
+    loadDiff(sha);
+  }
+
+  /** The file on show came from a link: mark its row when it is listed (no diff yet). */
   function locateCur() {
     const found = cur && ChangesModel.locate(data, cur.path, PLATFORM);
     let key = found ? ChangesModel.key(found.root, found.rel) : null;
     if (!find(key)) key = cur && data.loose.includes(cur.path) ? ChangesModel.key(null, cur.path) : null;
-    if (key == null && find(selKey)?.root === null) key = selKey; // a loose row on show (its path may not be the real one)
-    select(key, false);
+    if (key == null && find(sel?.key)?.root === null) key = sel.key; // a loose row on show (its path may not be the real one)
+    select(key, "uncommitted", false);
     itemsEl.querySelector(".fp-row.active")?.scrollIntoView({ block: "nearest" });
   }
 
@@ -478,16 +502,14 @@ function createFilePreview({ api, h, md, onStatus }) {
   /** Show the diff of the selected row's version `id` (switches to the diff pane; the file pane keeps its file).
    *  `keep` (the file changed on disk): the diff is replaced in place, at the same scroll position. */
   async function loadDiff(id, keep = false) {
-    const sel = find(selKey);
-    if (sel?.root == null) return; // only a repository's file has versions
+    const found = find(sel?.key);
+    if (found?.root == null) return; // only a repository's file has versions
     const my = seq;
     const mine = ++diffSeq;
     const stale = () => my !== seq || mine !== diffSeq;
-    const { root, rel, file } = sel;
+    const { root, rel, file } = found;
     const v = view;
     if (!keep) {
-      version = id;
-      renderStrip();
       setMode("change");
       errEl.hidden = true;
       setHeader(ChangesModel.splitName(rel).name, absPath(root, rel));
@@ -500,11 +522,12 @@ function createFilePreview({ api, h, md, onStatus }) {
       diffEl.scrollLeft = scrollLeft;
     };
     const say = (text) => show(h("div", { class: "fp-msg" }, text));
+    if (id === "uncommitted" && !file.uncommitted) return say("No changes."); // only committed changes: no git call
     try {
       // an untracked file has no diff: its content is the addition
       const r = id === "uncommitted" && file.state === "?" ? { added: true } : await api.changesDiff(v.sessionId, root, rel, id);
       if (stale()) return;
-      if (r.tooLarge) return say("This diff is larger than 2 MB. Use Show file.");
+      if (r.tooLarge) return say("This diff is larger than 2 MB. Use File.");
       if (r.added) return await showAdded(stale, v, root, rel, show, say);
       const parsed = DiffView.parse(r.text);
       if (parsed.binary) say("Binary file.");
@@ -535,13 +558,11 @@ function createFilePreview({ api, h, md, onStatus }) {
     if (dataOf !== v.sessionId) {
       // another session: its own list, nothing of the previous one's answers
       listSeq++;
-      stripSeq++;
       data = null;
       dataOf = v.sessionId;
-      selKey = null;
-      versions = [];
+      sel = null;
+      commitCache.clear();
       renderList();
-      renderStrip();
     }
     view = v;
     el.hidden = false;
@@ -595,12 +616,9 @@ function createFilePreview({ api, h, md, onStatus }) {
     cur = { path: r.path, line, result: r };
     watch(r.path);
     renderFile(r, line);
-    // its row, when it is listed; the strip stays hidden until then
-    stripSeq++;
-    selKey = null;
-    versions = [];
+    // its row, when it is listed
+    sel = null;
     renderList();
-    renderStrip();
     reloadList();
     return true;
   }
@@ -609,7 +627,7 @@ function createFilePreview({ api, h, md, onStatus }) {
    *  diff too. The list, the mark and the scroll positions stay as they are. */
   async function refresh(changed) {
     if (el.hidden || !view || !mode || cur?.path !== changed) return;
-    if (mode === "change" && version === "uncommitted") loadDiff(version, true);
+    if (mode === "change" && sel?.version === "uncommitted") loadDiff("uncommitted", true);
     const my = seq;
     const mine = ++refreshSeq;
     const v = view;
@@ -637,7 +655,6 @@ function createFilePreview({ api, h, md, onStatus }) {
   /** The list and the selection stay for the next show of the same session. */
   function close() {
     seq++;
-    stripSeq++;
     listSeq++;
     setMode(null);
     errEl.hidden = true;
@@ -645,9 +662,6 @@ function createFilePreview({ api, h, md, onStatus }) {
     confirmOnly = false;
     confirmEl.hidden = true;
     loadingEl.hidden = true;
-    versions = [];
-    version = null;
-    renderStrip();
     diffEl.replaceChildren();
     setHeader("", "");
     el.hidden = true;
@@ -662,8 +676,8 @@ function createFilePreview({ api, h, md, onStatus }) {
     else if (act === "refresh" && view) reloadList();
     else if (act === "add" && view) addRepo();
     else if (act === "system" && view) {
-      const sel = find(selKey);
-      const target = mode === "file" ? cur?.path : sel?.root != null ? absPath(sel.root, sel.rel) : null;
+      const found = find(sel?.key);
+      const target = mode === "file" ? cur?.path : found?.root != null ? absPath(found.root, found.rel) : null;
       if (target) api.openLink(view.cwd, target).catch((err) => fail(err.message));
     } else if (act === "md" && !content.hidden && cur?.result) {
       mdSource = !mdSource;
@@ -744,10 +758,12 @@ function createFilePreview({ api, h, md, onStatus }) {
     forget(sessionId) {
       if (view?.sessionId === sessionId) close();
       if (dataOf === sessionId) {
-        data = dataOf = selKey = null;
+        data = dataOf = sel = null;
+        commitCache.clear();
         renderList();
       }
       for (const fold of collapsed) if (fold.startsWith(`${sessionId}\n`)) collapsed.delete(fold);
+      for (const id of unfolded) if (id.startsWith(`${sessionId}\n`)) unfolded.delete(id);
     },
     get isOpen() {
       return !el.hidden;

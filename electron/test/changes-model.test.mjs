@@ -34,16 +34,6 @@ test("pick: keeps a listed key, else first file, else loose, else null", () => {
   assert.equal(ChangesModel.pick({ repos: [], loose: [] }, "k"), null);
 });
 
-test("versions: with and without uncommitted", () => {
-  const commits = [{ sha: "0123456789abcdef", subject: "Fix it", date: "2026-11-22", author: "Ann" }];
-  assert.deepEqual(ChangesModel.versions(file("a", { uncommitted: true }), commits), [
-    { id: "uncommitted", label: "Uncommitted", title: "" },
-    { id: "0123456789abcdef", label: "0123456 Fix it", title: "Ann · 2026-11-22" },
-  ]);
-  assert.deepEqual(ChangesModel.versions(file("a"), commits).map((v) => v.id), ["0123456789abcdef"]);
-  assert.deepEqual(ChangesModel.versions(file("a"), []), []);
-});
-
 test("locate: win32 returns the spelling the list holds; otherwise rel stays as computed", () => {
   const win = { repos: [repo("c:/repo", [file("A/b.txt")])], loose: [] };
   assert.deepEqual(ChangesModel.locate(win, "C:\\Repo\\a\\B.TXT", "win32"), { root: "c:/repo", rel: "A/b.txt" });

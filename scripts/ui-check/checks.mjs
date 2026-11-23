@@ -353,7 +353,11 @@ const fpGroups = (app) => app.ev(`[...${FP}.querySelectorAll(".fp-group")].map((
   })),
 }))`);
 const fpRow = (rel) => `[...${FP}.querySelectorAll(".fp-row")].find((r) => r.querySelector(".fp-row-path").textContent === ${JSON.stringify(rel)})`;
-const fpStrip = (app) => app.ev(`[...${FP}.querySelectorAll(".fp-versions:not([hidden]) .fp-version")].map((b) => ({ label: b.textContent, active: b.classList.contains("active") }))`);
+const fpArrow = (rel) => `${fpRow(rel)}.querySelector(".fp-arrow")`;
+/** The block of commit rows under rel's row (null when it is folded). */
+const fpCommitsOf = (rel) => `(() => { const b = ${fpRow(rel)}?.nextElementSibling; return b?.classList.contains("fp-commits") ? b : null; })()`;
+/** The commit rows under rel's row: label and selected. */
+const fpCommits = (app, rel) => app.ev(`[...(${fpCommitsOf(rel)}?.querySelectorAll(".fp-commit") ?? [])].map((c) => ({ label: c.textContent, active: c.classList.contains("active") }))`);
 const fpDiffTypes = (app) => app.ev(`[...${FP}.querySelectorAll(".fp-diff .dv-line")].map((l) => l.className.replace("dv-line ", ""))`);
 const fpListed = (app) => app.check(`!${FP}.hidden && ${FP}.querySelector(".fp-loading").hidden && ${FP}.querySelectorAll(".fp-row").length > 0`, "the list of changes");
 /** Clicks the row of rel and waits for its diff (or a message) in the diff pane. */
@@ -1455,8 +1459,9 @@ export const checks = [
     },
   },
   {
-    // the Changes button opens the browser on the session's repository: rows with their marks, a file's versions and
-    // its git diff; a file link in the chat opens that file alone with its row selected; ⟳ keeps the selection.
+    // the Changes button opens the browser on the session's repository: rows with their marks, a file that unfolds to
+    // its commits and their git diff; a file link in the chat opens that file alone with its row selected; ⟳ keeps the
+    // selection and reads the unfolded files' commits again.
     name: "changes-browser",
     modes: ["off"],
     scenario: CHANGES_SCENARIO,
@@ -1479,17 +1484,36 @@ export const checks = [
       ]);
 
       await fpSelect(app, "README.md");
-      assert.equal((await fpStrip(app))[0]?.label, "Uncommitted", "README.md's first version");
+      assert.equal(await app.ev(`${fpArrow("README.md")}.textContent`), "", "README.md has no commits: no arrow");
+      assert.equal(await app.ev(`${fpRow("README.md")}.classList.contains("active")`), true, "README.md's row selected");
       assert.ok((await fpDiffTypes(app)).includes("del") && (await fpDiffTypes(app)).includes("add"), "README.md's diff has a removed and an added line");
       // selected as Ctrl+A does: each line's sign stays on that line in the copied text
       const copied = await app.ev(`(() => { getSelection().selectAllChildren(${FP}.querySelector(".fp-diff .dv")); const t = getSelection().toString(); getSelection().removeAllRanges(); return t; })()`);
       assert.ok(copied.includes("-# work") && copied.includes("+# changed"), `README.md's copied diff: ${JSON.stringify(copied)}`);
 
+      // b.txt has only a commit: its row shows no uncommitted change and does not unfold by itself
+      assert.equal(await app.ev(`${fpArrow("b.txt")}.textContent`), "▸", "b.txt's arrow");
       await fpSelect(app, "b.txt");
-      const strip = await fpStrip(app);
-      assert.equal(strip.length, 1, "b.txt has one version");
-      assert.match(strip[0].label, /^[0-9a-f]{7} second$/, "b.txt's commit");
-      assert.ok((await fpDiffTypes(app)).includes("add"), "b.txt's diff has an added line");
+      assert.equal(await app.ev(`${FP}.querySelector(".fp-diff .fp-msg")?.textContent`), "No changes.", "b.txt's uncommitted version");
+      assert.equal(await app.ev(`${FP}.querySelectorAll(".fp-commit").length`), 0, "no commit rows before the arrow is used");
+
+      await app.ev(`${fpArrow("b.txt")}.click()`);
+      await app.check(`!!${fpCommitsOf("b.txt")}?.querySelector(".fp-commit")`, "b.txt's commits");
+      const commits = await fpCommits(app, "b.txt");
+      assert.equal(commits.length, 1, "b.txt has one commit");
+      assert.match(commits[0].label, /^[0-9a-f]{7} second$/, "b.txt's commit");
+      assert.equal(commits[0].active, false, "the commit is not selected by the unfold");
+      assert.equal(await app.ev(`${fpRow("b.txt")}.classList.contains("active")`), true, "b.txt's row stays selected");
+
+      await app.ev(`${fpCommitsOf("b.txt")}.querySelector(".fp-commit").click()`);
+      await app.check(`!!${FP}.querySelector(".fp-diff .dv")`, "b.txt's commit diff");
+      assert.equal((await fpCommits(app, "b.txt"))[0].active, true, "the commit selected");
+      assert.deepStrictEqual(
+        await app.ev(`[${fpRow("b.txt")}.classList.contains("current"), ${fpRow("b.txt")}.classList.contains("active")]`),
+        [true, false],
+        "b.txt's row carries the weaker mark",
+      );
+      assert.ok((await fpDiffTypes(app)).includes("add"), "b.txt's commit diff has an added line");
 
       await fpSelect(app, "notes.txt");
       const types = await fpDiffTypes(app);
@@ -1504,7 +1528,10 @@ export const checks = [
       assert.equal(await app.ev(`${FP}.querySelector(".fp-diff").hidden`), true, "no diff pane for a file link");
       assert.equal(await app.ev(`${FP}.querySelector(".fp-content").hidden`), false, "the file's content");
 
-      await fpSelect(app, "b.txt");
+      // b.txt stays unfolded (the fold state is kept per session) and its commits were read again with the list
+      await app.check(`!!${fpCommitsOf("b.txt")}?.querySelector(".fp-commit")`, "b.txt's commits after the link");
+      await app.ev(`${fpCommitsOf("b.txt")}.querySelector(".fp-commit").click()`);
+      await app.check(`${fpCommitsOf("b.txt")}.querySelector(".fp-commit").classList.contains("active") && !!${FP}.querySelector(".fp-diff .dv")`, "b.txt's commit selected");
       await gitIn(work, ["add", "-A"]);
       await gitIn(work, ["commit", "-q", "-m", "third"]);
       const loader = await app.ev(`(() => { ${FP}.querySelector('[data-act="refresh"]').click(); return !${FP}.querySelector(".fp-loading").hidden; })()`);
@@ -1512,7 +1539,18 @@ export const checks = [
       await fpListed(app);
       const after = (await fpGroups(app))[0].rows;
       assert.equal(after.find((r) => r.path === "README.md").flags, "✓", "README.md committed");
-      assert.deepStrictEqual(after.filter((r) => r.active).map((r) => r.path), ["b.txt"], "the selection after ⟳");
+      assert.equal(await app.ev(`${fpArrow("README.md")}.textContent`), "▸", "README.md's arrow once it has a commit");
+      await app.check(`${fpCommitsOf("b.txt")}?.querySelector(".fp-commit")?.classList.contains("active")`, "b.txt's commit still selected after ⟳");
+      assert.deepStrictEqual(after.filter((r) => r.active).map((r) => r.path), [], "no file row is the selection after ⟳");
+
+      // an unfold whose answer comes for the list a ⟳ replaces: once the list settles, the commits of the new list
+      await app.ev(`(() => { ${fpArrow("README.md")}.click(); ${FP}.querySelector('[data-act="refresh"]').click(); })()`);
+      await fpListed(app);
+      await app.check(`!!${fpCommitsOf("README.md")}?.querySelector(".fp-commit, .fp-note.err")`, "README.md's commits");
+      const readme = await fpCommits(app, "README.md");
+      assert.equal(readme.length, 1, `README.md has one commit: ${JSON.stringify(readme)}`);
+      assert.ok(readme[0].label.endsWith(" third"), `README.md's commit: ${readme[0].label}`);
+      assert.equal(await app.ev(`${FP}.querySelectorAll(".fp-items .fp-note.err").length`), 0, "no error in the list");
     },
   },
   {
@@ -1600,16 +1638,17 @@ export const checks = [
       assert.equal(await app.ev(`${fileBtn}.textContent`), "Show file");
       assert.equal((await app.ev(`ChangesModel.parsePrefs(localStorage.getItem("copilot-sessions.changes.v1"))`)).showFile, false, "stored: hidden");
 
-      // a file link shows the file alone, without the button; a version of its row brings the stored split back
+      // a file link shows the file alone, without the button; a click on its row brings the stored split back
       await app.ev(`${fileBtn}.click()`);
       await app.ev(`document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))`);
       await app.check(`${FP}.hidden`, "the browser to close");
       await app.ev(`${V}.log.querySelector('.diff-path[data-path="notes.txt"]').click()`);
       await contentShows("hello");
-      await app.check(`${fpRow("notes.txt")}.classList.contains("active") && !!${FP}.querySelector(".fp-versions:not([hidden]) .fp-version")`, "notes.txt's versions");
+      await fpListed(app);
+      await app.check(`${fpRow("notes.txt")}.classList.contains("active")`, "notes.txt's row selected");
       assert.equal(await app.ev(`${fileBtn}.hidden`), true, "no Show file for a file link");
       assert.equal((await panes()).diff, 0, "no diff pane for a file link");
-      await app.ev(`${FP}.querySelector(".fp-version").click()`);
+      await fpSelect(app, "notes.txt");
       await app.check(`!!${FP}.querySelector(".fp-diff .dv")`, "notes.txt's diff");
       const linked = await panes();
       assert.ok(linked.beside && Math.abs(linked.ratio - again.ratio) <= 0.01, `the stored split for the linked file: ${JSON.stringify(linked)}`);
@@ -1618,13 +1657,14 @@ export const checks = [
       rmSync(path.join(work, "notes.txt"));
       await contentShows("This file is deleted.");
 
-      // a file deleted while shown alone, then a version entry and its file: the pane keeps the note
+      // a file deleted while shown alone, then a click on its row and its file: the pane keeps the note
       writeFileSync(path.join(work, "notes.txt"), "hello\n");
       await app.ev(`${V}.log.querySelector('.diff-path[data-path="notes.txt"]').click()`);
       await contentShows("hello");
+      await fpListed(app); // read while notes.txt is there
       rmSync(path.join(work, "notes.txt"));
       await app.check(`!${FP}.querySelector(".fp-content").textContent.includes("hello")`, "the file pane to drop notes.txt's text");
-      await app.ev(`${FP}.querySelector(".fp-version").click()`);
+      await fpSelect(app, "notes.txt");
       await app.ev(`${fileBtn}.click()`); // hide, then show again: the pane is painted from cur
       await app.ev(`${fileBtn}.click()`);
       await contentShows("This file is deleted.");

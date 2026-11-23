@@ -7,23 +7,50 @@ const baseName = (p) => p.split(/[/\\]/).pop() || p;
 const LOOSE = "\0loose"; // the fold id of the "No repository" group (never a root)
 
 /**
- * The list's nodes for data { repos, loose }, built with the app's element helper h. `selKey` (a ChangesModel.key)
- * marks the active row, `isShut(foldId)` tells a folded group (foldId: a repository's root, or LOOSE).
- * on: { select(key), toggle(foldId), remove(root), add() }.
+ * The list's nodes for data { repos, loose }, built with the app's element helper h. `sel` ({ key, version } or null,
+ * key a ChangesModel.key, version "uncommitted" or a commit's sha) marks the selected row, `isShut(foldId)` tells a
+ * folded group (foldId: a repository's root, or LOOSE), `isUnfolded(key)` a file that shows its commits, and
+ * `commitsOf(key)` gives them: undefined or "loading" while they are read, { error }, or [{ sha, subject, author, date }].
+ * on: { select(key), commit(key, sha), unfold(key), toggle(foldId), remove(root), add(), forget(path) }.
+ * `opened` and `on.forget` (the opened files) are not drawn yet.
  */
-function render(data, { h, selKey, isShut, on }) {
+function render(data, { h, sel, isShut, isUnfolded, commitsOf, opened = [], on }) {
   const flag = (text, title) => h("span", { class: "fp-flag", title }, text);
   const note = (text, cls = "") => h("div", { class: `fp-note${cls}` }, text);
 
-  function row(key, title, flags, dir, name, state) {
+  /** A file's row; `arrow` (a file with commits) is "▸" or "▾", else its place stays empty so the names line up. */
+  function row(key, title, flags, dir, name, state, arrow = "") {
+    const mark = sel?.key !== key ? "" : sel.version === "uncommitted" ? " active" : " current";
+    const unfold = (e) => {
+      e.stopPropagation(); // the fold changes, the selection does not
+      on.unfold(key);
+    };
     return h(
       "div",
-      { class: `fp-row${key === selKey ? " active" : ""}`, title, onclick: () => on.select(key) },
+      { class: `fp-row${mark}`, title, onclick: () => on.select(key) },
+      h("span", { class: "fp-arrow", onclick: arrow ? unfold : null }, arrow),
       h("span", { class: "fp-state" }, state),
       h("span", { class: "fp-flags" }, flags),
       // the folder part gives way first, cut at its start (see .fp-dir), so the name stays readable
       h("span", { class: "fp-row-path" }, dir && h("span", { class: "fp-dir" }, h("span", {}, dir)), h("span", { class: "fp-file" }, name)),
     );
+  }
+
+  /** The commits under an unfolded file, newest first, or a note while they are read, when they failed or are none. */
+  function commitRows(key) {
+    const value = commitsOf(key);
+    let body;
+    if (value === undefined || value === "loading") body = note("Reading…");
+    else if (!Array.isArray(value)) body = note(value.error, " err");
+    else if (!value.length) body = note("No commits.");
+    else {
+      body = value.map((c) => {
+        const { label, title } = ChangesModel.commitLabel(c);
+        const active = sel?.key === key && sel.version === c.sha ? " active" : "";
+        return h("div", { class: `fp-commit${active}`, title, onclick: () => on.commit(key, c.sha) }, label);
+      });
+    }
+    return h("div", { class: "fp-commits" }, body);
   }
 
   /** A collapsible group; `root` (a repository's) adds the button that removes it from the list. */
@@ -59,7 +86,10 @@ function render(data, { h, selKey, isShut, on }) {
           f.dirtyAtStart && flag("⏱", "Changed before the session"),
           f.committed && !f.uncommitted && flag("✓", "Committed, no uncommitted change now"),
         ];
-        body.push(row(ChangesModel.key(r.root, f.path), f.path, flags, dir, name, f.state));
+        const key = ChangesModel.key(r.root, f.path);
+        const open = f.committed && isUnfolded(key);
+        body.push(row(key, f.path, flags, dir, name, f.state, f.committed ? (open ? "▾" : "▸") : ""));
+        if (open) body.push(commitRows(key));
       }
       if (!r.files.length && !r.note) body.push(note("No changes."));
       if (r.truncated) body.push(note("Only the first 2000 files are shown."));

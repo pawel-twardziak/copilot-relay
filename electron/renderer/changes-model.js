@@ -1,4 +1,4 @@
-// Pure list model of the changes browser: keys, selection, versions of a file, path location and joining, the
+// Pure list model of the changes browser: keys, selection, a file's commits, path location and joining, the
 // split's stored preferences (no DOM).
 // Loaded as a classic <script> (sets globalThis.ChangesModel) and via require() in tests.
 "use strict";
@@ -88,14 +88,6 @@ function pick(data, prevKey, platform) {
   return opened.length ? key(null, opened[0]) : null;
 }
 
-/** The versions of a file to choose from: "Uncommitted" when it has uncommitted changes, then one per commit. */
-function versions(file, commits) {
-  const out = [];
-  if (file?.uncommitted) out.push({ id: "uncommitted", label: "Uncommitted", title: "" });
-  for (const c of commits ?? []) out.push({ id: c.sha, label: `${c.sha.slice(0, 7)} ${c.subject}`, title: `${c.author} · ${c.date}` });
-  return out;
-}
-
 /** "electron/main.mjs" -> { dir: "electron/", name: "main.mjs" }. */
 function splitName(rel) {
   const i = rel.lastIndexOf("/");
@@ -146,7 +138,7 @@ function parsePrefs(text) {
   return { showFile: raw.showFile === true, ratio: clampRatio(raw.ratio) };
 }
 
-const ChangesModel = { key, pick, viewFor, samePath, openedShown, openedLabel, commitLabel, keepVersion, versions, splitName, locate, abs, clampRatio, parsePrefs };
+const ChangesModel = { key, pick, viewFor, samePath, openedShown, openedLabel, commitLabel, keepVersion, splitName, locate, abs, clampRatio, parsePrefs };
 globalThis.ChangesModel = ChangesModel;
 if (typeof module !== "undefined") module.exports = ChangesModel;
 })();
