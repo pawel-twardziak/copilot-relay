@@ -94,7 +94,7 @@ See [Delegated sessions](electron/README.md#delegated-sessions).
 A session can also ask to link an existing open session as its child (`adopt_session`) or to end such a link
 (`release_session`), only when the user asked for it in the conversation. Each request is a card in the app that the
 user must approve; the outcome arrives as a message from relay. A release only ends the link: both sessions stay open
-and keep their history. An adopted child owes no report, but it may still send one with `report_result`.
+and keep their history. An adopted child owes its parent a report like a delegated one: it ends its work with `report_result`.
 
 ```bash
 npm run app:install   # once
