@@ -47,6 +47,7 @@
       "session-list.mjs",
       "activity-panel.mjs",
       "context-tier.mjs",
+      "session-prompts.mjs",
       "jobs.mjs",
       "job-runner.mjs",
       "scheduler.mjs",
