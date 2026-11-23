@@ -381,6 +381,36 @@ test("reopens survive a new store instance", () => {
   assert.equal(new DelegationStore(file).reopenFor("cli:a", "cli:b"), null);
 });
 
+test("adopt writes a fresh link and drops an orphan's old task and date", async () => {
+  const { store, file } = setup(); // cli:child is linked to cli:parent
+  store.setTask("cli:child", "old task");
+  const before = store.linkOf("cli:child").createdAt;
+  store.forget("cli:parent"); // cli:child is an orphan now
+  await tick();
+  store.adopt("cli:child", "cli:other", "badacz");
+  const l = new DelegationStore(file).linkOf("cli:child"); // on disk
+  assert.deepEqual({ ...l, createdAt: 0 }, { parent: "cli:other", name: "badacz", reported: false, ended: false, createdAt: 0, adopted: true });
+  assert.ok(l.createdAt > before);
+  assert.equal(store.isAdopted("cli:child"), true);
+});
+
+test("link keeps adopted for the same parent (a rename) and unlink removes the link only", () => {
+  const { store, file } = setup();
+  store.link("cli:grand", "cli:child", "wnuk");
+  store.adopt("cli:child", "cli:parent", "badacz");
+  store.link("cli:child", "cli:parent", "nowa-nazwa");
+  assert.equal(store.isAdopted("cli:child"), true);
+  store.enqueue({ id: "r1", toKey: "cli:parent", from: "badacz", text: "report", prompt: "report" });
+  assert.equal(store.unlink("cli:child"), true);
+  assert.equal(store.unlink("cli:child"), false);
+  const fresh = new DelegationStore(file);
+  assert.equal(fresh.linkOf("cli:child"), null);
+  assert.equal(fresh.isAdopted("cli:child"), false);
+  assert.deepEqual(fresh.childrenOf("cli:child"), ["cli:grand"]); // its own children stay
+  assert.equal(fresh.linkOf("cli:grand").parentDeleted, undefined); // and are not orphaned
+  assert.equal(fresh.pending("cli:parent").length, 1); // a report already sent stays
+});
+
 test("a child can request its own child", () => {
   const { d, childControl } = setup();
   assert.match(d.requestCreate("cli:child", req), /Do not wait/);
