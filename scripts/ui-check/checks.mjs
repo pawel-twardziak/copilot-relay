@@ -2052,4 +2052,91 @@ export const checks = [
       assert.deepStrictEqual(await openedRows(), listed, "the opened rows after the reload");
     },
   },
+  {
+    // replies from sub-sessions wait in their own list until approved (messages as main sends them: fromChild)
+    name: "held-replies",
+    modes: ["off"],
+    async run(app) {
+      await firstTurn(app);
+      const child = (id, from, text = "first\nmore") => app.ev(`${V}.incoming(${JSON.stringify({ from, text, prompt: `P-${id}`, deliveryId: id, fromChild: true, wake: true })})`);
+      const rows = () => app.ev(`${V}.el.querySelectorAll(".held-row").length`);
+      const shownEl = (sel) => app.ev(`(() => { const e = ${V}.el.querySelector(${JSON.stringify(sel)}); return !!e && !e.hidden && e.offsetParent !== null; })()`);
+      const status = () => app.ev(`${V}.statusEl.textContent`);
+      const queued = () => app.ev(`${V}.queue.map((i) => i.prompt)`);
+      const clickIn = (sel, i = 0) => app.ev(`${V}.el.querySelectorAll(${JSON.stringify(sel)})[${i}].click()`);
+
+      // 1. two replies are held, not queued
+      await child("h1", "docs-9f8e7d");
+      await child("h2", "tests-41ac0b");
+      await frames(app);
+      assert.equal(await rows(), 2, "two held rows");
+      assert.equal(await app.ev(`${V}.el.querySelector(".held-from").textContent`), "docs-9f8e7d");
+      assert.equal(await app.ev(`${V}.el.querySelector(".held-text").textContent`), "first");
+      assert.equal(await shownEl(".queue-strip"), false, "the queue stays hidden");
+      assert.equal(await status(), "2 replies waiting for approval");
+      assert.equal(await app.ev(`document.querySelector(".item.active .held-mark")?.textContent ?? null`), "⏸ 2");
+      assert.equal(await shownEl(".held-switch"), true, "the switch shows with held replies");
+      // 2. a redelivery is ignored
+      await child("h1", "docs-9f8e7d");
+      assert.equal(await rows(), 2, "a redelivered held message adds no row");
+      // 3. a message that is not from a child goes the old way
+      await app.ev(`${V}.setBusy(true)`);
+      await app.ev(`${V}.incoming({ from: "relay", text: "note", prompt: "P-note", deliveryId: "n1", wake: true })`);
+      assert.equal(await rows(), 2);
+      assert.deepEqual(await queued(), ["P-note"]);
+      await app.ev(`${V}.queue.length = 0; ${V}.renderQueue(); ${V}.setBusy(false)`);
+      // 4. approve the second one: a turn starts
+      await clickIn(".held-approve", 1);
+      await app.check(`${V}.log.querySelectorAll(":scope > .msg.relay").length === 1`, "the approved reply's turn");
+      assert.equal(await rows(), 1);
+      assert.equal(await app.ev(`${V}.log.querySelector(":scope > .msg.relay .from").textContent`), "from tests-41ac0b");
+      await app.answerPermission(); // the scenario's second prompt asks once
+      await app.idle();
+      // 5. approving while busy queues it, delivered after the turn
+      await app.ev(`${V}.setBusy(true)`);
+      await clickIn(".held-approve", 0);
+      assert.equal(await rows(), 0);
+      assert.equal(await app.ev(`${V}.el.querySelector(".queue-from").textContent`), "from docs-9f8e7d:");
+      assert.deepEqual(await queued(), ["P-h1"]);
+      await app.ev(`${V}.setBusy(false)`);
+      await app.check(`${V}.queue.length === 0 && ${V}.log.querySelectorAll(":scope > .msg.relay").length === 2`, "the queued reply's turn");
+      await app.idle();
+      // 6. discard
+      await child("h3", "docs-9f8e7d");
+      await clickIn(".held-discard");
+      assert.equal(await rows(), 0);
+      assert.ok((await app.ev(`${V}.log.textContent`)).includes("Discarded a reply from docs-9f8e7d."));
+      // 7. the switch off moves everything to the queue, in order; later ones go straight there
+      await app.ev(`${V}.setBusy(true)`);
+      await child("h4", "docs-9f8e7d");
+      await child("h5", "tests-41ac0b");
+      await app.ev(`${V}.el.querySelector(".held-switch").click()`);
+      await app.check(`${V}.holdReplies === false`, "the switch off");
+      await frames(app);
+      assert.equal(await shownEl(".held"), false, ".held hidden");
+      assert.deepEqual(await queued(), ["P-h4", "P-h5"]);
+      await child("h6", "docs-9f8e7d");
+      assert.deepEqual(await queued(), ["P-h4", "P-h5", "P-h6"]);
+      assert.equal(await rows(), 0);
+      await app.ev(`${V}.el.querySelector(".held-switch").click()`);
+      await app.check(`${V}.holdReplies === true`, "the switch on");
+      assert.deepEqual(await queued(), ["P-h4", "P-h5", "P-h6"], "nothing moves back");
+      await app.ev(`${V}.queue.length = 0; ${V}.renderQueue(); ${V}.setBusy(false)`);
+      // 8. the wait note after a long wait
+      await app.ev(`${V}.setBusy(true)`);
+      await child("h7", "docs-9f8e7d");
+      await app.ev(`(() => { window.__realNow = Date.now; Date.now = () => window.__realNow() + 61000; })()`);
+      await clickIn(".held-approve");
+      await app.ev(`Date.now = window.__realNow`);
+      const [prompt] = await queued();
+      assert.ok(prompt.endsWith("call list_sessions for their current state.)"), prompt);
+      await app.ev(`${V}.queue.length = 0; ${V}.renderQueue(); ${V}.setBusy(false)`);
+      // 9. a dead parent: approving is off, discarding still works
+      await child("h8", "docs-9f8e7d");
+      await app.ev(`${V}.markDead({ code: 1, signal: null, stderr: "" })`);
+      await frames(app);
+      assert.equal(await app.ev(`${V}.el.querySelector(".held-approve").disabled`), true);
+      assert.equal(await app.ev(`${V}.el.querySelector(".held-discard").disabled`), false);
+    },
+  },
 ];

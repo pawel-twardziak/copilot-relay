@@ -245,6 +245,7 @@ function ago(iso) {
 let sessions = []; // from session/list: { sessionId, cwd, title, updatedAt }
 let links = []; // the broker's sub-session links (api.getLinks / api.onLinks), keys "cli:<sessionId>"
 let tree = SessionTree.index(links); // parent/child index over `links` (bare session ids)
+let heldByKey = {}; // the broker's count of held child replies per key "cli:<sessionId>" (for sessions not open here)
 const views = new Map(); // sessionId -> SessionView
 let activeId = null;
 let queueMidTurn = false; // setting: deliver queued messages while a turn runs
@@ -285,7 +286,7 @@ function isEditableBubble(el) {
 }
 
 class SessionView {
-  constructor({ sessionId, cwd, title, parentSessionId, seenDeliveries, pendingNotes, holdInbox }) {
+  constructor({ sessionId, cwd, title, parentSessionId, seenDeliveries, pendingNotes, holdInbox, held }) {
     Object.assign(this, { sessionId, cwd, title: title ?? "" });
     // set for a session created by another one (from relay:status); the sidebar and the relation bar use `tree`
     this.parentSessionId = parentSessionId ?? null;
@@ -308,6 +309,8 @@ class SessionView {
     this.groupEls = new Map(); // Activity groupId -> its subagent group element
     this.renderQueued = false;
     this.queue = []; // MessageQueue items (relay messages, your prompts sent while busy) waiting for delivery
+    this.held = held ?? []; // replies from sub-sessions waiting for your approval (not the queue): { id, from, text, prompt, fromCwd, deliveryId, arrivedAt }
+    this.holdReplies = true; // the per-session switch (stored only when off); on until api.getHoldReplies answers
     this.paused = false; // Stop with items queued: nothing is delivered automatically until resumed
     // prompts of this view pending: a mid-turn delivery overlaps the running one, one turn for the app (its tools,
     // switch point, interrupted prompts and your Stop: MessageQueue.createChain)
@@ -395,6 +398,9 @@ class SessionView {
     this.cmdPopup = h("div", { class: "cmd-popup", role: "listbox", hidden: true, onmousedown: (e) => e.preventDefault() });
     this.editText = h("span");
     this.queueEl = h("div", { class: "queue-strip", hidden: true });
+    this.heldEl = h("div", { class: "held", hidden: true });
+    this.holdSwitch = h("input", { type: "checkbox", class: "held-switch", checked: true, onchange: () => this.setHoldReplies(this.holdSwitch.checked) });
+    this.holdLabel = h("label", { class: "held-switch-label", hidden: true, title: "Replies from your sub-sessions wait here until you approve them" }, this.holdSwitch, " Approve replies from sub-sessions");
     this.editBar = h("div", { class: "edit-bar", hidden: true }, this.editText, h("button", { onclick: () => this.cancelEdit() }, "Cancel"));
 
     this.el = h(
@@ -417,10 +423,13 @@ class SessionView {
       this.relationsEl,
       this.row,
       this.editBar,
+      this.heldEl,
       this.queueEl,
       h("div", { class: "composer" }, this.cmdPopup, this.input, this.agentPicker, h("div", { class: "btns" }, this.sendBtn, this.stopBtn)),
-      h("div", { class: "status-bar" }, this.statusEl, this.bgEl), // the running line sits beside the status: no shift
+      h("div", { class: "status-bar" }, this.statusEl, this.holdLabel, this.bgEl), // the running line sits beside the status: no shift
     );
+    this.renderHeld(); // replies handed over from the view this one replaces
+    this.loadHoldSwitch();
     this.bgEl.onclick = () => {
       const first = this.activity.running().map((id) => this.groupEls.get(id)).find(Boolean);
       if (first?.classList.contains("in-panel")) this.showInPanel(first);
@@ -1132,7 +1141,76 @@ class SessionView {
 
   showQueueStatus() {
     const { busy, dead, deleting, paused } = this;
-    this.statusEl.textContent = MessageQueue.statusText({ busy, dead, deleting, queued: this.queue.length, paused });
+    this.statusEl.textContent = MessageQueue.statusText({ busy, dead, deleting, queued: this.queue.length, paused, held: this.held.length });
+  }
+
+  /** Draws the list of replies from sub-sessions above the queue; called after every change of `held`. */
+  renderHeld() {
+    const list = this.held;
+    this.heldEl.hidden = list.length === 0;
+    this.heldEl.replaceChildren();
+    if (list.length) {
+      this.heldEl.append(h("div", { class: "held-head" }, h("span", {}, HeldReplies.listTitle(list.length))));
+      for (const item of list) {
+        this.heldEl.append(
+          h(
+            "div",
+            { class: "held-row" },
+            h("span", { class: "held-from" }, item.from),
+            h("span", { class: "held-time", title: MessageTimes.full(item.arrivedAt) }, MessageTimes.clock(item.arrivedAt)),
+            h("span", { class: "held-text", title: item.text }, item.text.split("\n")[0]),
+            h("button", { class: "held-approve", title: "Send this reply to Copilot", disabled: this.dead || this.deleting, onclick: () => this.approveHeld(item) }, "Approve"),
+            h("button", { class: "held-discard", title: "Discard this reply", onclick: () => this.discardHeld(item) }, "✕"),
+          ),
+        );
+      }
+    }
+    this.holdLabel.hidden = !HeldReplies.showSwitch({ hasChildren: (tree.childrenOf.get(this.sessionId) ?? []).length > 0, held: list.length });
+    this.holdSwitch.checked = this.holdReplies;
+    this.holdSwitch.disabled = this.dead || this.deleting;
+    this.showQueueStatus();
+  }
+
+  /** A reply from a direct sub-session: it waits in the list until you approve it. */
+  hold(m) {
+    this.held.push({ id: ++queueItemSeq, from: m.from, text: m.text, prompt: m.prompt, fromCwd: m.fromCwd ?? null, deliveryId: m.deliveryId, arrivedAt: Date.now() });
+    this.renderHeld();
+    renderList();
+  }
+
+  /** Approving puts the reply in the queue (the one path to a prompt; its acknowledgement happens when it starts). */
+  approveHeld(item) {
+    const i = this.held.indexOf(item);
+    if (i < 0) return;
+    this.held.splice(i, 1);
+    this.enqueue({ kind: "relay", text: item.text, prompt: HeldReplies.approvedPrompt(item.prompt, item.arrivedAt, Date.now()), from: item.from, human: false, fromCwd: item.fromCwd, deliveryId: item.deliveryId, command: false });
+    this.renderHeld();
+    renderList();
+  }
+
+  discardHeld(item) {
+    const i = this.held.indexOf(item);
+    if (i < 0) return;
+    this.held.splice(i, 1);
+    api.relayAck(this.sessionId, item.deliveryId).catch(() => {}); // the broker must not deliver it again
+    this.system(`Discarded a reply from ${item.from}.`);
+    this.renderHeld();
+    renderList();
+  }
+
+  /** The switch: off sends every held reply to the queue (oldest first); on moves nothing back. */
+  async setHoldReplies(on) {
+    try {
+      await api.setHoldReplies(this.sessionId, on);
+    } catch (e) {
+      this.error(`Could not save the setting: ${e.message}`);
+      this.holdSwitch.checked = this.holdReplies; // the file was not written: the switch stays as it was
+      return;
+    }
+    this.holdReplies = on;
+    this.holdTouched = true;
+    if (!on) for (const item of [...this.held]) this.approveHeld(item);
+    this.renderHeld();
   }
 
   /** Draws the queue strip above the input; called after every change of the queue. */
@@ -1306,6 +1384,7 @@ class SessionView {
       this.pendingNotes.push(m.prompt);
       return;
     }
+    if (m.fromChild && m.deliveryId && this.holdReplies) return this.hold(m);
     // set by the broker for messages typed by a person in the relay GUI; a broker older than this app doesn't send it,
     // then the reserved-for-people name decides. It only re-opens the relay budget: relay text never attaches files.
     const human = m.human ?? m.from === "user";
@@ -2141,6 +2220,7 @@ class SessionView {
     this.relationsEl.replaceChildren(...parts);
     this.relationsEl.hidden = !parts.length;
     this.closeChildrenBtn.hidden = !openDescendants(this.sessionId).length;
+    this.holdLabel.hidden = !HeldReplies.showSwitch({ hasChildren: rel.children.length > 0, held: this.held.length });
   }
 
   get needsAttention() {
@@ -2503,12 +2583,34 @@ class SessionView {
     api.cancel(this.sessionId).catch((e) => this.error(e.message));
   }
 
+  loadHoldSwitch() {
+    api
+      .getHoldReplies(this.sessionId)
+      .then((on) => {
+        if (this.holdTouched || on !== false) return;
+        this.holdReplies = false;
+        for (const item of [...this.held]) this.approveHeld(item); // held while the answer was on its way
+        this.renderHeld();
+      })
+      .catch(() => {}); // unreadable: the default (on) stays
+  }
+
+  /** A view that is dead after the open does not keep the replies handed to it: the broker delivers them again. */
+  heldComeBack() {
+    if (!this.held.length) return;
+    for (const item of this.held) this.seenDeliveries.delete(item.deliveryId); // the broker delivers them again
+    this.system(`${this.held.length} replies from sub-sessions will come back when the session is open again.`);
+    this.held = [];
+    this.renderHeld();
+  }
+
   markDead({ code, signal, stderr }) {
     this.flush();
     this.dead = true;
     this.settleGroups(); // no ● and no "N subagents running" in a dead view
     this.clearEdit(); // the text stays in the box
     this.dismissPermissions();
+    this.renderHeld(); // Approve is off in a dead view; Discard stays
     this.error(`Copilot process exited (${code ?? signal}).${stderr ? "\n" + stderr : ""}\nClick the session in the list to resume it again.`);
     this.setBusy(false);
   }
@@ -2576,7 +2678,7 @@ async function openSession(s, { activate: show = true } = {}) {
     views.delete(s.sessionId);
     // resuming a dead view: what was waiting in it moves to the new one (unpaused: a new view), with the delivery
     // ids it took, so the broker's redelivery of a queued report is not taken twice
-    s = { ...s, seenDeliveries: s.seenDeliveries ?? existing.seenDeliveries, pendingNotes: s.pendingNotes ?? existing.pendingNotes };
+    s = { ...s, seenDeliveries: s.seenDeliveries ?? existing.seenDeliveries, pendingNotes: s.pendingNotes ?? existing.pendingNotes, held: s.held ?? existing.held };
   }
   const v = new SessionView(s);
   views.set(s.sessionId, v);
@@ -2613,6 +2715,7 @@ async function openSession(s, { activate: show = true } = {}) {
     v.dead = true;
     v.settleGroups(); // what was replayed before the failure keeps no ●
     v.error(`Could not resume this session: ${e.message}`);
+    v.heldComeBack();
     v.setBusy(false);
   } finally {
     replayEnds.delete(replayId);
@@ -2654,13 +2757,13 @@ function dropView(id) {
  *  pause). keepFollowUp: the history is unchanged, so a task waiting to be continued after the answers (paused by
  *  your Stop) still waits; false when the history was cut (the task may be gone with it). */
 async function reopenView(old, error, { holdInbox = false, typed, keepFollowUp = true } = {}) {
-  const { sessionId, cwd, title, queue, paused, parentSessionId, seenDeliveries, pendingNotes } = old;
+  const { sessionId, cwd, title, queue, paused, parentSessionId, seenDeliveries, pendingNotes, held } = old;
   const followUpDue = keepFollowUp && old.followUp.answerDue();
   typed ??= old.recallEl ? old.draft : old.input.value; // what you typed (not a recalled earlier message)
   if (views.get(sessionId) === old) views.delete(sessionId);
   old.el.remove();
   // handed over before the replay: a report redelivered while the session reopens must already count as seen
-  await openSession({ sessionId, cwd, title, parentSessionId, seenDeliveries, pendingNotes, holdInbox });
+  await openSession({ sessionId, cwd, title, parentSessionId, seenDeliveries, pendingNotes, holdInbox, held });
   const v = views.get(sessionId);
   if (!v) return;
   if (error) v.error(error);
@@ -2807,6 +2910,7 @@ function openRelative(id) {
 /** showProject: the session is listed outside its project (pinned), so its folder goes into the meta line.
  *  depth: its level under a parent shown in the same group (0 = top level, with "child of X" when it has a parent). */
 function item(s, v, { showProject = false, depth = 0 } = {}) {
+  const heldCount = HeldReplies.sidebarCount({ view: v, brokerHeld: heldByKey, sessionId: s.sessionId });
   const pinned = ui.pinned.has(s.sessionId);
   const parent = tree.parentOf.get(s.sessionId);
   const relation = depth > 0 ? null : parent && parent !== s.sessionId ? `child of ${parentLabel(parent)}` : tree.link.get(s.sessionId)?.parentDeleted ? "parent deleted" : null;
@@ -2828,6 +2932,7 @@ function item(s, v, { showProject = false, depth = 0 } = {}) {
         v && h("span", v.dead ? { class: "dot dead", title: "Its Copilot process ended" } : { class: "dot" + (v.busy ? " busy" : "") }),
         h("b", {}, shortTitle(v?.title || s.title)),
         v?.needsAttention && h("span", { class: "attention", title: "Waiting for your answer" }, "!"),
+        heldCount > 0 && h("span", { class: "held-mark", title: HeldReplies.markTitle(heldCount) }, `⏸ ${heldCount}`),
       ),
       h("div", { class: "m" }, [relation, showProject && baseName(s.cwd), s.updatedAt ? ago(s.updatedAt) : "", s.sessionId.slice(0, 8)].filter(Boolean).join(" · ")),
     ),
@@ -3436,6 +3541,7 @@ let freshLinks = false;
 function setLinks(next) {
   const list = Array.isArray(next) ? next : next?.links;
   links = Array.isArray(list) ? list : [];
+  heldByKey = (!Array.isArray(next) && next?.held) || {};
   tree = SessionTree.index(links);
   renderList(); // redraws the relation bars too
 }
