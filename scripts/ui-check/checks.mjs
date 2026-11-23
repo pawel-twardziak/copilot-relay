@@ -1201,6 +1201,7 @@ export const checks = [
       await click(0, true);
       assert.equal(await answered(0), "→ Linked");
       await app.check(`tree.parentOf.get(${JSON.stringify(CHILD)}) === ${JSON.stringify(PARENT)}`, "the link in the tree (links:update)");
+      assert.equal(await linkedOnBroker(), true, "linked on the broker after the approval");
       await notice(C, ":scope > .msg.system", `The user made this session a child of "${parentName}". Send it results with the report_result tool.`, "the child's notice");
       await notice(V, ":scope > .msg.relay", `Session "${childName}" is now your child. It can send you results with report_result.`, "the parent's notice");
       await app.check(`${C}.parentSessionId === ${JSON.stringify(PARENT)}`, "the child's parentSessionId");
@@ -1218,6 +1219,7 @@ export const checks = [
       assert.equal(await answered(1), "→ Rejected");
       await notice(V, ":scope > .msg.relay", `The user rejected the request to release "${childName}".`, "the parent's notice of the rejection");
       assert.equal(await parentOf(), PARENT, "the child still under the parent");
+      assert.equal(await linkedOnBroker(), true, "still linked on the broker after the rejection");
 
       // 5. asked again and approved: released
       await app.idle();
@@ -1226,6 +1228,7 @@ export const checks = [
       await click(2, true);
       assert.equal(await answered(2), "→ Released");
       await app.check(`tree.parentOf.get(${JSON.stringify(CHILD)}) !== ${JSON.stringify(PARENT)}`, "the link gone from the tree");
+      assert.equal(await linkedOnBroker(), false, "unlinked on the broker after the release");
       await app.check(`${C}.parentSessionId === null`, "the child's parentSessionId cleared");
       await notice(C, ":scope > .msg.system", `The user ended the link to "${parentName}". You no longer report to it.`, "the child's notice of the release");
 
