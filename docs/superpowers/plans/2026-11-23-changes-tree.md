@@ -514,4 +514,4 @@ test("opened files: a block of its own, absent when empty; a row selects, its bu
 - [ ] **Step 5:** commit `docs: changes tree deferred items`.
 
 Findings of the task reviews and of the whole-branch review that are not fixed go into the new backlog file before
-the worktree is removed (repository rule). The release is `v0.20.0`, tagged on the merge commit on `main`.
+the worktree is removed (repository rule). The release is `v0.21.0`, tagged on the merge commit on `main`.

@@ -156,7 +156,7 @@ links may no longer be in the chat. The list is then the only way back to those 
   clicks on changed files push the unchanged ones out.
 - **An `Opened files` row is read without a question only when it is still the file that was opened.** Stricter
   than a loose file (which the agent's own edit vouches for), in line with the second anti-goal.
-- **Release:** minor, `v0.20.0`, on the merge commit.
+- **Release:** minor, `v0.21.0`, on the merge commit (`v0.20.0` went to link sessions while this was built).
 
 ## Known limits (to the backlog when the branch is finished)
 
