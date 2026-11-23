@@ -125,6 +125,10 @@ Seen in the final review of the branch and judged to exist before it:
   `scripts/ui-check/checks.mjs` asserts the pane's width (0), not the absence of the `changesDiff` call.
 - The `changes-split` step that unfolds a file and presses `⟳` does not prove that the stale commit answer was
   dropped; the `keepVersion` fallback (a selected commit that is gone) has no end-to-end check.
+- `changes-split` in `scripts/ui-check/checks.mjs`, the last step (the old stored preference): the app is closed
+  with `close({ keep: true })` and launched again on the same folder. If that second `launch` throws, the kept
+  folder is never removed: the call sits outside the `try`, and the outer `close()` does nothing on a second call.
+  The `relaunch` helper in the same file has the same pattern. Test cleanup only.
 - `changes-opened` in `scripts/ui-check/checks.mjs`: the assertion after the reload compares `[]` with `[]` on
   win32 (`listed` is empty there), so it asserts nothing on Windows.
 - Test gaps of `changes-model.test.mjs`: `openedLabel` on win32 for a path outside the cwd, `pick` with loose and
