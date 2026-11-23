@@ -46,7 +46,10 @@ and modification time of `events.jsonl`, `activityStamp`); the whole-file and to
 ## D. Tests and housekeeping
 
 7. **The last fix (an existing but unreadable `events.jsonl` gives unknown, `exists` in
-   `electron/last-activity.mjs`) was not reviewed again**; it has a test.
+   `electron/last-activity.mjs`) was not reviewed again**; it has a test, which is skipped on Windows: it uses a
+   folder named `events.jsonl` as the unreadable file, and Windows opens a folder as an empty file (the test failed
+   on the Windows runner at v0.23.1, the product code was not changed). A locked or denied file on Windows
+   (EBUSY, EPERM) is therefore not tested.
 8. **The "too big to search" test writes a 65 MiB file** (`electron/test/last-activity.test.mjs`): sparse on
    Linux, not on NTFS, so it may be slow on the Windows CI runner.
 9. **Not run on Windows**: reading `events.jsonl` while Copilot writes it, a delete racing an open read handle,
