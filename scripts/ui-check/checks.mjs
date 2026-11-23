@@ -203,10 +203,8 @@ async function firstTurn(app) {
 }
 /** A second session (in the launch's folder) that has played panel-scenario's first prompt; it is the active view. */
 async function secondView(app) {
-  const id = await app.ev(`(async () => {
-    await newSession(${V}.cwd.replace(/\\/[^/]+$/, ""));
-    return [...views.keys()].find((id) => id !== "scripted-work") ?? null;
-  })()`);
+  await app.startSession(app.dir); // the parent folder of the scenario's session
+  const id = await app.ev(`[...views.keys()].find((id) => id !== "scripted-work") ?? null`);
   assert.ok(id, "a second view");
   const v = `views.get(${JSON.stringify(id)})`;
   await app.ev(`(() => { const v = ${v}; v.input.value = "Look around."; v.input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); })()`);
@@ -1187,7 +1185,7 @@ export const checks = [
       await app.newSession();
       const childDir = path.join(app.dir, "child");
       mkdirSync(childDir);
-      await app.ev(`newSession(${JSON.stringify(childDir)})`);
+      await app.startSession(childDir);
       await app.check(`!!${C} && !${C}.busy`, "the child session");
       await app.ev(`activate(${JSON.stringify(PARENT)})`);
       const connected = (v) => `(() => { const v = ${v}; return !!v?.relayName && !v.relayChip.hidden && !v.relayChip.classList.contains("off"); })()`;
@@ -1313,7 +1311,7 @@ export const checks = [
       await app.newSession();
       const childDir = path.join(app.dir, "child");
       mkdirSync(childDir);
-      await app.ev(`newSession(${JSON.stringify(childDir)})`);
+      await app.startSession(childDir);
       await app.check(`!!${C} && !${C}.busy`, "the child session");
       await app.ev(`activate(${JSON.stringify(PARENT)})`);
       const connected = (v) => `(() => { const v = ${v}; return !!v?.relayName && !v.relayChip.hidden && !v.relayChip.classList.contains("off"); })()`;
@@ -1406,10 +1404,8 @@ export const checks = [
       const panel = (await savedMode(app)) !== "off";
       await app.resize(1280, 500);
       await app.newSession();
-      const other = await app.ev(`(async () => {
-        await newSession(${V}.cwd.replace(/\\/[^/]+$/, "")); // a second session, in the launch's folder
-        return [...views.keys()].find((id) => id !== "scripted-work") ?? null;
-      })()`);
+      await app.startSession(app.dir); // a second session, in the launch's folder
+      const other = await app.ev(`[...views.keys()].find((id) => id !== "scripted-work") ?? null`);
       assert.ok(other, "a second view");
       await app.ev(`activate("scripted-work")`);
       await app.send("Explain the files.");
@@ -1564,10 +1560,8 @@ export const checks = [
     async run(app) {
       await app.resize(1280, 500);
       await app.newSession();
-      const other = await app.ev(`(async () => {
-        await newSession(${V}.cwd.replace(/\\/[^/]+$/, "")); // a second session, in the launch's folder
-        return [...views.keys()].find((id) => id !== "scripted-work") ?? null;
-      })()`);
+      await app.startSession(app.dir); // a second session, in the launch's folder
+      const other = await app.ev(`[...views.keys()].find((id) => id !== "scripted-work") ?? null`);
       assert.ok(other, "a second view");
       await activate(app, "scripted-work");
       await app.send("Explain the files.");
@@ -2343,6 +2337,68 @@ export const checks = [
       } finally {
         rmSync(app.dir, { recursive: true, force: true });
       }
+    },
+  },
+  {
+    // a new session opens the prompt editor in #prompt-dialog: the default part folded and read-only, a template
+    // picked into an empty text area at once, one picked over typed text only after the inline question; Ctrl+Enter
+    // starts the session with the text, Cancel starts nothing
+    name: "new-session-prompt",
+    modes: ["off"],
+    settings: { promptDefault: "D", promptTemplates: [{ id: "t1", name: "Rev", text: "Review only." }] },
+    async run(app) {
+      const work = path.join(app.dir, "work");
+      const starts = () => {
+        try {
+          return JSON.parse(readFileSync(path.join(work, ".scripted-agent.json"), "utf8")).starts ?? [];
+        } catch {
+          return [];
+        }
+      };
+      const D = `document.querySelector("#prompt-dialog")`;
+      const own = () => app.ev(`${D}.querySelector(".pe-own").value`);
+      const pick = (id) => app.ev(`(() => { const s = ${D}.querySelector(".pe-template"); s.value = ${JSON.stringify(id)}; s.dispatchEvent(new Event("change", { bubbles: true })); })()`);
+      const asking = () => app.ev(`(() => { const a = ${D}.querySelector(".pe-ask"); return !!a && !a.hidden && a.getClientRects().length > 0; })()`);
+      const opened = () => app.check(`${D}.open`, "the prompt dialog");
+
+      await app.ev(`(window.__newSession = newSession(${JSON.stringify(work)}), true)`);
+      await opened();
+      assert.equal(await app.ev(`${D}.querySelector("h2").textContent`), `New session in ${work}`);
+      assert.equal(await app.ev(`document.querySelector("#prompt-ok").textContent`), "Start");
+      // the folds: the default part, read-only; no child part for a new session
+      const folds = await app.ev(`[...${D}.querySelectorAll("details")].map((d) => [d.querySelector("summary").textContent, d.querySelector("pre")?.textContent ?? null, d.open])`);
+      assert.deepEqual(folds, [["Default (from Settings)", "D", false]]);
+      assert.equal(await app.ev(`${D}.textContent.includes("Working with the parent")`), false);
+      // a template into the empty text area: at once
+      await pick("t1");
+      assert.equal(await own(), "Review only.");
+      assert.equal(await asking(), false);
+      // over typed text: the inline question, and Keep leaves the text
+      await app.ev(`(() => { const t = ${D}.querySelector(".pe-own"); t.value += " Be brief."; t.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+      await pick("t1");
+      assert.equal(await asking(), true, "the Replace/Keep question");
+      assert.equal(await own(), "Review only. Be brief.");
+      await app.ev(`${D}.querySelector(".pe-keep").click()`);
+      assert.equal(await asking(), false);
+      assert.equal(await own(), "Review only. Be brief.");
+      // Ctrl+Enter starts the session with the default part and the text
+      await app.ev(`${D}.querySelector(".pe-own").dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true }))`);
+      await app.ev(`window.__newSession`, "newSession to return");
+      await app.check(`(() => { const v = views.get("scripted-work"); return v && !v.busy; })()`, "the new session");
+      assert.equal(await app.ev(`${D}.open`), false);
+      assert.deepEqual(starts().at(-1)?.instructions, ["D\n\nReview only. Be brief."]);
+      // Cancel: no process, no view
+      const n = starts().length;
+      const shown = await app.ev(`views.size`);
+      await app.ev(`(window.__newSession = newSession(${JSON.stringify(work)}), true)`);
+      await opened();
+      await app.ev(`${D}.querySelector(".pe-own").value = "Never."`);
+      await app.ev(`document.querySelector("#prompt-cancel").click()`);
+      await app.ev(`window.__newSession`, "newSession to return");
+      assert.equal(await app.ev(`${D}.open`), false);
+      await new Promise((r) => setTimeout(r, 500)); // a start would have written its entry by now
+      assert.equal(starts().length, n, "no Copilot started");
+      assert.equal(await app.ev(`views.size`), shown, "no view");
     },
   },
 ];

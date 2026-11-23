@@ -2744,11 +2744,17 @@ async function openSession(s, { activate: show = true } = {}) {
   }
 }
 
-/** own: the session's own prompt part. */
-async function newSession(cwd, own = "") {
+/** A new session in cwd (picked when not given): the prompt editor asks for its own prompt part first; Cancel
+ *  starts nothing. */
+async function newSession(cwd) {
   try {
+    if ($("#prompt-dialog").open) return; // one editor at a time
     cwd ??= await api.pickDir();
     if (!cwd) return;
+    const s = await api.getSettings();
+    const editor = PromptEditor.createPromptEditor({ defaultPart: s.promptDefault ?? "", childPart: null, templates: s.promptTemplates ?? [], own: "" });
+    const own = await PromptEditor.openPromptDialog({ title: `New session in ${cwd}`, okLabel: "Start", editor });
+    if (own == null) return;
     setStatus(`Starting Copilot in ${cwd}…`);
     const res = await api.newSession(cwd, own);
     setStatus("");

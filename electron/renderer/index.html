@@ -103,6 +103,19 @@
       </form>
     </dialog>
 
+    <!-- the prompt editor (prompt-editor.js: openPromptDialog fills the title, the body, the note and the OK label) -->
+    <dialog id="prompt-dialog">
+      <form method="dialog">
+        <h2 id="prompt-title"></h2>
+        <div id="prompt-body"></div>
+        <p class="hint" id="prompt-note" hidden></p>
+        <div class="dialog-actions">
+          <button id="prompt-cancel" value="cancel">Cancel</button>
+          <button id="prompt-ok" value="ok" class="primary">OK</button>
+        </div>
+      </form>
+    </dialog>
+
     <div id="viewer" hidden tabindex="-1" role="dialog" aria-label="Image viewer">
       <div class="viewer-stage"><img alt="" draggable="false" /></div>
       <div class="viewer-bar">
@@ -185,6 +198,7 @@
     <script src="changes-list.js"></script>
     <script src="file-preview.js"></script>
     <script src="broker-restart.js"></script>
+    <script src="prompt-editor.js"></script>
     <script src="app.js"></script>
   </body>
 </html>
