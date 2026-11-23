@@ -1563,6 +1563,9 @@ export const checks = [
       const work = await changesRepo(app);
       await notesWritten(app, work);
       writeFileSync(path.join(work, "README.md"), "# changed\n"); // stays uncommitted
+      writeFileSync(path.join(work, "b.txt"), "b\ncommitted\n"); // committed, no uncommitted change
+      await gitIn(work, ["add", "b.txt"]);
+      await gitIn(work, ["commit", "-q", "-m", "second"]);
       const openBrowser = async () => {
         await app.ev(`[...${V}.el.querySelectorAll(".head button")].find((b) => b.textContent === "Changes").click()`);
         await fpListed(app);
@@ -1631,6 +1634,14 @@ export const checks = [
       })()`);
       assert.deepStrictEqual(await selectAllIn(".fp-content .fp-md"), { content: true, diff: false }, "Ctrl+A in the file pane");
       assert.deepStrictEqual(await selectAllIn(".fp-diff"), { content: false, diff: true }, "Ctrl+A in the diff pane");
+
+      // a file with only committed changes, edited on disk while selected: its uncommitted diff shows without ⟳
+      await fpSelect(app, "b.txt");
+      assert.equal(await app.ev(`${FP}.querySelector(".fp-diff .fp-msg")?.textContent`), "No changes.", "b.txt before the edit");
+      await contentShows("committed"); // read, so watched
+      appendFileSync(path.join(work, "b.txt"), "edited on disk\n");
+      await contentShows("edited on disk");
+      await app.check(`${FP}.querySelectorAll(".fp-diff .dv .dv-line.add").length > 0`, "b.txt's diff after the edit on disk");
 
       await app.ev(`${fileBtn}.click()`);
       const single = await panes();

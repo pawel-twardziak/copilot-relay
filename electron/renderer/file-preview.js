@@ -522,7 +522,8 @@ function createFilePreview({ api, h, md, onStatus }) {
       diffEl.scrollLeft = scrollLeft;
     };
     const say = (text) => show(h("div", { class: "fp-msg" }, text));
-    if (id === "uncommitted" && !file.uncommitted) return say("No changes."); // only committed changes: no git call
+    // only committed changes: no git call; a change on disk (keep) asks git, the list's flags are older than it
+    if (!keep && id === "uncommitted" && !file.uncommitted) return say("No changes.");
     try {
       // an untracked file has no diff: its content is the addition
       const r = id === "uncommitted" && file.state === "?" ? { added: true } : await api.changesDiff(v.sessionId, root, rel, id);
