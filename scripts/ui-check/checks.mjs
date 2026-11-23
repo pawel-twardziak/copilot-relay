@@ -1129,6 +1129,7 @@ export const checks = [
       assert.match(await app.ev(release), /Unlink sessions/);
       assert.match(await app.ev(release), /backend-a1b2c3 asks to release its sub-session docs-9f8e7d\./);
       assert.match(await app.ev(release), /Update the API reference/);
+      assert.match(await app.ev(`${V}.el.querySelectorAll(".perm.link")[1].querySelector(".task")?.textContent ?? ""`), /Update the API reference/, "the task sits in .perm.link .task");
       assert.match(await app.ev(release), /becomes a top-level session and keeps its own sub-sessions\./);
     },
   },
@@ -1159,6 +1160,7 @@ export const checks = [
 
       // the broker's own view: a session it lists as online has registered with it
       const online = async (id) => (await (await fetch(`${app.broker.url}/api/peer/list?key=none`)).json()).find((p) => p.key === `cli:${id}`)?.online;
+      const linkedOnBroker = async () => (await (await fetch(`${app.broker.url}/api/links`)).json()).links.some((l) => l.key === `cli:${CHILD}` && l.parent === `cli:${PARENT}`);
       const parentOf = () => app.ev(`tree.parentOf.get(${JSON.stringify(CHILD)}) ?? null`);
       const texts = (v, sel) => app.ev(`[...${v}.log.querySelectorAll(${JSON.stringify(sel)})].map((e) => e.textContent)`);
       const childPrompts = () => app.ev(`${C}.log.querySelectorAll(":scope > .msg.user, :scope > .msg.relay").length`);
@@ -1192,7 +1194,7 @@ export const checks = [
       const adopt = await openCard(0);
       assert.match(adopt, /Link sessions/);
       assert.ok(adopt.includes(childName), adopt);
-      assert.notEqual(await parentOf(), PARENT, "nothing linked before the answer");
+      assert.equal(await linkedOnBroker(), false, "nothing linked before the answer");
 
       // 2. approved: linked in the tree and in both views; the child is told without a turn of its own
       const childBefore = await childPrompts();
@@ -1238,7 +1240,7 @@ export const checks = [
       await app.check(connected(V), "the parent's relay chip connected again");
       await click(3, true);
       assert.equal(await answered(3), "This request is no longer pending.");
-      assert.notEqual(await parentOf(), PARENT, "nothing linked after the restart");
+      assert.equal(await linkedOnBroker(), false, "nothing linked after the restart");
 
       // 7. the child closes while the card is open: the broker refuses at approval
       await app.idle();
@@ -1250,7 +1252,7 @@ export const checks = [
       await until(async () => (await online(CHILD)) === false, "the broker to see the child offline");
       await click(4, true);
       assert.equal(await answered(4), `Session "${childName}" is closed now. Open it and ask again.`);
-      assert.notEqual(await parentOf(), PARENT, "nothing linked after the refusal");
+      assert.equal(await linkedOnBroker(), false, "nothing linked after the refusal");
     },
   },
   {

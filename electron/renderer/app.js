@@ -2113,7 +2113,8 @@ class SessionView {
       adopt
         ? h("div", { class: "q" }, h("b", {}, parentName), " asks to take ", h("b", {}, childName), " as its sub-session.")
         : h("div", { class: "q" }, h("b", {}, parentName), " asks to release its sub-session ", h("b", {}, childName), "."),
-      h("dl", { class: "fields" }, field("Session", childName), adopt ? field("Folder", childCwd) : field("Task", task)),
+      h("dl", { class: "fields" }, field("Session", childName), adopt ? field("Folder", childCwd) : []),
+      ...(!adopt && task ? [h("div", { class: "task" }, task)] : []),
       h(
         "div",
         { class: "note" },

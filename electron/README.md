@@ -201,11 +201,11 @@ an ordinary session: it appears in the list, you can open it, read what it did, 
   it calls **`adopt_session(name)`**; to end the link to one of its direct children, **`release_session(name)`**.
   Either shows a card in the parent's view, **Link sessions** or **Unlink sessions**, with the child's name and its
   folder (or its task), with **Approve** and **Reject**; as for a new session, nothing changes without your click.
-  Only an open desktop-app session that has no parent can be adopted, and never one of the caller's ancestors. An
+  Only an open desktop-app session that has no parent (or whose parent was deleted) can be adopted, and never one of the caller's ancestors. An
   adopted child is a sub-session like any other (the tree, closing, reopen cards, the delete dialog, `report_result`),
   except that it was given no task, so it owes no report: it sends no "ended without reporting" notice and the quit
   question does not count it. A released child becomes a top-level session and keeps its own sub-sessions; reports it
-  already sent are still delivered. Both sessions are told the outcome. A card whose answer did not reach the
+  already sent are still delivered. The parent is told the outcome; an open child is told when the link is made or ended. A card whose answer did not reach the
   broker keeps its buttons; one the broker no longer has (after a broker restart, or when one of the two sessions
   went away) says "This request is no longer pending."
 - **Permissions.** A child starts with no automatic approvals beyond the relay tools, and asks like any other session.
