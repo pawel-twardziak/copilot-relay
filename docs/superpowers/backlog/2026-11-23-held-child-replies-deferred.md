@@ -70,6 +70,12 @@ the fix wave moved them; the symbol is given instead.
 19. **I1 has no unit test.** The `relay:ack` handler lives in `main.mjs`, which cannot be imported in a test; the
     fallback was verified by running the existing checks only. *Proposal:* a `held-e2e` step that closes a dead view
     after a discard and reopens it (needs a child process that exits).
+20. **Stale comment (fix-wave re-review).** `scripts/ui-check/checks.mjs`, `held-replies` step 9: the comment says the
+    discard of a dead view does not reach the broker because the harness has no relay client. Since I1 it does go to
+    the broker over HTTP; it fails there only because nothing listens on the check's port. The assertions are right.
+21. **`brokerPost` has no fetch timeout** (`electron/main.mjs`, `brokerPost`). The `relay:ack` fallback inherits it: against
+    a hung broker the renderer's `ackDiscarded` promise stays pending. The `discarded` set still covers the reply, so
+    nothing is lost. *Proposal:* an `AbortSignal.timeout` on the fetch.
 
 ## Known limitations and open manual checks
 
