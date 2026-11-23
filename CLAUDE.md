@@ -21,8 +21,3 @@ in the repo. A scratch ledger, a worktree or the conversation is not a backlog: 
 A version tag (`vX.Y.Z`, annotated, message = the tag name) goes on the merge commit on `main`
 (`git merge --no-ff`), never on a commit of a feature or fix branch. Pushing a `v*` tag starts the "Desktop app"
 release workflow.
-
-## Reviews
-
-Review subagents (design reviews, task reviews, re-reviews, whole-branch reviews) run on the strongest available
-model with high reasoning effort. Implementers may use cheaper models.
