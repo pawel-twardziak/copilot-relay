@@ -5,6 +5,9 @@
 //   { perm: toolCall }   a session/request_permission; the next step waits for its answer
 //   { wait: ms }         a pause
 //   { end: stopReason }  the prompt's answer; the steps after it are played after the answer
+//   { relay: "prompt" }  a prompt "adopt_session <name>" or "release_session <name>" calls that tool of the MCP server
+//                        named relay (from session/new|load's mcpServers) with { name }, and sends its text reply as an
+//                        agent message chunk; any other prompt (a relay notice "[from relay]…") does nothing
 // session/cancel (Stop) ends the running prompt as Copilot does: it answers "cancelled" (if not answered yet) and
 // plays none of its remaining steps; a pause or an unanswered permission request it waits on ends at once.
 // Every prompt (as a user_message_chunk, as Copilot replays it) and every update sent is recorded in
@@ -24,15 +27,15 @@ const send = (msg) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...m
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const sessionIdOf = (cwd) => process.env.SCRIPTED_SESSION_ID || `scripted-${path.basename(cwd)}`;
 
-let session = null; // { id, file, updates }
+let session = null; // { id, file, updates, mcpServers }
 let nextId = 0;
 const answers = new Map(); // id of a request we sent -> resolve
 let cancelPlaying = () => {}; // session/cancel: ends the prompt being played (play)
 
-function open(cwd, fresh) {
+function open(cwd, fresh, mcpServers) {
   const file = path.join(cwd, ".scripted-agent.json");
   const updates = fresh ? [] : JSON.parse(readFileSync(file, "utf8")).updates;
-  session = { id: sessionIdOf(cwd), file, updates };
+  session = { id: sessionIdOf(cwd), file, updates, mcpServers: mcpServers ?? [] };
   if (fresh) save();
 }
 const save = () => writeFileSync(session.file, JSON.stringify({ sessionId: session.id, updates: session.updates }, null, 2));
@@ -51,7 +54,29 @@ function ask(method, params) {
   return new Promise((resolve) => answers.set(id, resolve));
 }
 
-async function play(rpcId, steps) {
+/** { relay: "prompt" }: the tool's text reply for a prompt that names adopt_session or release_session, else null. */
+async function relayTool(text) {
+  const m = /^(adopt_session|release_session) ([\s\S]*)$/.exec(text);
+  if (!m) return null;
+  const server = session.mcpServers.find((s) => s.name === "relay");
+  if (!server) return "scripted agent: no MCP server named relay was given";
+  // loaded here, so only the scenarios that call a relay tool pay for it
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { StreamableHTTPClientTransport } = await import("@modelcontextprotocol/sdk/client/streamableHttp.js");
+  const mcp = new Client({ name: "scripted-agent", version: "1" });
+  try {
+    const headers = Object.fromEntries((server.headers ?? []).map((h) => [h.name, h.value]));
+    await mcp.connect(new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers } }));
+    const r = await mcp.callTool({ name: m[1], arguments: { name: m[2] } });
+    return r.content.filter((c) => c.type === "text").map((c) => c.text).join("");
+  } catch (e) {
+    return `scripted agent: ${m[1]} failed: ${e.message}`; // in the chat, so the check that waits for the reply shows it
+  } finally {
+    await mcp.close().catch(() => {});
+  }
+}
+
+async function play(rpcId, steps, text) {
   let answered = false;
   const answer = (stopReason) => {
     if (!answered) send({ id: rpcId, result: { stopReason } });
@@ -78,6 +103,9 @@ async function play(rpcId, steps) {
         ],
       });
       await Promise.race([asked, cancelled]);
+    } else if ("relay" in step) {
+      const reply = await Promise.race([relayTool(text), cancelled]);
+      if (reply && !stopped) update({ sessionUpdate: "agent_message_chunk", messageId: `relay-${session.updates.length}`, content: { type: "text", text: reply } });
     } else if ("wait" in step) await Promise.race([sleep(step.wait), cancelled]);
     else if ("end" in step) answer(step.end);
   }
@@ -87,12 +115,12 @@ async function play(rpcId, steps) {
 const handlers = {
   initialize: () => ({ protocolVersion: 1, agentCapabilities: { loadSession: true } }),
   "session/list": () => ({ sessions: [] }),
-  "session/new": ({ cwd = process.cwd() } = {}) => {
-    open(cwd, true);
+  "session/new": ({ cwd = process.cwd(), mcpServers } = {}) => {
+    open(cwd, true, mcpServers);
     return { sessionId: session.id, configOptions: [] };
   },
-  "session/load": async ({ cwd = process.cwd() } = {}) => {
-    open(cwd, false);
+  "session/load": async ({ cwd = process.cwd(), mcpServers } = {}) => {
+    open(cwd, false, mcpServers);
     for (const u of session.updates) update(u, false);
     if (load.delay) await sleep(load.delay);
     if (load.error) throw new Error(load.error);
@@ -110,7 +138,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     const n = session.updates.filter((u) => u.sessionUpdate === "user_message_chunk").length;
     session.updates.push({ sessionUpdate: "user_message_chunk", content: { type: "text", text } });
     save();
-    play(msg.id, prompts[n] ?? []);
+    play(msg.id, prompts[n] ?? [], text);
   } else if (msg.method === "session/cancel") cancelPlaying();
   else if (msg.id != null) {
     Promise.resolve()
