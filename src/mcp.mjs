@@ -132,7 +132,7 @@ function buildServer(registry, getKey, { mailbox, delegation = null, fixedKey = 
       "report_result",
       {
         description:
-          "Delegated sessions only: send your final result to your parent session (the one that created or adopted you). Use it once, when your work is done.",
+          "Child sessions only: send your final result to your parent session (the one that created or adopted you). Use it once, when your work is done.",
         inputSchema: { text: z.string().min(1).describe("The result to report") },
       },
       async ({ text: t }) => {
