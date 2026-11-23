@@ -141,3 +141,15 @@ test("pick: an opened row is kept while it is listed, and is the last fallback",
   assert.equal(ChangesModel.pick(d, k(null, "/o/x.txt"), "linux"), k(null, "/o/x.txt"));
   assert.equal(ChangesModel.pick(d, k(null, "/r/a.txt"), "linux"), k("/r", "a.txt")); // hidden: it moved up
 });
+
+test("pick: the selection follows a file that moves between the two lists", () => {
+  const k = ChangesModel.key;
+  const up = { repos: [repo("/r", [file("z.txt"), file("a.txt")])], loose: [], opened: ["/r/a.txt"] };
+  assert.equal(ChangesModel.pick(up, k(null, "/r/a.txt"), "linux"), k("/r", "a.txt"));
+  const down = { repos: [], loose: [], opened: ["/o/x.txt", "/r/a.txt"] };
+  assert.equal(ChangesModel.pick(down, k("/r", "a.txt"), "linux"), k(null, "/r/a.txt"));
+  const win = { repos: [repo("C:\\R", [file("z.txt"), file("Sub/A.txt")])], loose: [], opened: ["c:\\r\\sub\\a.txt"] };
+  assert.equal(ChangesModel.pick(win, k(null, "c:\\r\\sub\\a.txt"), "win32"), k("C:\\R", "Sub/A.txt"));
+  assert.equal(ChangesModel.pick(up, k("/r", "gone.txt"), "linux"), k("/r", "z.txt"));
+  assert.equal(ChangesModel.pick(up, k(null, "/nowhere"), "linux"), k("/r", "z.txt"));
+});

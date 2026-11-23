@@ -67,6 +67,21 @@ function pick(data, prevKey, platform) {
     for (const r of repos) for (const f of r.files ?? []) if (key(r.root, f.path) === prevKey) return prevKey;
     for (const p of loose) if (key(null, p) === prevKey) return prevKey;
     for (const p of opened) if (key(null, p) === prevKey) return prevKey;
+    // the file moved between the changes list and the opened files: follow it
+    let prev = null;
+    try {
+      prev = JSON.parse(prevKey);
+    } catch {}
+    if (Array.isArray(prev) && typeof prev[1] === "string") {
+      if (prev[0] === null) {
+        const at = locate(data, prev[1], platform);
+        if (at && (repos.find((r) => r.root === at.root)?.files ?? []).some((f) => f.path === at.rel)) return key(at.root, at.rel);
+      } else {
+        const path = abs(prev[0], prev[1], platform);
+        const p = opened.find((o) => samePath(o, path, platform));
+        if (p !== undefined) return key(null, p);
+      }
+    }
   }
   for (const r of repos) if (r.files?.length) return key(r.root, r.files[0].path);
   if (loose.length) return key(null, loose[0]);
