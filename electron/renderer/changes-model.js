@@ -1,5 +1,6 @@
-// Pure list model of the changes browser: keys, selection, a file's commits, path location and joining, the
-// split's stored preferences (no DOM).
+// Pure list model of the changes browser: keys, the selection kept across lists, the view for a kind of row, a
+// file's commit labels, the opened files the list shows and their labels, path location and joining, the split's
+// stored preferences (no DOM).
 // Loaded as a classic <script> (sets globalThis.ChangesModel) and via require() in tests.
 "use strict";
 (function () {
@@ -58,7 +59,9 @@ function keepVersion(version, commits) {
   return version !== "uncommitted" && (commits ?? []).some((c) => c.sha === version) ? version : "uncommitted";
 }
 
-/** The previous key when it is still listed (a changed file, a loose file or a shown opened file), else the first repository file, else the first loose file, else the first shown opened file, else null. */
+/** The previous key when it is still listed (a changed file, a loose file or a shown opened file); a file that moved
+ *  between the changes list and the opened files is followed to its new row; else the first repository file, else the
+ *  first loose file, else the first shown opened file, else null. */
 function pick(data, prevKey, platform) {
   const repos = data?.repos ?? [];
   const loose = data?.loose ?? [];

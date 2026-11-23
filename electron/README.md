@@ -152,20 +152,26 @@ A click opens a full-screen preview instead of the system app: the changes brows
 - Each row has git's state letter (`M` modified, `A` added, `D` deleted, `R` renamed, `?` untracked) and marks:
   `●` edited by the agent, `⏱` changed before the session (its uncommitted diff then also holds those earlier
   changes), `✓` committed, with no uncommitted change now.
-- Versions: selecting a file shows a strip with **Uncommitted** (when it has uncommitted changes) and one entry per
-  commit since the start point that touched it, newest first. The entry's diff is git's own diff: staged and
-  unstaged changes together, a merge commit against its first parent, an untracked file as its whole content added.
-- **Show file** puts the file as it is on disk beside the diff, whichever version is selected (a deleted file shows
-  a message); **Hide file** takes it away. Drag the divider to resize the two panes. Whether the file shows and the
-  divider's place are kept for all sessions.
+- Commits: a file that a commit touched has an arrow; the arrow unfolds the file to one row per commit since the
+  start point, newest first. The file's own row is its uncommitted diff; while one of its commits is selected, the file's row carries a weaker
+  mark. A commit's
+  diff is git's own diff: staged and unstaged changes together, a merge commit against its first parent, an untracked
+  file as its whole content added. Commits are read when a file is unfolded, not with the list.
+- **Diff**, **File** and **Both** (the control above the right side) choose what shows: the diff, the file as it is on
+  disk (a deleted file shows a message), or the two side by side. Drag the divider in **Both** to resize the panes.
+  The choice and the divider's place are kept for all sessions. A file with no diff (an opened file) always shows
+  the file.
+- **Opened files** is a second list below the repositories: the files you opened from links in the chat that the
+  session has not changed. It keeps the 200 newest per session and lists the newest 20; **✕** on a row takes it
+  off. A row whose file now leads outside the session folder says so instead of showing it.
 - The file on show follows the disk: when it changes, including an atomic save, its content and, with
   **Uncommitted** selected, its diff are read again in place, keeping the scroll positions. The list does not follow.
-  When a file opened from a link is in the list, its row is selected and its versions are one click away.
+  When a file opened from a link is in the list, its row is selected and its commits are one click away.
 - `+` adds a repository through a folder dialog; its start point is where `HEAD` was when the session was created.
   `✕` on a group removes the repository from the list; one recorded automatically comes back, with a new start
   point, at the agent's next edit there.
 - `Esc` closes the browser, `Ctrl/Cmd+A` selects the text of the pane that has the focus.
-- Limits: a diff up to 2 MB (a larger one says so; **Show file** still works) and at most 20000 lines shown, 2000
+- Limits: a diff up to 2 MB (a larger one says so; **File** still works) and at most 20000 lines shown, 2000
   files per repository. Git is only read: nothing is written to a repository (not even `index.lock`), and a
   repository's config cannot make the app run an fsmonitor hook, an external diff, a textconv driver or a signature
   check (clean and process filters such as git-lfs still run). In a partial clone a commit's diff may show git's

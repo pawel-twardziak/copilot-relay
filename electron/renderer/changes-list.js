@@ -8,7 +8,7 @@ const baseName = (p) => p.split(/[/\\]/).pop() || p;
 const LOOSE = "\0loose"; // the fold id of the "No repository" group (never a root)
 
 /**
- * The list's nodes for data { repos, loose }, built with the app's element helper h. `sel` ({ key, version } or null,
+ * The list's nodes for data { repos, loose, opened }, built with the app's element helper h. `sel` ({ key, version } or null,
  * key a ChangesModel.key, version "uncommitted" or a commit's sha) marks the selected row, `isShut(foldId)` tells a
  * folded group (foldId: a repository's root, or LOOSE), `isUnfolded(key)` a file that shows its commits, and
  * `commitsOf(key)` gives them: undefined or "loading" while they are read, { error }, or [{ sha, subject, author, date }].
