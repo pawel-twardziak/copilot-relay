@@ -7,16 +7,70 @@
 /** A file's key in the list: root null for a loose file (rel is then its absolute path). */
 const key = (root, rel) => JSON.stringify([root, rel]);
 
-/** The previous key when it is still listed, else the first file of the first repository with files, else the first loose file, else null. */
-function pick(data, prevKey) {
+/** The view for a kind of row: "change" the stored view, "commit" the stored view but the diff for "file", "nodiff" (no diff exists) the file. */
+function viewFor(prefView, kind) {
+  if (kind === "nodiff") return "file";
+  if (kind === "commit" && prefView === "file") return "diff";
+  return prefView;
+}
+
+/** Equal paths: equal text; on win32 without case and with "/" equal to "\". */
+function samePath(a, b, platform) {
+  if (platform !== "win32") return a === b;
+  const n = (p) => String(p).replace(/\\/g, "/").toLowerCase();
+  return n(a) === n(b);
+}
+
+/** The opened paths (newest first) the changes list does not hold, the first `limit`. */
+function openedShown(data, platform, limit = 20) {
+  const out = [];
+  for (const p of data?.opened ?? []) {
+    const at = locate(data, p, platform);
+    const inRepo = at && (data.repos.find((r) => r.root === at.root)?.files ?? []).some((f) => f.path === at.rel);
+    if (inRepo || (data.loose ?? []).some((l) => samePath(l, p, platform))) continue;
+    out.push(p);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+/** An opened file's label: relative to cwd when inside it, else absolute; dir ends with its separator. */
+function openedLabel(abs, cwd, platform) {
+  const win = platform === "win32";
+  const sep = win ? "\\" : "/";
+  const norm = (p) => (win ? p.replace(/\\/g, "/").toLowerCase() : p);
+  let shown = abs;
+  if (cwd) {
+    const root = norm(cwd).replace(/\/+$/, "");
+    if (norm(abs).startsWith(root + "/") && abs.length > root.length + 1) shown = abs.slice(root.length + 1);
+  }
+  const i = shown.lastIndexOf(sep);
+  return { dir: shown.slice(0, i + 1), name: shown.slice(i + 1) };
+}
+
+/** A commit's list text: "<sha7> <subject>" and the tooltip "<author> · <date>". */
+function commitLabel(c) {
+  return { label: `${c.sha.slice(0, 7)} ${c.subject}`, title: `${c.author} · ${c.date}` };
+}
+
+/** The selected version when `commits` still holds it, else "uncommitted". */
+function keepVersion(version, commits) {
+  return version !== "uncommitted" && (commits ?? []).some((c) => c.sha === version) ? version : "uncommitted";
+}
+
+/** The previous key when it is still listed (a changed file, a loose file or a shown opened file), else the first repository file, else the first loose file, else the first shown opened file, else null. */
+function pick(data, prevKey, platform) {
   const repos = data?.repos ?? [];
   const loose = data?.loose ?? [];
+  const opened = openedShown(data, platform);
   if (prevKey != null) {
     for (const r of repos) for (const f of r.files ?? []) if (key(r.root, f.path) === prevKey) return prevKey;
     for (const p of loose) if (key(null, p) === prevKey) return prevKey;
+    for (const p of opened) if (key(null, p) === prevKey) return prevKey;
   }
   for (const r of repos) if (r.files?.length) return key(r.root, r.files[0].path);
-  return loose.length ? key(null, loose[0]) : null;
+  if (loose.length) return key(null, loose[0]);
+  return opened.length ? key(null, opened[0]) : null;
 }
 
 /** The versions of a file to choose from: "Uncommitted" when it has uncommitted changes, then one per commit. */
@@ -77,7 +131,7 @@ function parsePrefs(text) {
   return { showFile: raw.showFile === true, ratio: clampRatio(raw.ratio) };
 }
 
-const ChangesModel = { key, pick, versions, splitName, locate, abs, clampRatio, parsePrefs };
+const ChangesModel = { key, pick, viewFor, samePath, openedShown, openedLabel, commitLabel, keepVersion, versions, splitName, locate, abs, clampRatio, parsePrefs };
 globalThis.ChangesModel = ChangesModel;
 if (typeof module !== "undefined") module.exports = ChangesModel;
 })();
