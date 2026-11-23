@@ -305,8 +305,9 @@ function createFilePreview({ api, h, md, onStatus }) {
   }
 
   /** Show an opened file's row (`recorded`: its real path when it was opened), read by readSame; when it leads
-   *  elsewhere now the confirmation asks, as for a link, over the note. `my` is its selection's seq. */
-  async function loadOpened(my, recorded) {
+   *  elsewhere now the note shows, and after a click on the row (`ask`) the confirmation asks over it, as for a link.
+   *  `my` is its selection's seq. */
+  async function loadOpened(my, recorded, ask) {
     setMode("file", "nodiff");
     const v = view;
     cur = { path: recorded, line: null, result: null, note: null };
@@ -323,8 +324,8 @@ function createFilePreview({ api, h, md, onStatus }) {
     }
     if (my !== seq) return;
     if (r.elsewhere) {
-      showUnavailable(recorded, LEADS_OUT); // what stays on Cancel
-      return askConfirm(v, recorded, v.cwd, r.elsewhere);
+      showUnavailable(recorded, LEADS_OUT); // what stays on Cancel, and all an automatic selection shows
+      return ask && askConfirm(v, recorded, v.cwd, r.elsewhere);
     }
     if (notText(r)) return showUnavailable(recorded, "This file is not a text file.");
     cur = { path: r.path, line: null, result: r, note: null };
@@ -414,7 +415,7 @@ function createFilePreview({ api, h, md, onStatus }) {
   function renderList() {
     const fold = (id) => `${dataOf}\n${id}`; // a group's foldId or a file's key
     const on = {
-      select: (key) => select(key),
+      select: (key) => select(key, "uncommitted", true, true),
       commit: (key, sha) => selectCommit(key, sha),
       unfold(key) {
         if (!unfolded.delete(fold(key))) {
@@ -507,10 +508,22 @@ function createFilePreview({ api, h, md, onStatus }) {
     api.changesRemove(v.sessionId, root).then(() => view === v && reloadList()).catch((e) => fail(e.message));
   }
 
-  /** ✕ on an opened file's row: it leaves the session's opened files. */
+  /** ✕ on an opened file's row: it leaves the session's opened files. When its file is on show it leaves the show too,
+   *  and the list's answer picks the selection. */
   function forgetOpened(path) {
     const v = view;
-    api.changesForgetOpened(v.sessionId, path).then(() => view === v && reloadList()).catch((e) => fail(e.message));
+    api
+      .changesForgetOpened(v.sessionId, path)
+      .then(() => {
+        if (view !== v) return;
+        if (mode === "file" && sel?.key === ChangesModel.key(null, path)) {
+          seq++; // a read of it in flight is stale
+          setMode(null);
+          setHeader("", "");
+        }
+        reloadList();
+      })
+      .catch((e) => fail(e.message));
   }
 
   function addRepo() {
@@ -530,8 +543,9 @@ function createFilePreview({ api, h, md, onStatus }) {
 
   /** Select a version of a row; with showDiff its diff and its file, in the view the stored one gives for it. A loose
    *  or an opened file shows its content. Without showDiff only the row is marked (its diff read if the diff pane
-   *  shows), and a content read in flight is left alone. */
-  function select(key, version = "uncommitted", showDiff = true) {
+   *  shows), and a content read in flight is left alone. `byClick`: a click on the row, the only selection that may ask
+   *  the confirmation (an opened file whose path now leads outside the session folder). */
+  function select(key, version = "uncommitted", showDiff = true, byClick = false) {
     const my = showDiff ? ++seq : seq;
     const found = find(key);
     sel = found ? { key, version } : null;
@@ -542,7 +556,7 @@ function createFilePreview({ api, h, md, onStatus }) {
       setHeader("", "");
       return;
     }
-    if (found.root == null) return found.opened ? loadOpened(my, found.rel) : loadContent(my, found.rel);
+    if (found.root == null) return found.opened ? loadOpened(my, found.rel, byClick) : loadContent(my, found.rel);
     errEl.hidden = true;
     setHeader(ChangesModel.splitName(found.rel).name, absPath(found.root, found.rel));
     setMode("change", version === "uncommitted" ? "change" : "commit"); // reads the diff if its pane shows

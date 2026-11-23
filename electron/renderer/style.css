@@ -415,8 +415,9 @@ span.img-chip.off { border: 1px dashed var(--border); }
 /* fixed width, also when empty (a file without commits), so the names line up */
 .fp-arrow { flex: none; width: 1em; color: var(--muted); text-align: center; }
 .fp-arrow:not(:empty):hover { color: var(--text); }
-.fp-commits .fp-note { padding: 2px 12px 4px 46px; }
-.fp-commit { padding: 2px 8px 2px 46px; cursor: pointer; border-left: 2px solid transparent; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; }
+/* under the file's name: the row's border, padding, arrow, state and one flag come to about 69px */
+.fp-commits .fp-note { padding: 2px 12px 4px 72px; }
+.fp-commit { padding: 2px 8px 2px 70px; cursor: pointer; border-left: 2px solid transparent; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; }
 .fp-commit:hover { background: var(--panel-2); color: var(--text); }
 .fp-commit.active { background: var(--panel-2); border-left-color: var(--accent); color: var(--text); }
 .fp-state { flex: none; width: 1.2ch; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted); }

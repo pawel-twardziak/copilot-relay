@@ -1504,6 +1504,12 @@ export const checks = [
       assert.match(commits[0].label, /^[0-9a-f]{7} second$/, "b.txt's commit");
       assert.equal(commits[0].active, false, "the commit is not selected by the unfold");
       assert.equal(await app.ev(`${fpRow("b.txt")}.classList.contains("active")`), true, "b.txt's row stays selected");
+      const indent = await app.ev(`(() => {
+        const text = document.createRange();
+        text.selectNodeContents(${fpCommitsOf("b.txt")}.querySelector(".fp-commit"));
+        return { commit: text.getBoundingClientRect().left, name: ${fpRow("b.txt")}.querySelector(".fp-file").getBoundingClientRect().left };
+      })()`);
+      assert.ok(indent.commit >= indent.name, `the commit starts under its file's name: ${JSON.stringify(indent)}`);
 
       await app.ev(`${fpCommitsOf("b.txt")}.querySelector(".fp-commit").click()`);
       await app.check(`!!${FP}.querySelector(".fp-diff .dv")`, "b.txt's commit diff");
@@ -1702,15 +1708,6 @@ export const checks = [
       assert.ok(linked.beside && Math.abs(linked.ratio - again.ratio) <= 0.01, `the stored split for the linked file: ${JSON.stringify(linked)}`);
       assert.ok(await app.ev(`${FP}.querySelector(".fp-content").textContent.includes("hello")`), "the linked file beside its diff");
 
-      // an old stored value: Show file is Both
-      await app.ev(`localStorage.setItem("copilot-sessions.changes.v1", '{"showFile":true,"ratio":0.3}')`);
-      await app.reload();
-      await openBrowser();
-      await app.check(`!!${FP}.querySelector(".fp-row.active") && !!${FP}.querySelector(".fp-diff .dv, .fp-diff .fp-msg")`, "a row's diff after the reload");
-      assert.equal(await active(), "both", "Both from the old Show file");
-      const old = await panes();
-      assert.ok(Math.abs(old.ratio - 0.3) <= 0.01, `the old ratio: ${JSON.stringify(old)}`);
-
       // a file deleted while its row is on show
       await fpSelect(app, "notes.txt");
       await contentShows("hello");
@@ -1728,6 +1725,25 @@ export const checks = [
       await app.ev(`${viewBtn("diff")}.click()`); // hide, then show again: the pane is painted from cur
       await app.ev(`${viewBtn("both")}.click()`);
       await contentShows("This file is deleted.");
+
+      // an old stored value, read when the page loads again (a relaunch, the same folder): Show file is Both, with its
+      // ratio, which is not the dragged one
+      await app.ev(`localStorage.setItem("copilot-sessions.changes.v1", '{"showFile":true,"ratio":0.7}')`);
+      await app.close({ keep: true });
+      const relaunched = await launch({ scenario: CHANGES_SCENARIO, dir: app.dir });
+      try {
+        await relaunched.ev(`openSession({ sessionId: "scripted-work", cwd: ${JSON.stringify(work)} })`, "the session to reopen");
+        await relaunched.check(`(() => { const v = ${V}; return v && !v.busy && !v.resuming; })()`, "the reopened session");
+        await relaunched.ev(`[...${V}.el.querySelectorAll(".head button")].find((b) => b.textContent === "Changes").click()`);
+        await fpListed(relaunched);
+        await relaunched.ev(`${fpRow("README.md")}.click()`);
+        await relaunched.check(`${fpRow("README.md")}.classList.contains("active") && !!${FP}.querySelector(".fp-diff .dv")`, "README.md's diff after the relaunch");
+        assert.equal(await relaunched.ev(`[...${FP}.querySelectorAll(".fp-view button.active")].map((b) => b.dataset.view).join()`), "both", "Both from the old Show file");
+        const old = await panes(relaunched);
+        assert.ok(Math.abs(old.ratio - 0.7) <= 0.01, `the old ratio: ${JSON.stringify(old)}`);
+      } finally {
+        await relaunched.close();
+      }
     },
   },
   {
@@ -1814,10 +1830,23 @@ export const checks = [
       assert.equal(await active(), "file", "File again for an opened file");
       assert.deepStrictEqual(await openedRows(), [outside], "the deleted file is still listed");
 
-      // ✕ takes it off the list
+      // ✕ on another opened row: the file on show stays
+      await open("b.txt"); // committed, unchanged: an opened row
+      await app.check(`${FP}.querySelector(".fp-loading").hidden && !!${openedRow("b.txt")}?.classList.contains("active")`, "b.txt's opened row selected");
+      await app.ev(`${openedRow(outside)}.click()`);
+      await contentShows("This file is deleted.");
+      await app.ev(`${openedRow("b.txt")}.querySelector(".fp-forget").click()`);
+      await app.check(`${FP}.querySelector(".fp-loading").hidden && !${openedRow("b.txt")}`, "b.txt's row to go");
+      assert.equal(await app.ev(`${openedRow(outside)}.classList.contains("active")`), true, "outside.txt's row still selected");
+      await contentShows("This file is deleted.");
+
+      // ✕ takes it off the list, and the file on show from it off show: the first changed file is selected
       await app.ev(`${openedRow(outside)}.querySelector(".fp-forget").click()`);
       await app.check(`${FP}.querySelector(".fp-loading").hidden && !${openedRow(outside)}`, "outside.txt's row to go");
       assert.ok(!(await recorded()).includes(outside), "outside.txt no longer recorded");
+      await app.check(`!!${groupRow("README.md")}?.classList.contains("active") && !!${FP}.querySelector(".fp-diff .dv")`, "README.md selected with its diff after the ✕");
+      assert.equal(await app.ev(`${FP}.querySelector(".fp-name").textContent`), "README.md", "README.md on show");
+      assert.equal(await app.ev(`${FP}.querySelector(".fp-content").textContent.includes("This file is deleted.")`), false, "outside.txt's note is gone");
 
       // a path on show that now leads outside the session folder: not shown, and its row asks the confirmation, as a
       // link does
@@ -1846,6 +1875,13 @@ export const checks = [
         await app.ev(`${FP}.querySelector('[data-act="deny"]').click()`);
         await contentShows(leadsOut);
         assert.equal(await app.ev(secretShown), false, "the outside file is not shown after Cancel");
+        // the browser opened again with ig.txt's row selected: an automatic selection shows the note and asks nothing
+        await closeBrowser();
+        await openBrowser();
+        await app.check(`!!${openedRow("ig.txt")}?.classList.contains("active")`, "ig.txt's row selected again");
+        await contentShows(leadsOut);
+        assert.equal(await app.ev(confirmShown), false, "no confirmation when the browser opens");
+        assert.equal(await app.ev(secretShown), false, "the outside file is not shown when the browser opens");
       }
 
       // the opened files are kept for the session
