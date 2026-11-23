@@ -3548,7 +3548,14 @@ function templateRow({ id, name, text }) {
     h("textarea", { class: "tpl-text", rows: "3", spellcheck: "false", placeholder: "The text it puts into a session's own part", "aria-label": "Template text" }),
   );
   row._id = id;
-  row.querySelector(".tpl-name").value = name;
+  const nameInput = row.querySelector(".tpl-name");
+  nameInput.value = name;
+  // Enter would submit the Settings form through its first button (Cancel) and discard the visit: go to the text
+  nameInput.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || e.isComposing) return;
+    e.preventDefault();
+    row.querySelector(".tpl-text").focus();
+  });
   row.querySelector(".tpl-text").value = text;
   return row;
 }

@@ -106,7 +106,13 @@ export function clearPromptDirs(root) {
   } catch {
     return;
   }
-  for (const n of names) rmSync(path.join(runDir, n), { recursive: true, force: true });
+  for (const n of names) {
+    try {
+      rmSync(path.join(runDir, n), { recursive: true, force: true });
+    } catch (e) {
+      console.warn(`Could not remove the prompt folder ${path.join(runDir, n)}: ${e.message}`);
+    }
+  }
 }
 
 /** A copy of env whose instructions directories end with dir (the user's own ones are kept). */

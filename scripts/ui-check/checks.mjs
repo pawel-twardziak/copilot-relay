@@ -2610,8 +2610,13 @@ export const checks = [
       assert.equal(await app.ev(`document.querySelector("#set-prompt-child-restore").disabled`), false);
       await app.ev(`document.querySelector("#set-prompt-child-restore").click()`);
       assert.equal(await app.ev(`document.querySelector("#set-prompt-child").value`), CHILD_PART);
-      // two templates: the first renamed, the second deleted
+      // Enter in a template's name goes to its text; it must not submit the form (its first button is Cancel)
       await app.ev(`document.querySelector("#set-template-add").click()`);
+      await app.check(`document.activeElement === ${rows}[0].querySelector(".tpl-name")`, "the new template's name to be focused");
+      await app.pressEnter();
+      await app.check(`document.activeElement === ${rows}[0].querySelector(".tpl-text")`, "Enter to move to the template's text");
+      assert.equal(await app.ev(`${S}.open`), true, "Enter in a template name keeps the Settings dialog open");
+      // two templates: the first renamed, the second deleted
       await app.ev(`document.querySelector("#set-template-add").click()`);
       assert.equal(await app.ev(`${rows}.length`), 2);
       await typeRow(0, ".tpl-name", "First");

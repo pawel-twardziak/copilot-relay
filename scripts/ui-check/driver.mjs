@@ -275,6 +275,13 @@ export async function launch({ scenario, settings = {}, width = 1280, height = 8
       ev,
       check,
       resize,
+      /** A real Enter key press on the focused element (not a synthetic event: it takes the browser's own
+       *  handling, such as a form's implicit submit). */
+      async pressEnter() {
+        const key = { key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 };
+        await cdp("Input.dispatchKeyEvent", { type: "keyDown", ...key, text: "\r" }, "pressing Enter");
+        await cdp("Input.dispatchKeyEvent", { type: "keyUp", ...key }, "releasing Enter");
+      },
       /** A new session in the work folder (scripted-work, or the launch's sessionId), with own as its own prompt
        *  part; later calls act on it. */
       async newSession({ own } = {}) {

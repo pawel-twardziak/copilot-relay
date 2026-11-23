@@ -278,7 +278,7 @@ function linkKeys(keys) {
 /** The session's link to its parent in the cached link tree ({ parent, adopted }), or null: not a child, or the
  *  cache does not know it (missing or unreadable: the session starts without the child part). */
 function childLinkOf(sessionId) {
-  const link = readLinksCache(linksCacheFile()).links.find((l) => l?.key === `cli:${sessionId}` && l.parent);
+  const link = readLinksCache(linksCacheFile()).links.find((l) => l?.key === `cli:${sessionId}` && l.parent && !l.parentDeleted);
   return link ? { parent: link.parent, adopted: link.adopted === true } : null;
 }
 
@@ -1212,6 +1212,7 @@ handle("sessions:setPrompt", async (sessionId, own) => {
   if (refused) return { refused };
   const prev = prompts.get(sessionId);
   if (own === prev) return { unchanged: true };
+  // refusal is checked above and nothing is awaited since, so saveAndReopen has nothing left to check
   return saveAndReopen({ prev, save: () => prompts.set(sessionId, own), restore: (text) => prompts.set(sessionId, text), refusal: () => null, close });
 });
 
