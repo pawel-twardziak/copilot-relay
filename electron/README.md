@@ -159,8 +159,9 @@ A click opens a full-screen preview instead of the system app: the changes brows
   file as its whole content added. Commits are read when a file is unfolded, not with the list.
 - **Diff**, **File** and **Both** (the control above the right side) choose what shows: the diff, the file as it is on
   disk (a deleted file shows a message), or the two side by side. Drag the divider in **Both** to resize the panes.
-  The choice and the divider's place are kept for all sessions. A file with no diff (an opened file) always shows
-  the file.
+  The choice and the divider's place are kept for all sessions. A file without a diff (an opened file or a
+  **No repository** file) opens in **File**; **Diff** or **Both** can still be chosen there, and the diff pane then
+  says `No changes.`.
 - **Opened files** is a second list below the repositories: the files you opened from links in the chat that the
   session has not changed. It keeps the 200 newest per session and lists the newest 20; **✕** on a row takes it
   off. A row whose file now leads outside the session folder says so instead of showing it.

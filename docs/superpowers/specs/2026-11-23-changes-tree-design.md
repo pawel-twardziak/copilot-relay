@@ -186,9 +186,12 @@ links may no longer be in the chat. The list is then the only way back to those 
 
 ## Checks by hand (open)
 
-- **Compaction with real Copilot: the plan's first step, before any code.** Not verified in code or on disk (none
-  of the local sessions has a compaction event; the app has no handling of compaction): that a compacted session
-  keeps its id, so that its records still belong to it; and what the chat shows of the old links after reopening.
-  Run `/compact` in a session with recorded changes, reopen it, and look at the list. If the id changes, stop and
-  bring it back to the owner: what the records are keyed by is then a design question, also for today's list.
+- **Compaction with real Copilot: the session id is kept; the replay of old links is still open.** Checked
+  2026-11-23 with a probe on local Copilot 1.0.115: `/compact` sent over ACP is accepted and records
+  `session.compaction_start` in the same session's `events.jsonl`; no new session folder appears, so the session id
+  is kept and the records stay valid (the app has no handling of compaction and needs none for that). The compaction
+  did not finish within 8.5 minutes in that tiny session, so what the chat replays of the old links after a
+  finished compaction is still not verified (the hang itself is in the backlog). To finish the check: run
+  `/compact` in a session with recorded changes, let it finish, reopen the session, and look at the chat's old links
+  and the list.
 - Windows: the two lists with long paths, the divider in `Both`, a link to a file outside the session folder.

@@ -9,7 +9,8 @@ the branch; the fix rounds move them, so the symbol is the thing to search for.
 
 1. **A false `No changes.` can still appear for a committed file that was edited on disk.** `loadDiff` in
    `electron/renderer/file-preview.js` answers `No changes.` without asking git when `file.uncommitted` is false and
-   the key is not in `diskNewer`. Two gaps remain.
+   the key is not in `diskNewer`. The watched file (the one on show) is already handled by `diskNewer` (Task 4); the
+   two gaps below remain.
    (a) `diskNewer` is cleared by `loadList` on every list answer. A list request sent before the edit and answered
    after it removes the mark that `refresh` has just set, so a click on the row says `No changes.` until the next
    list read.
@@ -32,7 +33,9 @@ the branch; the fix rounds move them, so the symbol is the thing to search for.
    finding fixed for opened rows. The 2026-11-22 spec says loose and repository files are read without the
    confirmation, because the agent edited them or the user added their repository; a link swapped in later breaks
    the reason for that rule. Only the opened-row case has its own UI check; loose rows, links and repository files
-   share the code path without one.
+   share the code path without one. This needs the owner's decision: the 2026-11-22 spec allows reading a
+   repository's or a loose file without the confirmation, the 2026-11-23 anti-goal pulls the other way; nothing
+   leaves the machine, and network targets are still refused.
    *Proposal:* route `loadContent` and `loadPaneFile` through `readSame` with the path as listed. The expected path
    is the listed one for a repository file and the recorded one for a loose file (which `repo-track.mjs` records as
    the agent wrote it, not as a real path, so compare with its real path read once at selection, or show the note
@@ -61,9 +64,10 @@ the branch; the fix rounds move them, so the symbol is the thing to search for.
 ## B. Window and wording
 
 7. **The note `This path now leads to a file outside the session folder.`** (`LEADS_OUT` in
-   `electron/renderer/file-preview.js`) was worded during the work, for three places: a file on show that is now a
-   link to an outside file (`refresh`), `Cancel` from an opened row's confirmation, and the opened row itself before
-   the confirmation. The owner may want other words, or a different note for `Cancel`.
+   `electron/renderer/file-preview.js`) was worded during the work, for four places: a file on show that is now a
+   link to an outside file (`refresh`), `Cancel` from an opened row's confirmation, the opened row itself before
+   the confirmation, and an opened row selected automatically (the browser opened again, or `pick`'s fallback),
+   which asks nothing. The owner may want other words, or a different note for `Cancel`.
 8. **The empty state is drawn above `Opened files`.** With no repository recorded, `ChangesList.render` draws
    `No repository is recorded for this session yet.` and `+ Add repository` first and the `Opened files` block after
    it. Product question: should a session that only has opened files show the empty state at all?
@@ -89,8 +93,29 @@ the branch; the fix rounds move them, so the symbol is the thing to search for.
 16. `ChangesModel.pick` throws on a `prevKey` whose root is neither `null` nor a string (for example
     `[1,"x"]`, reaching `abs`). Unreachable today: keys are built by `ChangesModel.key` from list data.
 17. The `.fp-view` buttons (`Diff`, `File`, `Both`) have no `aria-pressed`; the active one is marked by a class only.
-18. `errEl.hidden = true` is written both in `select` and in `loadDiff` (which `select` reaches through `setMode`),
-    in `file-preview.js`. One of them can go.
+18. `errEl.hidden = true` is set in several places in `file-preview.js` (among them `select`, `loadDiff`, which
+    `select` reaches through `setMode`, `renderFile` and `loadList`), and some of them run one after the other for
+    one selection. One place per path would do.
+19. A file pane that is hidden (`Diff`) and shown again repaints from the top, or from the link's line
+    (`setView` → `paintFile` → `renderFile` without `keepScroll`), not from where it was scrolled.
+20. The commit rows' indent (`.fp-commit`, `.fp-commits .fp-note` in `electron/renderer/style.css`) is a fixed
+    padding that puts their text at or right of the file's name for a row with at most one flag. A row with two or
+    three flags (`●✓`, `●⏱`, `●⏱✓`) has its name 13 or 26px further right, so its commits start left of it.
+    *Proposal:* if that matters, give the commit rows the same leading boxes as the file row (empty arrow, state
+    and flags spans), or set the padding from the file row's measured name offset.
+
+Seen in the final review of the branch and judged to exist before it:
+
+21. `loadContent` (a loose row) keeps the previous `cur` while the file is read, so a list answer landing in that
+    window (`afterList` → `locateCur`) can mark another row.
+    *Proposal:* set `cur = { path: filePath, line: null, result: null, note: null }` before the read, as `loadOpened`
+    does.
+22. A list answer landing while a link's file is read drops the link: `afterList` → `select` bumps `seq`, and
+    `openTarget`'s read is then stale.
+23. `⟳` loses the scroll position of the panes of a changes-list row: the list answer selects the row again
+    (`afterList` → `select`), which empties both panes and reads its file and diff anew.
+24. `knownSession` in `electron/main.mjs` accepts any well-formed session id, so `changes:opened` can create a record
+    for a session that no longer exists (as all `changes:*` calls can).
 
 ## D. Tests and housekeeping (no behaviour impact)
 
@@ -113,9 +138,10 @@ the branch; the fix rounds move them, so the symbol is the thing to search for.
   `.fp-row-path` cut-at-start and `openedLabel` on win32), the divider in `Both`, a link outside the session folder
   (the confirmation and the note), and the win32 branch of the `changes-opened` check, which is skipped on other
   systems and was never run on Windows. The UI checks are Linux-only and not in CI.
-- **The look of the new styles.** Nobody looked at the commit rows' indent, the `.current` mark (the weaker mark of
-  a file whose commit is selected) or the name alignment after `.fp-row` padding went from 26px to 12px. The UI
-  checks assert behaviour, not pixels.
+- **The look of the new styles on Windows.** On Linux the final review looked at them: the names line up, the
+  `.current` mark (the weaker mark of a file whose commit is selected) is visible, the `Diff`/`File`/`Both` control
+  reads well. The commit rows' indent was changed after that review (now under the file's name, asserted by
+  `changes-browser`). Windows stays open.
 - **`Open in system app`** in each of the three views (`Diff`, `File`, `Both`): that it opens the file on show and
   not something else.
 - **`/compact` and the chat's old links (Task 0).** The probe (Copilot CLI 1.0.115, `scratchpad/probe/compact-probe.mjs`)
