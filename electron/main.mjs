@@ -310,6 +310,15 @@ for (const [channel, route] of [["links:forget", "/api/links/forget"], ["links:m
 async function connect(cwd, deadline, args = [], prompt = "") {
   let env = process.env;
   let promptDir = null;
+  // never throws: it runs inside the exit event (before the session's own exit handling) and on failed starts, where
+  // the start's error must win; a folder that can't be removed now (a Windows lock) goes at the next start
+  const removeDir = () => {
+    try {
+      promptDir.remove();
+    } catch (e) {
+      console.warn(`[session-prompts] could not remove ${promptDir.dir}: ${e.message}`);
+    }
+  };
   if (prompt) {
     const failure = (text) => Object.assign(new Error(text), { startFailure: true });
     try {
@@ -320,14 +329,14 @@ async function connect(cwd, deadline, args = [], prompt = "") {
     try {
       env = instructionsEnv(process.env, promptDir.dir);
     } catch (e) {
-      promptDir.remove();
+      removeDir();
       throw failure(e.message); // the data folder's path contains a comma
     }
   }
   const conn = new AcpConnection({ command: copilotCommand(), cwd, args, env });
   const release = () => {
     promptProcs.delete(conn);
-    promptDir.remove();
+    removeDir();
   };
   if (promptDir) {
     promptProcs.add(conn);
