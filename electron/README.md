@@ -93,8 +93,9 @@ It runs on Windows, macOS and Linux.
 Copilot CLI doesn't load extensions in ACP mode, so the copilot-relay extension never runs in sessions opened
 here. The app does the extension's job itself. Every open session joins the relay broker under the same
 identity it has in a terminal (`cli:<sessionId>`), so it keeps its relay name. It also gets the relay tools
-(`relay-list_sessions`, `relay-send_message`, and `relay-create_session` / `relay-report_result`, see
-[Delegated sessions](#delegated-sessions)) as an MCP server, and these run without a permission prompt.
+(`relay-list_sessions`, `relay-send_message`, and `relay-create_session` / `relay-report_result` /
+`relay-adopt_session` / `relay-release_session`, see [Delegated sessions](#delegated-sessions)) as an MCP server, and
+these run without a permission prompt.
 
 - The header shows the session's relay name (e.g. `relay: swift-otter`). Click it to rename the session.
 - Messages from other sessions appear as purple "from …" bubbles. Each becomes a new turn as soon as the
@@ -196,6 +197,17 @@ an ordinary session: it appears in the list, you can open it, read what it did, 
   started, so it survives a parent that is busy or closed, a broker restart and an app restart. A rare duplicate is
   possible; a lost report is not. After the report, `send_message` works between parent and child as with any other
   session; `list_sessions` marks "your parent" and "your child" with their current names.
+- **Linking existing sessions.** When you ask a session in the chat to take another open session as its sub-session,
+  it calls **`adopt_session(name)`**; to end the link to one of its direct children, **`release_session(name)`**.
+  Either shows a card in the parent's view, **Link sessions** or **Unlink sessions**, with the child's name and its
+  folder (or its task), with **Approve** and **Reject**; as for a new session, nothing changes without your click.
+  Only an open desktop-app session that has no parent can be adopted, and never one of the caller's ancestors. An
+  adopted child is a sub-session like any other (the tree, closing, reopen cards, the delete dialog, `report_result`),
+  except that it was given no task, so it owes no report: it sends no "ended without reporting" notice and the quit
+  question does not count it. A released child becomes a top-level session and keeps its own sub-sessions; reports it
+  already sent are still delivered. Both sessions are told the outcome. A card whose answer did not reach the
+  broker keeps its buttons; one the broker no longer has (after a broker restart, or when one of the two sessions
+  went away) says "This request is no longer pending."
 - **Permissions.** A child starts with no automatic approvals beyond the relay tools, and asks like any other session.
   While it waits, it has a `!` in the list and an OS notification fires if the window is not focused. Nothing is
   answered for you.
@@ -229,8 +241,8 @@ an ordinary session: it appears in the list, you can open it, read what it did, 
   resumable. With no child open and no waiting request, a reload asks nothing.
 - **Quitting** while a child has not reported asks for confirmation; **Cancel** keeps everything running. Children are
   never resumed automatically.
-- `create_session` and `report_result` exist only for sessions opened in this app, not for terminal sessions or
-  sessions started from the broker's web GUI.
+- `create_session`, `report_result`, `adopt_session` and `release_session` exist only for sessions opened in this app,
+  not for terminal sessions or sessions started from the broker's web GUI.
 
 ## Schedules
 

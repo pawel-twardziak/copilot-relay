@@ -220,6 +220,7 @@ body.panel-resizing { cursor: col-resize; user-select: none; }
 .perm .fields dt { color: var(--muted); }
 .perm .fields dd { margin: 0; overflow-wrap: anywhere; }
 .perm.reopen .task { max-height: 120px; }
+.perm.link .note { margin-bottom: 8px; overflow-wrap: anywhere; }
 .perm .task { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto; margin-bottom: 8px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); }
 .composer { position: relative; display: flex; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--border); background: var(--panel); }
 .composer textarea { flex: 1; resize: none; min-height: 40px; max-height: 240px; line-height: 1.4; }

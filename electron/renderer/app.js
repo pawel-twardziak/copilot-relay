@@ -291,10 +291,11 @@ class SessionView {
     this.parentSessionId = parentSessionId ?? null;
     this.seenDeliveries = seenDeliveries ?? new Set(); // report ids already taken (the broker redelivers until acked)
     this.pendingNotes = pendingNotes ?? []; // non-waking notices, passed to the model with the next prompt
-    this.openCards = new Set(); // permission, delegation and reopen cards still waiting for an answer
+    this.openCards = new Set(); // permission, delegation, reopen and link cards still waiting for an answer
     // requestId -> previews element of its reopen card while it is open, null once answered (the broker re-emits a
     // request, with every queued message, until it is answered)
     this.reopenRequests = new Map();
+    this.linkRequests = new Set(); // requestIds of the link cards shown (main replays an unanswered one)
     this.busy = false;
     this.dead = false;
     // streamed blocks { type, messageId, el, body, text }: each chunk goes to its message's block (StreamRuns)
@@ -1250,10 +1251,16 @@ class SessionView {
   }
 
   // --- copilot-relay
-  relayStatus({ name, connected, note, parentSessionId }) {
+  relayStatus({ name, connected, note, parentSessionId, parentChanged }) {
     if (name) this.relayName = name;
-    // only ever set: a status sent before the broker's registration has no link yet, and a rename carries none
-    if (parentSessionId && parentSessionId !== this.parentSessionId) {
+    if (parentChanged) {
+      // the user linked or unlinked this session (adopt_session, release_session): null is a release
+      if ((parentSessionId ?? null) !== this.parentSessionId) {
+        this.parentSessionId = parentSessionId ?? null;
+        renderList();
+      }
+    } else if (parentSessionId && parentSessionId !== this.parentSessionId) {
+      // otherwise only ever set: a status sent before the broker's registration has no link yet, and a rename carries none
       this.parentSessionId = parentSessionId;
       renderList();
     }
@@ -2071,6 +2078,55 @@ class SessionView {
     this.openCard(card);
   }
 
+  /** This session asks to adopt another session as its sub-session, or to release one. The names and the task are
+   *  model-visible strings: plain text only. */
+  linkCard({ requestId, kind, childName, childCwd, parentName, task }) {
+    if (this.linkRequests.has(requestId)) return;
+    this.linkRequests.add(requestId);
+    this.flush();
+    const adopt = kind === "adopt";
+    const field = (label, value) => (value ? [h("dt", {}, label), h("dd", {}, value)] : []);
+    const DONE = { linked: "→ Linked", released: "→ Released", rejected: "→ Rejected" };
+    const answer = async (approved) => {
+      this.closeCard(card);
+      opts.replaceChildren(h("span", {}, !approved ? "Rejecting…" : adopt ? "Linking…" : "Unlinking…"));
+      let result;
+      try {
+        // false when the broker no longer has the request; a thrown answer did not arrive
+        const answered = await api.answerLink(this.sessionId, requestId, approved);
+        result = !answered ? "This request is no longer pending." : (DONE[answered.result] ?? answered.text);
+      } catch (e) {
+        // not answered: the buttons come back, so the user can try again
+        opts.replaceChildren(h("span", { class: "err" }, `Could not answer: ${e.message}`), ...buttons());
+        this.openCard(card);
+        return;
+      }
+      card.classList.add("done");
+      opts.replaceChildren(h("span", {}, result));
+    };
+    const buttons = () => [h("button", { class: "primary", onclick: () => answer(true) }, "Approve"), h("button", { onclick: () => answer(false) }, "Reject")];
+    const opts = h("div", { class: "opts" }, buttons());
+    const card = h(
+      "div",
+      { class: "perm link" },
+      h("div", { class: "q" }, h("b", {}, adopt ? "Link sessions" : "Unlink sessions")),
+      adopt
+        ? h("div", { class: "q" }, h("b", {}, parentName), " asks to take ", h("b", {}, childName), " as its sub-session.")
+        : h("div", { class: "q" }, h("b", {}, parentName), " asks to release its sub-session ", h("b", {}, childName), "."),
+      h("dl", { class: "fields" }, field("Session", childName), adopt ? field("Folder", childCwd) : field("Task", task)),
+      h(
+        "div",
+        { class: "note" },
+        adopt
+          ? `${childName} will be listed under ${parentName} and can report to it. Closing ${parentName} will also close ${childName}.`
+          : `${childName} becomes a top-level session and keeps its own sub-sessions.`,
+      ),
+      opts,
+    );
+    this.append(card);
+    this.openCard(card);
+  }
+
   /** The bar under the header: this session's parent and sub-sessions from the link tree. */
   renderRelations() {
     const rel = SessionTree.relation(tree, this.sessionId);
@@ -2091,7 +2147,7 @@ class SessionView {
   }
 
   openCard(card) {
-    this.setDrawer(false); // the question must be visible (permission, delegation and reopen cards)
+    this.setDrawer(false); // the question must be visible (permission, delegation, reopen and link cards)
     this.openCards.add(card);
     renderList();
   }
@@ -3372,6 +3428,7 @@ api.onDelegationCreated(({ sessionId, cwd, configOptions, parentSessionId, title
 });
 // a relative messaged a closed session: the card goes to the sender's view (which may not exist yet)
 api.onReopenRequest((r) => forView(r.sessionId, (v) => v.reopenCard(r)));
+api.onLinkRequest((r) => forView(r.sessionId, (v) => v.linkCard(r)));
 
 // the sub-session tree: the cached links at once, the broker's fresh ones (and every change) through onLinks
 let freshLinks = false;

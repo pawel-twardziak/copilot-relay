@@ -1100,6 +1100,37 @@ export const checks = [
     },
   },
   {
+    // the link and unlink cards (as main would send them: no broker request stands behind them)
+    name: "link-card",
+    modes: ["off"],
+    async run(app) {
+      await firstTurn(app);
+      await app.ev(`${V}.linkCard({ requestId: "ui-adopt", kind: "adopt", childName: "docs-9f8e7d", childCwd: "/tmp/docs", parentName: "backend-a1b2c3", task: "" })`);
+      await frames(app);
+      const text = (sel) => app.ev(`${V}.el.querySelector(${JSON.stringify(sel)}).textContent`);
+      assert.match(await text(".perm.link"), /Link sessions/);
+      assert.match(await text(".perm.link"), /backend-a1b2c3 asks to take docs-9f8e7d as its sub-session\./);
+      assert.match(await text(".perm.link"), /Closing backend-a1b2c3 will also close docs-9f8e7d\./);
+      // the same id again adds no second card
+      await app.ev(`${V}.linkCard({ requestId: "ui-adopt", kind: "adopt", childName: "x", childCwd: "", parentName: "y", task: "" })`);
+      assert.equal(await app.ev(`${V}.el.querySelectorAll(".perm.link").length`), 1);
+      // the harness runs the app with relay: false, so the session has no relay client and the answer does not
+      // arrive (it throws, it is not a 404): the card says so and both buttons come back
+      await app.ev(`${V}.el.querySelector(".perm.link button.primary").click()`);
+      await app.check(`!!${V}.el.querySelector(".perm.link .opts .err")`, "the answer that did not arrive");
+      assert.match(await text(".perm.link .opts"), /Could not answer:.*no longer connected to copilot-relay\./);
+      assert.equal(await app.ev(`${V}.el.querySelector(".perm.link").classList.contains("done")`), false, "the card still open");
+      assert.deepEqual(await app.ev(`[...${V}.el.querySelectorAll(".perm.link .opts button")].map((b) => b.textContent)`), ["Approve", "Reject"]);
+      await app.ev(`${V}.linkCard({ requestId: "ui-release", kind: "release", childName: "docs-9f8e7d", childCwd: "", parentName: "backend-a1b2c3", task: "Update the API reference" })`);
+      await frames(app);
+      const release = `${V}.el.querySelectorAll(".perm.link")[1].textContent`;
+      assert.match(await app.ev(release), /Unlink sessions/);
+      assert.match(await app.ev(release), /backend-a1b2c3 asks to release its sub-session docs-9f8e7d\./);
+      assert.match(await app.ev(release), /Update the API reference/);
+      assert.match(await app.ev(release), /becomes a top-level session and keeps its own sub-sessions\./);
+    },
+  },
+  {
     // a size change alone (nothing appended): a following log, and a following panel with an open entry, keep their
     // bottoms when the window gets narrower (the log's text reflows) and lower
     name: "resize-keeps-bottom",
