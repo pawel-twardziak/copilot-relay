@@ -41,7 +41,7 @@ export class RelayClient {
    * @param {(req:object)=>void} [o.onLinkRequest] the user must approve linking or releasing a session
    * @param {(p:{parentKey:?string,adopted:boolean})=>void} [o.onParentChanged] this session's parent changed
    * @param {()=>void} [o.onReported] this delegated session's report was stored
-   * @param {(name:string, payload?:{parentKey:?string,reported:boolean})=>void} [o.onRegistered]
+   * @param {(name:string, payload?:{parentKey:?string,reported:boolean,adopted:boolean})=>void} [o.onRegistered]
    * @param {(name:string)=>void} [o.onRenamed]   renamed elsewhere (GUI)
    * @param {(msg:string)=>void} [o.log]
    */

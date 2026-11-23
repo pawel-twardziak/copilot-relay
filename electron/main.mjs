@@ -14,7 +14,7 @@ import { countUserMessages, deleteSession, describeCut, forkSession, isSessionId
 import { createUsagePusher } from "./usage.mjs";
 import { JobScheduler } from "./scheduler.mjs";
 import { scheduleInfo } from "./jobs.mjs";
-import { PendingRequests, childPrompt, findModelOption, reloadWarning, resolveConfig, unreportedChildren, withDeadline } from "./delegation.mjs";
+import { PendingRequests, childPrompt, findModelOption, isRelayTool, linkCardOf, reloadWarning, resolveConfig, unreportedChildren, withDeadline } from "./delegation.mjs";
 import { readLinksCache, writeLinksCache } from "./links-cache.mjs";
 import { listAllPages } from "./session-list.mjs";
 import { beginPrompt, endPrompt } from "./prompt-count.mjs";
@@ -31,12 +31,15 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 let win = null;
 let scheduler = null;
 let lister = null; // one long-lived connection used for session/list
-const open = new Map(); // sessionId -> { conn, cwd, permissions: Map<reqId, rpcId>, relay, configOptions, parentSessionId?, reported?, replaying? }
+const open = new Map(); // sessionId -> { conn, cwd, permissions: Map<reqId, rpcId>, relay, configOptions, parentSessionId?, reported?, adopted?, replaying? }
 let permSeq = 0;
 const pendingRequests = new PendingRequests(); // delegated-session requests waiting for the user's answer
 // reopen cards shown and not answered yet (requestId -> the reopen:request payload): the broker asks again only when
 // the sender registers anew, so after a window reload main shows them again (see sessions:open)
 const reopenCards = new Map();
+// link cards (adopt_session, release_session) shown and not answered yet (requestId -> the link:request payload),
+// kept like reopenCards: the broker asks again when the parent registers anew
+const linkCards = new Map();
 
 // relay-client.mjs is copied from ../extension by `npm start` / `npm run dist`; without it the relay is off
 const { RelayClient } = await import("./relay-client.mjs").catch(() => ({}));
@@ -149,6 +152,7 @@ function relayStart(sessionId, cwd, { cfg, alias }, { name, parentKey } = {}) {
     parentKey,
     brokerScript: cfg.brokerScript,
     nodePath: cfg.nodePath,
+    caps: ["links"], // this app shows link cards (adopt_session, release_session)
     // `human` is set by the broker (true only for messages typed by a person in the relay GUI), not by the sender's name
     // human: true/false from this broker, undefined from an older one (the renderer then falls back to the sender name)
     onMessage: (m) => send("relay:message", { sessionId, from: m.from, human: m.human, text: m.text, prompt: m.prompt, fromCwd: m.fromCwd, deliveryId: m.deliveryId, wake: m.wake }),
@@ -163,6 +167,7 @@ function relayStart(sessionId, cwd, { cfg, alias }, { name, parentKey } = {}) {
       if (entry?.relay === client) {
         entry.parentSessionId = payload?.parentKey?.replace(/^cli:/, "");
         entry.reported = Boolean(payload?.reported);
+        entry.adopted = Boolean(payload?.adopted);
         client.state(Boolean(entry.prompting)); // a restarted broker knows nothing of a turn in progress
       }
       status();
@@ -171,6 +176,18 @@ function relayStart(sessionId, cwd, { cfg, alias }, { name, parentKey } = {}) {
     },
     onRenamed: () => status(),
     onReopenRequest: (req) => reopenRequested(sessionId, req),
+    onLinkRequest: (req) => linkRequested(sessionId, req),
+    // the user linked or released this session (adopt_session, release_session): parentKey null when released
+    onParentChanged: ({ parentKey, adopted } = {}) => {
+      const entry = open.get(sessionId);
+      if (entry?.relay === client) {
+        entry.parentSessionId = parentKey?.replace(/^cli:/, "");
+        entry.reported = false;
+        entry.adopted = Boolean(adopted);
+      }
+      status({ parentChanged: true });
+      refreshLinks();
+    },
     onLinksChanged: () => refreshLinks(),
     log: (note) => status({ note }),
   });
@@ -319,7 +336,8 @@ function attach(sessionId, conn, cwd, relay, link) {
     // the relay's own tools run without asking, as with the terminal extension. The tool_call update carries
     // the server-prefixed name ("relay-send_message"), the permission request only the bare tool name.
     const title = entry.toolTitles.get(params.toolCall?.toolCallId) ?? params.toolCall?.title;
-    if (entry.relay && /^relay-(send_message|list_sessions|create_session|report_result)$/.test(title ?? "")) {
+    // adopt_session and release_session too: the app's link card is their approval
+    if (entry.relay && isRelayTool(title)) {
       const opt = params.options?.find((o) => o.kind === "allow_once");
       if (opt) return conn.respond(rpcId, { outcome: { outcome: "selected", optionId: opt.optionId } });
     }
@@ -336,6 +354,7 @@ function attach(sessionId, conn, cwd, relay, link) {
     entry.relay?.stop();
     open.delete(sessionId);
     dropReopenCards(sessionId);
+    dropLinkCards(sessionId);
     usage.forget(sessionId);
     pendingRequests.dropForParent(sessionId);
     send("acp:exit", { sessionId, code, signal, stderr: stderr?.trim().slice(-800) });
@@ -436,8 +455,9 @@ handle("sessions:open", async (sessionId, cwd, replayId) => {
 
 async function resumeSession(sessionId, cwd) {
   if (open.has(sessionId)) {
-    // after a window reload the view is new: show the reopen cards it had again (a live view ignores known ids)
+    // after a window reload the view is new: show the reopen and link cards it had again (a live view ignores known ids)
     for (const card of reopenCards.values()) if (card.sessionId === sessionId) send("reopen:request", card);
+    for (const card of linkCards.values()) if (card.sessionId === sessionId) send("link:request", card);
     return { sessionId, cwd, configOptions: null, alreadyOpen: true };
   }
   refuseWhileDeleting(sessionId);
@@ -469,6 +489,7 @@ async function openSession(sessionId, cwd) {
     entry.relay?.stop();
     open.delete(sessionId);
     dropReopenCards(sessionId);
+    dropLinkCards(sessionId);
     usage.forget(sessionId);
     conn.kill();
     throw e;
@@ -741,6 +762,7 @@ async function closeEntry(sessionId) {
   usage.forget(sessionId);
   pendingRequests.dropForParent(sessionId);
   dropReopenCards(sessionId);
+  dropLinkCards(sessionId);
   e.relay?.stop();
   await Promise.race([e.conn.request("session/close", { sessionId }).catch(() => {}), new Promise((r) => setTimeout(r, 2000))]);
   e.conn.kill();
@@ -797,6 +819,36 @@ handle("reopen:answer", async (sessionId, requestId, approved, reason) => {
   }
   reopenCards.delete(requestId);
   return true;
+});
+
+/** The broker asks the user (through the parent's view) to approve adopt_session or release_session. */
+function linkRequested(sessionId, req) {
+  if (!linkCards.has(req.requestId)) notifyIfUnfocused("A session asks to change a session link", req.parentName);
+  const card = linkCardOf(sessionId, req);
+  linkCards.set(card.requestId, card); // a repeated request comes with the same id
+  send("link:request", card);
+}
+
+/** The session's relay connection is gone: the broker asks again when it registers anew. */
+function dropLinkCards(sessionId) {
+  for (const [id, card] of linkCards) if (card.sessionId === sessionId) linkCards.delete(id);
+}
+
+// reachable only from the window, like reopen:answer. Resolves { result, text } (linked, released, rejected, refused).
+handle("link:answer", async (sessionId, requestId, approved) => {
+  const relay = open.get(sessionId)?.relay;
+  if (!relay) throw new Error("The session that asked is no longer connected to copilot-relay.");
+  let answer;
+  // false: the broker has no such pending request (answered elsewhere, broker restarted, or a session left)
+  try {
+    answer = await relay.answerLink(String(requestId), approved === true);
+  } catch (e) {
+    if (e.status !== 404) throw e; // not answered: the card stays answerable
+    linkCards.delete(requestId);
+    return false;
+  }
+  linkCards.delete(requestId);
+  return answer;
 });
 
 /** Resolves true once the relay client has registered, false after `ms`. */
