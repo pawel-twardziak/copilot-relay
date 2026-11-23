@@ -43,4 +43,8 @@ test("an app that does not announce link cards is refused, and a terminal sessio
   assert.equal(terminal.includes("adopt_session") || terminal.includes("release_session"), false);
   const app = await b.tools("app:p2");
   assert.equal(app.includes("adopt_session") && app.includes("release_session"), true);
+  for (const x of (await b.toolList("app:p2")).filter((y) => ["adopt_session", "release_session"].includes(y.name))) {
+    assert.match(x.description, /only when the user has explicitly asked/, x.name);
+    assert.match(x.description, /Never on your own initiative\./, x.name);
+  }
 });

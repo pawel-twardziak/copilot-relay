@@ -157,9 +157,9 @@ export class Delegation {
         const state = [open ? (peer.busy === true ? "open, working" : "open, idle") : "closed"];
         if (this.store.isReported(k)) state.push("reported");
         const first = (this.store.taskOf(k) || "").trim().split(/\r?\n/)[0];
-        const task = !first ? "(task not recorded)" : first.length > 120 ? `${first.slice(0, 120)}…` : first;
+        const task = !first ? (this.store.isAdopted(k) ? "adopted, no task" : "task: (task not recorded)") : `task: ${first.length > 120 ? `${first.slice(0, 120)}…` : first}`;
         const n = this.store.childrenOf(k).length;
-        lines.push(`- "${this.#nameOf(k)}" — ${state.join(", ")} — task: ${task}${n ? ` [has ${n} children]` : ""}`);
+        lines.push(`- "${this.#nameOf(k)}" — ${state.join(", ")} — ${task}${n ? ` [has ${n} children]` : ""}`);
       }
     }
     if (link?.parent) {

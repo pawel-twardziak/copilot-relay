@@ -872,6 +872,20 @@ test("adopt_session asks the parent's app and changes nothing until answered", (
   assert.equal(s.registry.get("cli:c").parentKey ?? null, null);
 });
 
+test("an adopted child is listed as adopted without a task; a linked one without a task as not recorded", () => {
+  const s = linkSetup();
+  s.adopt("cli:p", "cli:c");
+  s.d.answerLink("cli:p", s.cards("cli:p")[0].requestId, true);
+  s.d.link("cli:x", "cli:p");
+  const block = s.d.familyBlock("cli:p");
+  assert.match(block, new RegExp(`"${s.nm("cli:c")}" — .* — adopted, no task`));
+  assert.match(block, new RegExp(`"${s.nm("cli:x")}" — .* — task: \\(task not recorded\\)`));
+  assert.doesNotMatch(block.split("\n").find((l) => l.includes(s.nm("cli:c"))), /task not recorded/);
+  const notice = s.pushes["cli:p"].at(-1);
+  assert.match(notice.prompt, /adopted, no task/);
+  assert.doesNotMatch(notice.prompt.split("\n").find((l) => l.includes(`"${s.nm("cli:c")}" —`)), /task not recorded/);
+});
+
 test("an approved adopt links the pair, wakes the parent and only informs the child", () => {
   const s = linkSetup();
   s.adopt("cli:p", "cli:c");

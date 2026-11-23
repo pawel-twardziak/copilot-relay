@@ -102,5 +102,7 @@ export async function startBroker(t, { script = SERVER, port: wanted, env } = {}
   const tool = (alias, name, args) => withMcp(alias, async (mcp) => (await mcp.callTool({ name, arguments: args })).content[0].text);
   /** The names of the tools the MCP endpoint offers the session registered with `alias`. */
   const tools = (alias) => withMcp(alias, async (mcp) => (await mcp.listTools()).tools.map((x) => x.name));
-  return { url, port, proc, exited, tmp, connect, disconnect, tool, tools };
+  /** The tools (name and description) the MCP endpoint offers the session registered with `alias`. */
+  const toolList = (alias) => withMcp(alias, async (mcp) => (await mcp.listTools()).tools.map((x) => ({ name: x.name, description: x.description })));
+  return { url, port, proc, exited, tmp, connect, disconnect, tool, tools, toolList };
 }
