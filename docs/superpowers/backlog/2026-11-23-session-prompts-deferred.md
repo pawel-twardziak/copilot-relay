@@ -2,8 +2,8 @@
 
 Source: the seven task reviews of `feat/session-prompts` (opus, high) and the scripted real-Copilot run of Task 7.
 Spec: `docs/superpowers/specs/2026-11-23-session-prompts-design.md`. Plan:
-`docs/superpowers/plans/2026-11-23-session-prompts.md`. None of these blocked the merge. Line numbers are left out on
-purpose; the symbol or test name is given instead.
+`docs/superpowers/plans/2026-11-23-session-prompts.md`. None of these blocked the merge. Each item names its file and symbol;
+line numbers are given where they were checked at the final review (branch head `1a36150`) and may drift.
 
 ## A. Worth doing first (analysed below)
 
@@ -51,6 +51,8 @@ purpose; the symbol or test name is given instead.
 13a. `#set-command` and `#set-broker-repo` (single-line inputs in `#settings`, `electron/renderer/index.html`): Enter
     submits the form through its first button (Cancel) and discards the whole Settings visit. Pre-existing; the
     template name input was fixed in the final fix wave (`templateRow` keydown), these two were left.
+    Not verified: the `#set-relay` and `#set-queue` checkboxes in the same form may submit it on Enter as well
+    (Chromium's implicit submission); check with the UI-check driver's `pressEnter()`. Final re-review, Minor.
 
 ## C. Behaviour, small
 
@@ -112,3 +114,5 @@ purpose; the symbol or test name is given instead.
     delete, so the scratch session was left in Copilot's store: `dae14e34-0cd2-46ea-85d2-96ebeba20999`
     (`~/.copilot/session-state/`; the app's delete or a manual removal clears it). Not run: Windows, the corp PC,
     the app's GUI.
+
+<!-- Final re-review cosmetics left as they are: 13a sits in B while C starts at 13; C26/C27 follow D in number; A1's `editPrompt` line is one off. -->
