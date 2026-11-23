@@ -275,10 +275,11 @@ export async function launch({ scenario, settings = {}, width = 1280, height = 8
       ev,
       check,
       resize,
-      /** A new session in the work folder (scripted-work, or the launch's sessionId); later calls act on it. */
-      async newSession() {
+      /** A new session in the work folder (scripted-work, or the launch's sessionId), with own as its own prompt
+       *  part; later calls act on it. */
+      async newSession({ own = "" } = {}) {
         sessionId = scriptedId ?? `scripted-${path.basename(work)}`;
-        await ev(`newSession(${JSON.stringify(work)})`);
+        await ev(`newSession(${JSON.stringify(work)}, ${JSON.stringify(own)})`);
         await check(`${view()} && !${view()}.busy`, "the new session");
         return sessionId;
       },

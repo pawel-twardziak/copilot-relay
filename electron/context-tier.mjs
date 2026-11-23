@@ -93,23 +93,38 @@ export function createTierStore(file) {
 }
 
 /**
- * Switch a session's context window: refusals come back as { refused } before anything changes, so the window
- * keeps the session as it is. Otherwise the override is saved and the session's process closed ({ reopen: true }:
- * the caller reopens it, which starts Copilot with the new flag). A failed close restores the previous override.
+ * Save a setting that only takes effect with a new Copilot process, and close the session's process: refusals come
+ * back as { refused } before anything changes, so the window keeps the session as it is. Otherwise `save()` runs and
+ * the session's process is closed ({ reopen: true }: the caller reopens it, which starts Copilot with the new
+ * setting). A failed close calls `restore(prev)` and rethrows.
+ * @param {{ prev: unknown, save: () => void, restore: (prev: unknown) => void,
+ *           refusal: () => string | null, close: () => Promise<void> }} o
+ */
+export async function saveAndReopen({ prev, save, restore, refusal, close }) {
+  const refused = refusal();
+  if (refused) return { refused };
+  save();
+  try {
+    await close();
+  } catch (e) {
+    restore(prev);
+    throw e;
+  }
+  return { reopen: true };
+}
+
+/**
+ * Switch a session's context window (see saveAndReopen); a failed close restores the previous override.
  * @param {{ sessionId: string, value: unknown, tiers: ReturnType<typeof createTierStore>,
  *           refusal: () => string | null, close: () => Promise<void> }} o
  */
 export async function switchTier({ sessionId, value, tiers, refusal, close }) {
   if (!isContextChoice(value)) return { refused: `Unknown context window: ${value}` };
-  const refused = refusal();
-  if (refused) return { refused };
-  const prev = tiers.get(sessionId);
-  tiers.set(sessionId, value);
-  try {
-    await close();
-  } catch (e) {
-    tiers.set(sessionId, prev ?? INHERIT);
-    throw e;
-  }
-  return { reopen: true };
+  return saveAndReopen({
+    prev: tiers.get(sessionId),
+    save: () => tiers.set(sessionId, value),
+    restore: (prev) => tiers.set(sessionId, prev ?? INHERIT),
+    refusal,
+    close,
+  });
 }

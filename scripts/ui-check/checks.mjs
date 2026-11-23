@@ -2234,4 +2234,81 @@ export const checks = [
       assert.equal(await app.ev(`${V}.discarded.has("h8")`), true, "still unconfirmed");
     },
   },
+  {
+    // the session's prompt reaches its Copilot through the instructions folder (the scripted agent records what it
+    // was started with): on creation, after "Save and restart", in a fork; a delete drops the own part, and no
+    // folder outlives the processes. The session id is a UUID: main takes only those for setPrompt and forks.
+    name: "prompt-applied",
+    modes: ["off"],
+    sessionId: HISTORY_ID,
+    settings: { promptDefault: "D" },
+    async run(app) {
+      const id = JSON.stringify(HISTORY_ID);
+      const V = `views.get(${id})`;
+      const work = path.join(app.dir, "work");
+      const userData = path.join(app.dir, "config", "copilot-relay-desktop");
+      const starts = () => JSON.parse(readFileSync(path.join(work, ".scripted-agent.json"), "utf8")).starts ?? [];
+      const lastStart = () => starts().at(-1)?.instructions;
+      const ownParts = () => {
+        try {
+          return JSON.parse(readFileSync(path.join(userData, "session-prompts.json"), "utf8"));
+        } catch {
+          return {};
+        }
+      };
+      const userMessages = () => app.ev(`${V}.log.querySelectorAll(":scope > .msg.user").length`);
+
+      // 1. a new session starts with the default part and its own part
+      await app.newSession({ own: "O1" });
+      assert.deepEqual(lastStart(), ["D\n\nO1"]);
+      assert.equal(ownParts()[HISTORY_ID], "O1");
+      await app.send("Look around.");
+      await app.idle();
+      const n = starts().length;
+      // 2. the same text: nothing restarts
+      assert.deepEqual(await app.ev(`api.setPrompt(${id}, "O1")`), { unchanged: true });
+      assert.equal(starts().length, n, "no new start for an unchanged prompt");
+      assert.equal(await app.ev(`${V}.dead`), false);
+      // 3. a new text: main closes the session, the reopen starts Copilot with it and replays the chat
+      assert.deepEqual(await app.ev(`api.setPrompt(${id}, "O2")`), { reopen: true });
+      await app.ev(`reopenView(${V})`, "the session to reopen");
+      await app.idle();
+      assert.equal(starts().length, n + 1);
+      assert.deepEqual(lastStart(), ["D\n\nO2"]);
+      assert.equal(await userMessages(), 1, "the reopened chat keeps the earlier turn");
+      // 4. a fork keeps the own part (Copilot's history files of the session, written here: the agent keeps none)
+      const iso = new Date(2026, 10, 23, 9, 0).toISOString();
+      const dir = path.join(app.dir, "copilot-home", "session-state", HISTORY_ID);
+      mkdirSync(dir, { recursive: true });
+      const events = [
+        { type: "session.start", data: { sessionId: HISTORY_ID, context: { cwd: work } }, timestamp: iso },
+        { type: "user.message", data: { content: "Look around." }, timestamp: iso },
+        { type: "assistant.message", data: { messageId: "m1", content: "x" }, timestamp: iso },
+      ];
+      writeFileSync(path.join(dir, "events.jsonl"), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
+      const fork = await app.ev(`api.forkSession(${id}, { ordinal: 1, text: "Look around.", where: "afterReply" })`);
+      assert.notEqual(fork.sessionId, HISTORY_ID);
+      assert.equal(ownParts()[fork.sessionId], "O2");
+      const F = `views.get(${JSON.stringify(fork.sessionId)})`;
+      await app.ev(`openSession({ sessionId: ${JSON.stringify(fork.sessionId)}, cwd: ${JSON.stringify(work)} })`, "the fork to open");
+      await app.check(`${F} && !${F}.resuming && !${F}.dead`, "the fork's view");
+      // the agent keeps one file per folder, so the fork's start is the last one there
+      assert.equal(starts().length, n + 2);
+      assert.deepEqual(lastStart(), ["D\n\nO2"]);
+      // 5. deleting the fork drops its own part
+      const deleted = await app.ev(`api.deleteSession(${JSON.stringify(fork.sessionId)})`);
+      assert.ok(!deleted?.refused && !deleted?.stuck, JSON.stringify(deleted));
+      assert.equal(fork.sessionId in ownParts(), false);
+      assert.equal(ownParts()[HISTORY_ID], "O2");
+      // 6. no prompt folder outlives the processes
+      const run = path.join(userData, "session-prompts", "run");
+      assert.ok(readdirSync(run).length > 0, "the open session's folder exists while it runs");
+      await app.close({ keep: true });
+      try {
+        assert.deepEqual(readdirSync(run), []);
+      } finally {
+        rmSync(app.dir, { recursive: true, force: true });
+      }
+    },
+  },
 ];

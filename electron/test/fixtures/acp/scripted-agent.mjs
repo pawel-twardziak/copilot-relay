@@ -17,9 +17,13 @@
 // <cwd>/.scripted-agent.json; session/load sends them again, in order, before its answer. The scenario's optional
 // load: { delay: ms, error: message } holds that answer back for delay ms, and makes it that error (after the replay).
 // The session id is scripted-<folder name>, or $SCRIPTED_SESSION_ID (a UUID, for checks that need a session Copilot's
-// history files can belong to).
+// history files can belong to); session/load takes the id it is asked for (a fork's).
+// The custom instructions the process was started with (the text, trimmed, of every *.instructions.md in
+// <dir>/.github/instructions/ of each dir in $COPILOT_CUSTOM_INSTRUCTIONS_DIRS, as Copilot reads them) are appended
+// as { instructions: string[] } to the file's `starts` when the process opens its session (session/new or load; a
+// process that opens none, like the app's lister, writes nothing). session/new keeps the starts of the folder's file.
 // Unknown arguments (--acp --stdio, the context tier…) are ignored.
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
@@ -30,18 +34,37 @@ const send = (msg) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...m
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const sessionIdOf = (cwd) => process.env.SCRIPTED_SESSION_ID || `scripted-${path.basename(cwd)}`;
 
-let session = null; // { id, file, updates, mcpServers }
+/** The instructions files Copilot would read at this start, in the order of the variable's dirs and by file name. */
+function startInstructions() {
+  const out = [];
+  for (const dir of (process.env.COPILOT_CUSTOM_INSTRUCTIONS_DIRS ?? "").split(",").filter(Boolean)) {
+    const folder = path.join(dir, ".github", "instructions");
+    let names = [];
+    try {
+      names = readdirSync(folder).filter((n) => n.endsWith(".instructions.md")).sort();
+    } catch {} // a dir without instructions
+    for (const n of names) out.push(readFileSync(path.join(folder, n), "utf8").trim());
+  }
+  return out;
+}
+const started = { instructions: startInstructions() }; // read at start: the folder may be gone at exit
+
+let session = null; // { id, file, updates, starts, mcpServers }
 let nextId = 0;
 const answers = new Map(); // id of a request we sent -> resolve
 let cancelPlaying = () => {}; // session/cancel: ends the prompt being played (play)
 
-function open(cwd, fresh, mcpServers) {
+function open(cwd, fresh, mcpServers, id = sessionIdOf(cwd)) {
   const file = path.join(cwd, ".scripted-agent.json");
-  const updates = fresh ? [] : JSON.parse(readFileSync(file, "utf8")).updates;
-  session = { id: sessionIdOf(cwd), file, updates, mcpServers: mcpServers ?? [] };
-  if (fresh) save();
+  const kept = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null;
+  if (!fresh && !kept) throw new Error(`no session in ${cwd}`);
+  const updates = fresh ? [] : kept.updates;
+  const starts = Array.isArray(kept?.starts) ? kept.starts : [];
+  if (!session) starts.push(started); // once per process: its first session
+  session = { id, file, updates, starts, mcpServers: mcpServers ?? [] };
+  save();
 }
-const save = () => writeFileSync(session.file, JSON.stringify({ sessionId: session.id, updates: session.updates }, null, 2));
+const save = () => writeFileSync(session.file, JSON.stringify({ sessionId: session.id, updates: session.updates, starts: session.starts }, null, 2));
 
 function update(u, record = true) {
   if (record) {
@@ -129,8 +152,8 @@ const handlers = {
     open(cwd, true, mcpServers);
     return { sessionId: session.id, configOptions: [] };
   },
-  "session/load": async ({ cwd = process.cwd(), mcpServers } = {}) => {
-    open(cwd, false, mcpServers);
+  "session/load": async ({ sessionId, cwd = process.cwd(), mcpServers } = {}) => {
+    open(cwd, false, mcpServers, sessionId || sessionIdOf(cwd));
     for (const u of session.updates) update(u, false);
     if (load.delay) await sleep(load.delay);
     if (load.error) throw new Error(load.error);

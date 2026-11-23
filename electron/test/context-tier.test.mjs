@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
-import { contextOption, createTierStore, effectiveTier, isContextChoice, switchTier, tierArgs, withContextOption } from "../context-tier.mjs";
+import { contextOption, createTierStore, effectiveTier, isContextChoice, saveAndReopen, switchTier, tierArgs, withContextOption } from "../context-tier.mjs";
 
 let dir;
 let file;
@@ -153,4 +153,43 @@ test("switchTier: a failed close restores the previous override and throws", asy
   const g = fakeSwitch({ closeError: new Error("stuck"), storeFile: path.join(dir, "other.json") });
   await assert.rejects(g.run("long_context"), /stuck/);
   assert.equal(g.store.get("s1"), null);
+});
+
+test("saveAndReopen restores on a failed close", async () => {
+  const calls = [];
+  const err = new Error("Copilot did not exit");
+  await assert.rejects(
+    saveAndReopen({
+      prev: "old",
+      save: () => calls.push("save"),
+      restore: (prev) => calls.push(`restore ${prev}`),
+      refusal: () => null,
+      close: async () => {
+        calls.push("close");
+        throw err;
+      },
+    }),
+    (e) => e === err,
+  );
+  assert.deepEqual(calls, ["save", "close", "restore old"]);
+});
+
+test("saveAndReopen refuses before saving", async () => {
+  const calls = [];
+  const res = await saveAndReopen({
+    prev: "old",
+    save: () => calls.push("save"),
+    restore: () => calls.push("restore"),
+    refusal: () => "Wait until Copilot finishes this turn.",
+    close: async () => calls.push("close"),
+  });
+  assert.deepEqual(res, { refused: "Wait until Copilot finishes this turn." });
+  assert.deepEqual(calls, []);
+});
+
+test("saveAndReopen saves, closes and answers reopen", async () => {
+  const calls = [];
+  const res = await saveAndReopen({ prev: null, save: () => calls.push("save"), restore: () => calls.push("restore"), refusal: () => null, close: async () => calls.push("close") });
+  assert.deepEqual(res, { reopen: true });
+  assert.deepEqual(calls, ["save", "close"]);
 });

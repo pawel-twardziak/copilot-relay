@@ -2744,12 +2744,13 @@ async function openSession(s, { activate: show = true } = {}) {
   }
 }
 
-async function newSession(cwd) {
+/** own: the session's own prompt part. */
+async function newSession(cwd, own = "") {
   try {
     cwd ??= await api.pickDir();
     if (!cwd) return;
     setStatus(`Starting Copilot in ${cwd}…`);
-    const res = await api.newSession(cwd);
+    const res = await api.newSession(cwd, own);
     setStatus("");
     const v = new SessionView({ sessionId: res.sessionId, cwd, title: "" });
     views.set(res.sessionId, v);
