@@ -11,6 +11,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { AcpConnection } from "./acp.mjs";
 import { countUserMessages, deleteSession, describeCut, forkSession, isSessionId, messageTimes, purgeDeleted, sessionCreatedAt, sessionDir, truncateSession } from "./history.mjs";
+import { createLastActivity } from "./last-activity.mjs";
 import { createUsagePusher } from "./usage.mjs";
 import { JobScheduler } from "./scheduler.mjs";
 import { scheduleInfo } from "./jobs.mjs";
@@ -455,15 +456,19 @@ function handle(channel, fn) {
 let purging = Promise.resolve(); // leftovers of failed deletes are removed before the first list (briefly waited for:
 // they have no workspace.yaml/events.jsonl left, so a slow purge of a big one must not hold up the sidebar)
 
-/** Copilot's session list, at most 50 pages; complete is false when it stopped with pages left. */
+const addLastActivity = createLastActivity();
+
+/** Copilot's session list, at most 50 pages; complete is false when it stopped with pages left. Each session also
+ *  has lastActivityAt: its last message or tool call (Copilot's updatedAt also moves when a session is only opened). */
 async function listSessions() {
   await Promise.race([purging, new Promise((r) => setTimeout(r, 1000))]);
   const conn = await getLister();
-  return listAllPages((method, params) => conn.request(method, params), {
+  const { sessions, complete } = await listAllPages((method, params) => conn.request(method, params), {
     onPage: (list) => {
       for (const x of list) if (x.cwd) knownFolders.add(x.cwd);
     },
   });
+  return { sessions: await addLastActivity(sessions), complete };
 }
 handle("sessions:list", async () => (await listSessions()).sessions);
 // the sidebar's refresh: only a complete list may prune the sub-session tree

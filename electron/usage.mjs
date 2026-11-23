@@ -8,14 +8,14 @@ const TAIL_BYTES = 2 * 1024 * 1024;
 const MAX_FULL_READ = 64 * 1024 * 1024;
 const QUOTA_FILES = 5;
 
-/** Lines of the file's last 2 MiB, or of the whole file when `whole`; null if unreadable. Never includes a partial first line. */
-async function readLines(file, whole) {
+/** Lines of the file's last `tailBytes` (2 MiB), or of the whole file when `whole`; null if unreadable. Never includes a partial first line. */
+export async function readLines(file, whole, tailBytes = TAIL_BYTES) {
   let fh;
   try {
     fh = await fs.open(file, "r");
     const { size } = await fh.stat();
     if (whole && size > MAX_FULL_READ) return null;
-    const len = whole ? size : Math.min(size, TAIL_BYTES);
+    const len = whole ? size : Math.min(size, tailBytes);
     const buf = Buffer.alloc(len);
     let got = 0;
     while (got < len) {

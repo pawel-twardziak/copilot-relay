@@ -246,7 +246,7 @@ function ago(iso) {
 // ---------------------------------------------------------------------------
 // state
 
-let sessions = []; // from session/list: { sessionId, cwd, title, updatedAt }
+let sessions = []; // from session/list: { sessionId, cwd, title, updatedAt } plus lastActivityAt (main)
 let links = []; // the broker's sub-session links (api.getLinks / api.onLinks), keys "cli:<sessionId>"
 let tree = SessionTree.index(links); // parent/child index over `links` (bare session ids)
 let heldByKey = {}; // the broker's count of held child replies per key "cli:<sessionId>" (for sessions not open here)
@@ -3034,7 +3034,7 @@ function item(s, v, { showProject = false, depth = 0 } = {}) {
         v?.needsAttention && h("span", { class: "attention", title: "Waiting for your answer" }, "!"),
         heldCount > 0 && h("span", { class: "held-mark", title: HeldReplies.markTitle(heldCount) }, `⏸ ${heldCount}`),
       ),
-      h("div", { class: "m" }, [relation, showProject && baseName(s.cwd), s.updatedAt ? ago(s.updatedAt) : "", s.sessionId.slice(0, 8)].filter(Boolean).join(" · ")),
+      h("div", { class: "m" }, [relation, showProject && baseName(s.cwd), UiState.activityAt(s) ? ago(UiState.activityAt(s)) : "", s.sessionId.slice(0, 8)].filter(Boolean).join(" · ")),
     ),
     h(
       "div",

@@ -160,7 +160,7 @@ function yamlUnquote(v) {
 }
 
 /** Value of a top-level `key: value` line in workspace.yaml, or undefined. */
-function yamlGet(text, key) {
+export function yamlGet(text, key) {
   const m = text.match(new RegExp(`^${key}:(.*)$`, "m"));
   return m ? yamlUnquote(m[1]) : undefined;
 }

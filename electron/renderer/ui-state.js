@@ -2,7 +2,10 @@
 // Loaded as a classic <script> (sets globalThis.UiState) and via require() in tests.
 "use strict";
 
-const time = (s) => new Date(s.updatedAt ?? 0).getTime();
+/** When a session was last used: its last message or tool call (main: last-activity.mjs), else Copilot's updatedAt,
+ *  which also moves when the session is only opened or closed. */
+const activityAt = (s) => s.lastActivityAt ?? s.updatedAt;
+const time = (s) => new Date(activityAt(s) ?? 0).getTime();
 const newestFirst = (a, b) => time(b) - time(a);
 
 /**
@@ -117,6 +120,6 @@ function panelLayout(viewWidth, stored) {
   return { narrow, width: Math.max(PANEL.min, Math.min(want, room)) };
 }
 
-const UiState = { PANEL, panelLayout, listModel, CHAT_SCALE, stepScale, imageMentions, VIEWER_ZOOM, fitScale, zoomAt, acceptDelivery, deliveryAck };
+const UiState = { PANEL, panelLayout, listModel, activityAt, CHAT_SCALE, stepScale, imageMentions, VIEWER_ZOOM, fitScale, zoomAt, acceptDelivery, deliveryAck };
 globalThis.UiState = UiState;
 if (typeof module !== "undefined") module.exports = UiState;
