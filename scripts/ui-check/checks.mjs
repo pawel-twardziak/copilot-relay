@@ -2136,7 +2136,9 @@ export const checks = [
     // replies from sub-sessions wait in their own list until approved (messages as main sends them: fromChild)
     name: "held-replies",
     modes: ["off"],
+    sessionId: HISTORY_ID, // the switch is stored per session id; main accepts only a UUID
     async run(app) {
+      const V = `views.get(${JSON.stringify(HISTORY_ID)})`;
       await firstTurn(app);
       const child = (id, from, text = "first\nmore") => app.ev(`${V}.incoming(${JSON.stringify({ from, text, prompt: `P-${id}`, deliveryId: id, fromChild: true, wake: true })})`);
       const rows = () => app.ev(`${V}.el.querySelectorAll(".held-row").length`);

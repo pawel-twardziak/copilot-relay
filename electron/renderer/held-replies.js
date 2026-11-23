@@ -30,6 +30,14 @@ const listTitle = (n) => `Replies from sub-sessions (${n})`;
 /** The approval switch shows for a session with children or with held replies. */
 const showSwitch = ({ hasChildren, held }) => hasChildren || held > 0;
 
-const HeldReplies = { WAIT_NOTE_MS, approvedPrompt, sidebarCount, markTitle, listTitle, comeBackLine, showSwitch };
+/** Inserts `item` into `list` ordered by arrivedAt (oldest first), after any item with an equal time (stable). Returns `list`. */
+function insertByArrival(list, item) {
+  let i = list.length;
+  while (i > 0 && list[i - 1].arrivedAt > item.arrivedAt) i--;
+  list.splice(i, 0, item);
+  return list;
+}
+
+const HeldReplies = { insertByArrival, WAIT_NOTE_MS, approvedPrompt, sidebarCount, markTitle, listTitle, comeBackLine, showSwitch };
 globalThis.HeldReplies = HeldReplies;
 if (typeof module !== "undefined") module.exports = HeldReplies;

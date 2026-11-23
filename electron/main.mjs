@@ -160,9 +160,10 @@ function relayStart(sessionId, cwd, { cfg, alias }, { name, parentKey } = {}) {
     // human: true/false from this broker, undefined from an older one (the renderer then falls back to the sender name)
     onMessage: (m) => {
       // fromChild is set by the broker when a direct child sent it; such a message waits for the user's approval
-      const payload = { sessionId, from: m.from, human: m.human, text: m.text, prompt: m.prompt, fromCwd: m.fromCwd, deliveryId: m.deliveryId, wake: m.wake, fromChild: m.fromChild === true };
+      const payload = { sessionId, from: m.from, human: m.human, text: m.text, prompt: m.prompt, fromCwd: m.fromCwd, deliveryId: m.deliveryId, wake: m.wake, fromChild: m.fromChild === true, arrivedAt: Date.now() };
       send("relay:message", payload);
-      if (payload.fromChild && m.deliveryId && heldCache.add(sessionId, payload)) notifyIfUnfocused("A sub-session replied", `${m.from} → ${client.name}`);
+      // cached whatever the switch says; the notification is only for a reply that really waits
+      if (payload.fromChild && m.deliveryId && heldCache.add(sessionId, payload) && holds.get(sessionId)) notifyIfUnfocused("A sub-session replied", `${m.from} → ${client.name}`);
     },
     onSessionRequest: (req) => sessionRequested(sessionId, req),
     onReported: () => {
@@ -260,6 +261,7 @@ async function brokerPost(route, body) {
     const error = await r.json().then((j) => j?.error, () => null);
     throw new Error(`The relay broker refused the request: ${error ?? `HTTP ${r.status}`}.`);
   }
+  return r.json().catch(() => null); // the answer body, null when there is none (204)
 }
 
 function linkKeys(keys) {
@@ -943,14 +945,30 @@ handle("delegation:answer", async (requestId, approved) => {
 
 handle("relay:ack", async (sessionId, id) => {
   const relay = open.get(sessionId)?.relay;
-  if (!relay) return false;
+  if (!relay) {
+    // a dead view (the process has exited): the broker's durable item is acknowledged through its HTTP route, so a
+    // discarded reply does not come back when the view is closed instead of resumed
+    if (!isSessionId(sessionId)) return false;
+    try {
+      const answer = await brokerPost("/api/peer/ack", { key: `cli:${sessionId}`, id });
+      if (answer?.ok !== true) return false;
+    } catch {
+      return false; // broker down: the renderer keeps the id in its discarded set
+    }
+    heldCache.ack(sessionId, id);
+    return true;
+  }
   await relay.ack(id);
   heldCache.ack(sessionId, id);
   return true;
 });
 
-handle("held:get", (sessionId) => holds.get(sessionId));
-handle("held:set", (sessionId, on) => holds.set(sessionId, on !== false));
+const checkedSessionId = (sessionId) => {
+  if (!isSessionId(sessionId)) throw new Error(`Invalid session id: ${sessionId}`);
+  return sessionId;
+};
+handle("held:get", (sessionId) => holds.get(checkedSessionId(sessionId)));
+handle("held:set", (sessionId, on) => holds.set(checkedSessionId(sessionId), on !== false));
 
 // ---------- history: fork / delete from a message ----------
 

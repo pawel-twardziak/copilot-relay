@@ -34,3 +34,9 @@ test("comeBackLine has a singular form", () => {
   assert.equal(HeldReplies.comeBackLine(1), "1 reply from sub-sessions will come back when the session is open again.");
   assert.equal(HeldReplies.comeBackLine(2), "2 replies from sub-sessions will come back when the session is open again.");
 });
+
+test("insertByArrival orders by arrivedAt and is stable for equal times", () => {
+  const list = [];
+  for (const [id, arrivedAt] of [["b", 20], ["c", 30], ["a", 10], ["b2", 20]]) HeldReplies.insertByArrival(list, { id, arrivedAt });
+  assert.deepEqual(list.map((x) => x.id), ["a", "b", "b2", "c"]);
+});

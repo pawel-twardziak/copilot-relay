@@ -1181,7 +1181,8 @@ class SessionView {
 
   /** A reply from a direct sub-session: it waits in the list until you approve it. */
   hold(m) {
-    this.held.push({ id: ++queueItemSeq, from: m.from, text: m.text, prompt: m.prompt, fromCwd: m.fromCwd ?? null, deliveryId: m.deliveryId, arrivedAt: Date.now() });
+    // main stamps arrivedAt once, so a reload or a replay keeps the time and the order (oldest on top)
+    HeldReplies.insertByArrival(this.held, { id: ++queueItemSeq, from: m.from, text: m.text, prompt: m.prompt, fromCwd: m.fromCwd ?? null, deliveryId: m.deliveryId, arrivedAt: m.arrivedAt ?? Date.now() });
     this.renderHeld();
     renderList();
   }
