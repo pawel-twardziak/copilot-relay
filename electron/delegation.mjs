@@ -74,9 +74,9 @@ export function reloadWarning(children, requests, reopens = 0) {
   };
 }
 
-/** Children that still owe their parent a report. An adopted child was given no task, so it owes none. */
+/** Children that still owe their parent a report (delegated or adopted). */
 export function unreportedChildren(entries) {
-  return [...entries].filter((e) => isChild(e) && !e.reported && !e.adopted);
+  return [...entries].filter((e) => isChild(e) && !e.reported);
 }
 
 /** The relay's own tools, by the server-prefixed title of their tool call: they run without Copilot's prompt

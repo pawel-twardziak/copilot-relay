@@ -120,9 +120,9 @@ test("unreportedChildren returns children without a report from any iterable", (
   assert.deepEqual(unreportedChildren(entries.values()), [entries.get("a"), entries.get("d")]);
 });
 
-test("an adopted child is not counted as unreported", () => {
-  const entries = [{ parentSessionId: "p", reported: false, adopted: true }, { parentSessionId: "p", reported: false }];
-  assert.deepEqual(unreportedChildren(entries), [entries[1]]);
+test("unreportedChildren counts adopted children", () => {
+  const entries = [{ parentSessionId: "p", adopted: true, reported: false }, { parentSessionId: "p", adopted: true, reported: true }];
+  assert.deepEqual(unreportedChildren(entries), [entries[0]]);
 });
 
 test("isRelayTool knows the relay's six tools by their prefixed title", () => {

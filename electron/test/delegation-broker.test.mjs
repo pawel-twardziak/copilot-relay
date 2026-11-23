@@ -905,6 +905,8 @@ test("an approved adopt links the pair, wakes the parent and only informs the ch
   assert.equal(s.store.pending("cli:p").length, 1); // durable until acked
   const toChild = s.pushes["cli:c"].at(-1);
   assert.match(toChild.text, new RegExp(`^The user made this session a child of "${s.nm("cli:p")}"\\.`));
+  assert.match(toChild.text, /waits for your report/);
+  assert.match(toParent.text, /will send you its result/);
   assert.equal(toChild.wake, false);
   assert.equal(toChild.deliveryId, undefined);
   assert.equal(s.store.pending("cli:c").length, 0);
@@ -1064,14 +1066,24 @@ test("a release request outlives its child leaving the registry and is refused o
   assert.equal(s.d.answerLink("cli:p", requestId, true).result, "refused");
 });
 
-test("an adopted child owes no report but can report once", () => {
+test("an adopted child that ends without reporting gets its parent the notice", () => {
   const s = linkSetup();
   s.adopt("cli:p", "cli:c");
   s.d.answerLink("cli:p", s.cards("cli:p")[0].requestId, true);
   const before = s.pushes["cli:p"].length;
   s.d.died("cli:c");
-  assert.equal(s.pushes["cli:p"].length, before); // no "ended without reporting"
+  assert.equal(s.pushes["cli:p"].length, before + 1);
+  assert.match(s.pushes["cli:p"].at(-1).text, new RegExp(String.raw`Session "${s.nm("cli:c")}" ended without reporting a result\.`));
+});
+
+test("an adopted child that reported gets its parent no notice and cannot report twice", () => {
+  const s = linkSetup();
+  s.adopt("cli:p", "cli:c");
+  s.d.answerLink("cli:p", s.cards("cli:p")[0].requestId, true);
   assert.match(s.d.report("cli:c", "gotowe"), /^Report delivered/);
+  const before = s.pushes["cli:p"].length;
+  s.d.died("cli:c");
+  assert.equal(s.pushes["cli:p"].length, before);
   assert.match(s.d.report("cli:c", "znowu"), /already reported/);
 });
 

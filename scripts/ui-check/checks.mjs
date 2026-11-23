@@ -1240,8 +1240,8 @@ export const checks = [
       assert.equal(await answered(0), "→ Linked");
       await app.check(`tree.parentOf.get(${JSON.stringify(CHILD)}) === ${JSON.stringify(PARENT)}`, "the link in the tree (links:update)");
       assert.equal(await linkedOnBroker(), true, "linked on the broker after the approval");
-      await notice(C, ":scope > .msg.system", `The user made this session a child of "${parentName}". Send it results with the report_result tool.`, "the child's notice");
-      await notice(V, ":scope > .msg.relay", `Session "${childName}" is now your child. It can send you results with report_result.`, "the parent's notice");
+      await notice(C, ":scope > .msg.system", `The user made this session a child of "${parentName}". "${parentName}" cannot see this chat and waits for your report. When the work you are doing is done, always send it the result (or a short summary, or a note that it is finished) with the report_result tool, exactly once.`, "the child's notice");
+      await notice(V, ":scope > .msg.relay", `Session "${childName}" is now your child. It will send you its result with report_result.`, "the parent's notice");
       await app.check(`${C}.parentSessionId === ${JSON.stringify(PARENT)}`, "the child's parentSessionId");
       await frames(app);
       assert.equal(await app.ev(`${C}.busy`), false, "the child started no turn");
