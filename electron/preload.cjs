@@ -46,6 +46,8 @@ contextBridge.exposeInMainWorld("api", {
   // busy }): the cached snapshot at once, the fresh one follows through onLinks
   getLinks: () => call("links:get"),
   // keys are "cli:<sessionId>": removed from the tree by the user / no longer in Copilot's session list
+  getHoldReplies: (sessionId) => call("held:get", sessionId),
+  setHoldReplies: (sessionId, on) => call("held:set", sessionId, on),
   forgetLinks: (keys) => call("links:forget", keys),
   reportMissing: (keys) => call("links:missing", keys),
   // the user's answer to a reopen card; reason "missing" when the target session no longer exists

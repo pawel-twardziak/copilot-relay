@@ -174,6 +174,14 @@ export class RelayClient {
     return (await r.json()).links;
   }
 
+  /** The broker's link tree and, per parent key, the count of replies held for approval ({} from an older broker). */
+  async fetchLinkState() {
+    const r = await this.#fetch("/api/links");
+    if (!r.ok) throw new Error(`broker answered ${r.status}`);
+    const body = await r.json();
+    return { links: body.links, held: body.held && typeof body.held === "object" ? body.held : {} };
+  }
+
   #fetch(p, init) {
     return fetch(this.url + p, init);
   }

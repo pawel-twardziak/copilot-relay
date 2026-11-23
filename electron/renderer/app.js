@@ -3434,7 +3434,8 @@ api.onLinkRequest((r) => forView(r.sessionId, (v) => v.linkCard(r)));
 // the sub-session tree: the cached links at once, the broker's fresh ones (and every change) through onLinks
 let freshLinks = false;
 function setLinks(next) {
-  links = Array.isArray(next) ? next : [];
+  const list = Array.isArray(next) ? next : next?.links;
+  links = Array.isArray(list) ? list : [];
   tree = SessionTree.index(links);
   renderList(); // redraws the relation bars too
 }

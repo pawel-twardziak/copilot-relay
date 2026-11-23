@@ -96,3 +96,14 @@ test("default delays", async (t) => {
   assert.equal(c.retryMs, 1000);
   assert.equal(c.retryMaxMs, 15_000);
 });
+
+test("fetchLinkState returns the links and the held counts ({} when the broker sent none)", async (t) => {
+  let body = { links: [], held: { "cli:p": 1 } };
+  const server = http.createServer((req, res) => res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(body)));
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  t.after(() => server.close());
+  const c = new RelayClient({ url: `http://127.0.0.1:${server.address().port}`, key: "k", cwd: ".", onMessage: () => {} });
+  assert.deepEqual(await c.fetchLinkState(), { links: [], held: { "cli:p": 1 } });
+  body = { links: [] };
+  assert.deepEqual(await c.fetchLinkState(), { links: [], held: {} });
+});
