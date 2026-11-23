@@ -118,6 +118,13 @@ test("statusText", () => {
   assert.equal(statusText({}), "");
 });
 
+test("statusText shows held replies only when idle with an empty queue", () => {
+  assert.equal(statusText({ held: 1 }), "1 reply waiting for approval");
+  assert.equal(statusText({ held: 2 }), "2 replies waiting for approval");
+  assert.equal(statusText({ held: 2, queued: 1 }), "1 message(s) waiting");
+  assert.equal(statusText({ held: 2, busy: true }), "Working…");
+});
+
 test("tracker adopts an unknown id only on an explicit pending/in_progress status", () => {
   const t = createToolTracker();
   t.update({ sessionUpdate: "tool_call_update", toolCallId: "a" }); // content-only update, no status
