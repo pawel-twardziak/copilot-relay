@@ -45,6 +45,7 @@
       "repo-changes.mjs",
       "repo-track.mjs",
       "session-list.mjs",
+      "last-activity.mjs",
       "activity-panel.mjs",
       "context-tier.mjs",
       "session-prompts.mjs",

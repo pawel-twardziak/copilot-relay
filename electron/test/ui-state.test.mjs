@@ -176,3 +176,14 @@ test("panelLayout: wide keeps 480 px for the chat, narrow below 760 px", () => {
   assert.deepEqual(UiState.panelLayout(400, 420), { narrow: true, width: 360 }); // 400 - 40
   assert.deepEqual(UiState.panelLayout(980, NaN), { narrow: false, width: 420 }); // default
 });
+
+test("order and shown time follow the last activity, not Copilot's updatedAt", () => {
+  const opened = { ...S("old", "/a", "2026-11-23T22:37:00Z"), lastActivityAt: "2026-11-23T13:26:00Z" }; // only opened late
+  const used = { ...S("new", "/a", "2026-11-23T20:00:00Z"), lastActivityAt: "2026-11-23T20:00:00Z" };
+  const unknown = { ...S("unknown", "/a", "2026-11-23T15:00:00Z"), lastActivityAt: null }; // falls back to updatedAt
+  const m = listModel([opened, used, unknown]);
+  assert.deepEqual(ids(m.groups[0].sessions), ["new", "unknown", "old"]);
+  assert.deepEqual(ids(listModel([opened, used, unknown], { pinned: new Set(["old", "new"]) }).pinned), ["new", "old"]);
+  assert.equal(UiState.activityAt(opened), "2026-11-23T13:26:00Z");
+  assert.equal(UiState.activityAt(unknown), "2026-11-23T15:00:00Z");
+});
