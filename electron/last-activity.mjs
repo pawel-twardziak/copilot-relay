@@ -25,14 +25,15 @@ function lastEventTime(lines) {
   return null;
 }
 
+/** False only when there is certainly no such file: a file that cannot be looked at counts as there. */
+const exists = (file) => fs.stat(file).then(() => true, (e) => e?.code !== "ENOENT");
+
 /** { time } of the file's last activity event (null: it has none, or there is no file); { unknown: true } when the
  *  file is there but could not be read to the end of the search (it is too big, or a read failed). */
 async function lastEventTimeOf(file) {
-  let seen = false;
   for (const bytes of [...TAILS, null]) {
     const read = await readLines(file, bytes === null, bytes ?? undefined);
-    if (!read) return seen ? { unknown: true } : { time: null };
-    seen = true;
+    if (!read) return (await exists(file)) ? { unknown: true } : { time: null };
     const time = lastEventTime(read.lines);
     if (time !== null || !read.truncated) return { time };
   }

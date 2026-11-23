@@ -93,6 +93,12 @@ describe("readLastActivity", () => {
     assert.equal(await read(id), null);
   });
 
+  test("an events file that is there but cannot be read: unknown, not the creation time", async () => {
+    const id = put(null, { createdAt: "2026-11-01T10:00:00.000Z" });
+    fs.mkdirSync(path.join(home, "session-state", id, "events.jsonl")); // a folder: reading it fails on every platform
+    assert.equal(await read(id), null);
+  });
+
   test("a half-written last line and an event without a readable time are skipped", async () => {
     const id = put([START, ev("user.message", "2026-11-23T13:00:00.000Z"), ev("assistant.message", "not a date"), '{"type":"assistant.message","timest']);
     assert.equal(await read(id), "2026-11-23T13:00:00.000Z");

@@ -7,14 +7,15 @@ carries `lastActivityAt` (`electron/last-activity.mjs`). None of these blocked t
 at the fix round's commit and may drift.
 
 Fixed in the fix round, so not listed below: a history over 64 MiB showed its creation time (now unknown, the
-sidebar falls back to `updatedAt`); an unreadable result was remembered until `updatedAt` changed (unknown times
-are no longer remembered); the cache depended on `updatedAt` changing with every write (it is now keyed on the size
+sidebar falls back to `updatedAt`); an unreadable result was remembered until `updatedAt` changed (an events file
+that is there but cannot be read gives an unknown time, found by the re-review of the fix round (opus, high), and
+unknown times are no longer remembered); the cache depended on `updatedAt` changing with every write (it is now keyed on the size
 and modification time of `events.jsonl`, `activityStamp`); the whole-file and too-big steps had no test.
 
 ## A. Worth doing first (analysed below)
 
 1. **Reading the whole file costs memory when several big histories need it at once**
-   (`electron/last-activity.mjs`, `lastEventTimeOf` l.30, `TAILS` l.11, `readLines` in `electron/usage.mjs`). The
+   (`electron/last-activity.mjs`, `lastEventTimeOf`, `TAILS`, `readLines` in `electron/usage.mjs`). The
    whole file (up to 64 MiB) is read only when the last 2 MiB holds no `user.*`, `assistant.*` or `tool.*` event.
    The reviewer's synthetic run: one 60 MiB file takes 126 ms; eight in parallel take 715 ms and about 1.2 GB RSS
    in the main process. Real event lines reach 294 KB, so the 64 KiB step often misses but the 2 MiB step catches
@@ -44,15 +45,19 @@ and modification time of `events.jsonl`, `activityStamp`); the whole-file and to
 
 ## D. Tests and housekeeping
 
-7. **Not run on Windows**: reading `events.jsonl` while Copilot writes it, a delete racing an open read handle,
+7. **The last fix (an existing but unreadable `events.jsonl` gives unknown, `exists` in
+   `electron/last-activity.mjs`) was not reviewed again**; it has a test.
+8. **The "too big to search" test writes a 65 MiB file** (`electron/test/last-activity.test.mjs`): sparse on
+   Linux, not on NTFS, so it may be slow on the Windows CI runner.
+9. **Not run on Windows**: reading `events.jsonl` while Copilot writes it, a delete racing an open read handle,
    and the cost of the first list on the corporate PC (about 95 sessions). On Linux the first pass over 78 real
    session folders took 11 ms.
-8. **Not checked in the running app on real sessions**: the UI checks (scripted agent) pass, but the sidebar with
+10. **Not checked in the running app on real sessions**: the UI checks (scripted agent) pass, but the sidebar with
    real Copilot sessions was not looked at after the fix.
-9. **Which write moved `updatedAt` in the reported case is not known.** Reproduced locally (Copilot CLI
+11. **Which write moved `updatedAt` in the reported case is not known.** Reproduced locally (Copilot CLI
    1.0.115): `session/load` and `session/close` alone write nothing; `session/load`, then
    `session/set_config_option` with the model's current value, then close, appends `session.resume`,
    `session.model_change` and `session.shutdown`. In the report five sessions showed the same "11 min ago"; the last
    lines of one of their `events.jsonl` files on that PC would name the write.
-10. **Where Copilot takes `updatedAt` from for sessions without `events.jsonl` is not known** (68 of 78 local
+12. **Where Copilot takes `updatedAt` from for sessions without `events.jsonl` is not known** (68 of 78 local
     session folders have none; probably `updated_at` of `workspace.yaml`). The cache no longer depends on it.
