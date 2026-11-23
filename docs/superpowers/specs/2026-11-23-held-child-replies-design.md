@@ -237,8 +237,7 @@ A held message is an unacknowledged outbox item addressed to the parent; nothing
   Broker logic in `delegation-broker.test.mjs`, the renderer's pure rules in a unit test, the list and the switch in a
   UI check.
 - The broker changes: after updating the app, users press "Update and restart broker".
-- Release: the next minor version after whatever is on `main` when this merges (`v0.20.0` is link-sessions;
-  `feat/changes-tree` also plans a minor).
+- Release: `v0.22.0` (`v0.20.0` is link-sessions, `v0.21.0` is changes-tree, merged to `main` as `6cb0f73`).
 
 ## Known limitations
 
