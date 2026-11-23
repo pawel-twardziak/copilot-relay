@@ -251,6 +251,28 @@ dialog h2 { margin-top: 0; font-size: 16px; }
 dialog label { display: flex; flex-direction: column; gap: 6px; }
 .hint { color: var(--muted); font-size: 12px; white-space: pre-wrap; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+/* the prompt editor (prompt-editor.js): folded Settings parts, the template select, the inline question, the own part */
+#prompt-dialog { width: 640px; max-width: calc(100vw - 32px); }
+#prompt-dialog h2 { overflow-wrap: anywhere; }
+.prompt-editor { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+.pe-fold > summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
+.pe-fold > pre, .pe-fold > .hint { margin: 6px 0 0; }
+.pe-fold > pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); user-select: text; }
+.pe-template-row { display: flex; align-items: center; gap: 8px; }
+.pe-template-row select { min-width: 200px; }
+.pe-ask { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--warn); border-radius: 6px; font-size: 12.5px; }
+.pe-ask > span { flex: 1; }
+.pe-ask[hidden] { display: none; }
+.pe-own { resize: vertical; min-height: 90px; line-height: 1.4; }
+#prompt-note.err { color: var(--err); }
+/* the editor on a child's approval card; answered, its controls are disabled */
+.perm .delegation-prompt { margin-bottom: 8px; }
+.perm .delegation-prompt .prompt-editor { margin-bottom: 0; }
+/* Settings, "Prompts": the two parts and one row per template (name and Delete, the text below) */
+#set-prompt-default, #set-prompt-child { resize: vertical; line-height: 1.4; }
+#set-templates { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 8px; }
+.tpl-row { display: grid; grid-template-columns: 1fr auto; gap: 6px; padding: 8px; border: 1px solid var(--border); border-radius: 6px; }
+.tpl-row .tpl-text { grid-column: 1 / -1; resize: vertical; line-height: 1.4; }
 
 /* ---------- copilot-relay ---------- */
 .relay-chip { white-space: nowrap; flex-shrink: 0; font-size: 12px; padding: 3px 9px; border-radius: 12px; color: #a5d6ff; border-color: #1f6feb66; background: #1f6feb1a; }

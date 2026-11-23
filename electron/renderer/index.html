@@ -60,6 +60,23 @@
           <select id="set-context"><option value="default">200k</option><option value="long_context">1M</option></select>
         </label>
         <p class="hint">Used by new sessions and by sessions whose Context is "Default", the next time their Copilot starts. Open sessions keep theirs. 1M needs a model with a long-context tier (e.g. Claude Sonnet 5.5) and may cost more.</p>
+        <h3>Prompts</h3>
+        <label>
+          Default part
+          <textarea id="set-prompt-default" rows="4" spellcheck="false" placeholder="Instructions for every session (optional)"></textarea>
+        </label>
+        <p class="hint">Every session starts with it, before its own part.</p>
+        <label>
+          Working with the parent
+          <textarea id="set-prompt-child" rows="5" spellcheck="false"></textarea>
+        </label>
+        <div class="store-actions"><button id="set-prompt-child-restore" type="button">Restore default</button></div>
+        <p class="hint">Only for sub-sessions, between the default part and their own part. Empty: none.</p>
+        <div class="store-label">Templates</div>
+        <div id="set-templates"></div>
+        <div class="store-actions"><button id="set-template-add" type="button">Add template</button></div>
+        <p class="hint">A template's text is copied into a session's own part when you pick it in the prompt editor.</p>
+        <p class="hint" id="set-prompt-note"></p>
         <h3>Relay broker</h3>
         <label>
           Repository folder
@@ -99,6 +116,19 @@
         <div class="dialog-actions">
           <button value="cancel" autofocus>Cancel</button>
           <button value="delete" class="danger">Delete</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- the prompt editor (prompt-editor.js: openPromptDialog fills the title, the body, the note and the OK label) -->
+    <dialog id="prompt-dialog">
+      <form method="dialog">
+        <h2 id="prompt-title"></h2>
+        <div id="prompt-body"></div>
+        <p class="hint" id="prompt-note" hidden></p>
+        <div class="dialog-actions">
+          <button id="prompt-cancel" value="cancel">Cancel</button>
+          <button id="prompt-ok" value="ok" class="primary">OK</button>
         </div>
       </form>
     </dialog>
@@ -185,6 +215,7 @@
     <script src="changes-list.js"></script>
     <script src="file-preview.js"></script>
     <script src="broker-restart.js"></script>
+    <script src="prompt-editor.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

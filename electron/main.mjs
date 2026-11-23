@@ -20,7 +20,8 @@ import { readLinksCache, writeLinksCache } from "./links-cache.mjs";
 import { listAllPages } from "./session-list.mjs";
 import { beginPrompt, endPrompt } from "./prompt-count.mjs";
 import { normalizePanelMode } from "./activity-panel.mjs";
-import { createTierStore, effectiveTier, normalizeTier, switchTier, tierArgs, withContextOption } from "./context-tier.mjs";
+import { createTierStore, effectiveTier, normalizeTier, saveAndReopen, switchTier, tierArgs, withContextOption } from "./context-tier.mjs";
+import { CHILD_PART, applyPromptSettings, clearPromptDirs, composePrompt, createPromptStore, effectiveChildPart, instructionsEnv, normalizeTemplates, writePromptDir } from "./session-prompts.mjs";
 import { createRestarter, realEffects, reconnectClients } from "./broker-restart.mjs";
 import { runProgram } from "./run-program.mjs";
 import { createGit } from "./repo-git.mjs";
@@ -89,6 +90,11 @@ const heldCache = createHeldCache();
 const sessionTier = (sessionId) => effectiveTier(tiers.get(sessionId), loadSettings().contextTier);
 /** The config options as the window gets them: Copilot's own plus the Context select. */
 const viewConfig = (sessionId, configOptions) => withContextOption(configOptions, tiers.get(sessionId), loadSettings().contextTier);
+// The system prompt per session: the Settings parts plus the session's own part, given to each Copilot process in an
+// instructions folder of its own under promptRoot/run (see session-prompts.mjs)
+const prompts = createPromptStore(path.join(app.getPath("userData"), "session-prompts.json"));
+const promptRoot = path.join(app.getPath("userData"), "session-prompts");
+const promptProcs = new Set(); // connections whose prompt folder goes when they exit (the app waits for them at quit)
 
 // Changes browser: the repositories each session worked in, recorded from its live tool calls (see repo-track.mjs),
 // and what the window reads of them (repo-changes.mjs). Git is read-only; the trigger's calls get 5 s, the window's 10 s.
@@ -269,6 +275,19 @@ function linkKeys(keys) {
   return keys;
 }
 
+/** The session's link to its parent in the cached link tree ({ parent, adopted }), or null: not a child, or the
+ *  cache does not know it (missing or unreadable: the session starts without the child part). */
+function childLinkOf(sessionId) {
+  const link = readLinksCache(linksCacheFile()).links.find((l) => l?.key === `cli:${sessionId}` && l.parent && !l.parentDeleted);
+  return link ? { parent: link.parent, adopted: link.adopted === true } : null;
+}
+
+/** The prompt a Copilot process of the session starts with: own defaults to the stored part, isChild to its link. */
+function promptFor(sessionId, { own = prompts.get(sessionId), isChild = childLinkOf(sessionId) !== null } = {}) {
+  const s = loadSettings();
+  return composePrompt({ defaultPart: s.promptDefault, childPart: effectiveChildPart(s.promptChild), own, isChild });
+}
+
 // the cached snapshot at once; the fresh one follows as links:update
 handle("links:get", async () => {
   const cached = readLinksCache(linksCacheFile());
@@ -285,12 +304,50 @@ for (const [channel, route] of [["links:forget", "/api/links/forget"], ["links:m
 
 // ---------- connections ----------
 
-async function connect(cwd, deadline, args = []) {
-  const conn = new AcpConnection({ command: copilotCommand(), cwd, args });
+/** Start a Copilot process. A non-empty prompt goes into an instructions folder of this process's own (named in its
+ *  environment, never on the command line), removed when the process exits; a folder that cannot be made fails the
+ *  start, so no session runs without the prompt it was given. */
+async function connect(cwd, deadline, args = [], prompt = "") {
+  let env = process.env;
+  let promptDir = null;
+  // never throws: it runs inside the exit event (before the session's own exit handling) and on failed starts, where
+  // the start's error must win; a folder that can't be removed now (a Windows lock) goes at the next start
+  const removeDir = () => {
+    try {
+      promptDir.remove();
+    } catch (e) {
+      console.warn(`[session-prompts] could not remove ${promptDir.dir}: ${e.message}`);
+    }
+  };
+  if (prompt) {
+    const failure = (text) => Object.assign(new Error(text), { startFailure: true });
+    try {
+      promptDir = writePromptDir(promptRoot, prompt);
+    } catch (e) {
+      throw failure(`Could not write this session's prompt to ${promptRoot}: ${e.message}`);
+    }
+    try {
+      env = instructionsEnv(process.env, promptDir.dir);
+    } catch (e) {
+      removeDir();
+      throw failure(e.message); // the data folder's path contains a comma
+    }
+  }
+  const conn = new AcpConnection({ command: copilotCommand(), cwd, args, env });
+  const release = () => {
+    promptProcs.delete(conn);
+    removeDir();
+  };
+  if (promptDir) {
+    promptProcs.add(conn);
+    conn.once("exit", release);
+  }
   try {
     await (deadline ? withDeadline(conn.start(), deadline, SETUP_TIMEOUT_TEXT) : conn.start());
   } catch (e) {
     conn.kill();
+    // a process that never ran (spawn failed) sends no exit; one that runs removes its folder when it is gone
+    if (promptDir && (conn.exited || !conn.proc?.pid)) release();
     // A start can fail because Copilot is missing (wrong path), crashed, or is signed out and quit; the error text
     // doesn't reliably say which, so unless Copilot answered auth_required both remedies are shown.
     const detail = String(e?.message ?? e);
@@ -416,10 +473,11 @@ const CHILD_SETUP_TIMEOUT_MS = 30_000; // from the approval until the child's ag
 const SETUP_TIMEOUT_TEXT = `Copilot did not answer within ${CHILD_SETUP_TIMEOUT_MS / 1000} seconds.`;
 
 /** Start a Copilot process with a new session and attach it. `link` ({ name, parentKey }) is for delegated sessions;
- *  `tier` is the context tier to start with (null: the Settings default). */
-async function createSession(cwd, link = {}, deadline, tier = null) {
+ *  `tier` is the context tier to start with (null: the Settings default); `own` the session's own prompt part. */
+async function createSession(cwd, link = {}, deadline, tier = null, own = "") {
   requireDir(cwd);
-  const conn = await connect(cwd, deadline, tierArgs(tier ?? effectiveTier(null, loadSettings().contextTier)));
+  const prompt = promptFor(null, { own, isChild: Boolean(link.parentKey) });
+  const conn = await connect(cwd, deadline, tierArgs(tier ?? effectiveTier(null, loadSettings().contextTier)), prompt);
   const relay = relayPrepare();
   // the agent may send updates (available_commands_update…) before it answers session/new: keep them
   const early = [];
@@ -430,6 +488,7 @@ async function createSession(cwd, link = {}, deadline, tier = null) {
   try {
     const started = conn.request("session/new", { cwd, mcpServers: relay.mcpServers });
     const res = await (deadline ? withDeadline(started, deadline, SETUP_TIMEOUT_TEXT) : started);
+    prompts.set(res.sessionId, own); // throws when it can't be saved: the next start would lose it
     const entry = attach(res.sessionId, conn, cwd, relay, link);
     entry.configOptions = res.configOptions ?? [];
     conn.off("notification", hold);
@@ -442,8 +501,9 @@ async function createSession(cwd, link = {}, deadline, tier = null) {
   }
 }
 
-handle("sessions:new", async (cwd) => {
-  const { sessionId, cwd: dir, configOptions } = await createSession(cwd);
+handle("sessions:new", async (cwd, own = "") => {
+  if (typeof own !== "string") throw new Error("The session's prompt must be text.");
+  const { sessionId, cwd: dir, configOptions } = await createSession(cwd, {}, undefined, null, own);
   return { sessionId, cwd: dir, configOptions: viewConfig(sessionId, configOptions) }; // the entry stays here: it can't cross IPC
 });
 
@@ -488,7 +548,7 @@ async function resumeSession(sessionId, cwd) {
 
 async function openSession(sessionId, cwd) {
   requireDir(cwd);
-  const conn = await connect(cwd, undefined, tierArgs(sessionTier(sessionId)));
+  const conn = await connect(cwd, undefined, tierArgs(sessionTier(sessionId)), promptFor(sessionId));
   const relay = relayPrepare();
   // the agent replays the history as session/update notifications before answering session/load
   const entry = attach(sessionId, conn, cwd, relay);
@@ -883,7 +943,7 @@ async function setConfigOption(sessionId, entry, configId, value) {
 }
 
 /** Create the approved child and link it to its parent. Never throws: every failure ends as an outcome for the parent. */
-async function createChild(req) {
+async function createChild(req, own = "") {
   const { parentSessionId, name, task, agent, model } = req;
   const parent = open.get(parentSessionId);
   if (!parent) return;
@@ -899,7 +959,7 @@ async function createChild(req) {
   };
   try {
     const tier = sessionTier(parentSessionId); // the child works on the parent's context window
-    child = await createSession(parent.cwd, { name, parentKey: `cli:${parentSessionId}` }, deadline, tier);
+    child = await createSession(parent.cwd, { name, parentKey: `cli:${parentSessionId}` }, deadline, tier, own);
     const { sessionId, entry } = child;
     tiers.set(sessionId, tier); // as an override, so a later reopen keeps it
     if (!entry.relay) throw new Error("The relay is switched off in this app, so the new session cannot be linked to its parent.");
@@ -935,10 +995,10 @@ async function createChild(req) {
 }
 
 // reachable only from the window (preload): nothing the broker or a session sends can answer a request
-handle("delegation:answer", async (requestId, approved) => {
+handle("delegation:answer", async (requestId, approved, own) => {
   const req = pendingRequests.take(requestId);
   if (!req) return false;
-  if (approved === true) await createChild(req);
+  if (approved === true) await createChild(req, String(own ?? ""));
   else tellParent(req, "rejected", `The user rejected the request to create session "${req.name}".`);
   return true;
 });
@@ -1047,6 +1107,7 @@ handle("sessions:fork", async (sessionId, target) => {
   const res = forkSession(sessionId, target);
   holds.copy(sessionId, res.sessionId);
   tiers.copy(sessionId, res.sessionId); // a long history must not land in a smaller window
+  prompts.copy(sessionId, res.sessionId);
   return res;
 });
 
@@ -1088,6 +1149,7 @@ handle("sessions:delete", async (sessionId) => {
     const res = await deleteSession(sessionId, { missingOk: true });
     holds.delete(sessionId);
     tiers.delete(sessionId);
+    prompts.delete(sessionId);
     records.forget(sessionId);
     if (res.leftover) console.warn(`[delete] could not remove ${res.leftover}`);
     if (res.store.error) console.warn(`[delete] session-store.db: ${res.store.error}`);
@@ -1107,6 +1169,12 @@ handle("sessions:setConfig", async (sessionId, configId, value) => {
 // with the session untouched: the window must not close and reopen it (a delegated child may still be set up).
 handle("sessions:setContextTier", async (sessionId, value) => {
   if (!isSessionId(sessionId)) return { refused: `Invalid session id: ${sessionId}` };
+  return switchTier({ sessionId, value, tiers, ...restartGuards(sessionId) });
+});
+
+/** What sessions:setContextTier and sessions:setPrompt share: the refusals that leave the session untouched, and the
+ *  close (marked as a history op while it runs, so a delete or another restart is refused meanwhile). */
+function restartGuards(sessionId) {
   const refusal = () => {
     if (open.get(sessionId)?.prompting) return "Wait until Copilot finishes this turn.";
     if (deleting.has(sessionId)) return "This session is being deleted.";
@@ -1115,7 +1183,6 @@ handle("sessions:setContextTier", async (sessionId, value) => {
     if (historyBusy.has(sessionId)) return "Wait until the delete of a message has finished.";
     return null;
   };
-  // marked as a history op while it closes, so a delete or another switch is refused meanwhile
   const close = async () => {
     historyBusy.add(sessionId);
     try {
@@ -1124,7 +1191,29 @@ handle("sessions:setContextTier", async (sessionId, value) => {
       historyBusy.delete(sessionId);
     }
   };
-  return switchTier({ sessionId, value, tiers, refusal, close });
+  return { refusal, close };
+}
+
+// the parts of a session's prompt, for its editor
+handle("sessions:getPrompt", async (sessionId) => {
+  if (!isSessionId(sessionId)) throw new Error(`Invalid session id: ${sessionId}`);
+  const s = loadSettings();
+  return { own: prompts.get(sessionId), defaultPart: typeof s.promptDefault === "string" ? s.promptDefault : "", childPart: effectiveChildPart(s.promptChild), isChild: childLinkOf(sessionId) !== null };
+});
+
+// a new own part takes a new Copilot process, as a new context window does (the renderer reopens the session);
+// the same text changes nothing
+handle("sessions:setPrompt", async (sessionId, own) => {
+  if (!isSessionId(sessionId)) return { refused: `Invalid session id: ${sessionId}` };
+  if (typeof own !== "string") return { refused: "The session's prompt must be text." };
+  const { refusal, close } = restartGuards(sessionId);
+  // the refusals first, as for a context change; then an unchanged text closes nothing
+  const refused = refusal();
+  if (refused) return { refused };
+  const prev = prompts.get(sessionId);
+  if (own === prev) return { unchanged: true };
+  // refusal is checked above and nothing is awaited since, so saveAndReopen has nothing left to check
+  return saveAndReopen({ prev, save: () => prompts.set(sessionId, own), restore: (text) => prompts.set(sessionId, text), refusal: () => null, close });
 });
 
 handle("permission:answer", async (sessionId, reqId, optionId) => {
@@ -1159,9 +1248,15 @@ handle("settings:get", async () => ({
   activityPanel: normalizePanelMode(loadSettings().activityPanel),
   brokerRepo: loadSettings().brokerRepo ?? "",
   brokerRepoDefault: defaultBrokerRepo(),
+  promptDefault: typeof loadSettings().promptDefault === "string" ? loadSettings().promptDefault : "",
+  promptChild: typeof loadSettings().promptChild === "string" ? loadSettings().promptChild : null,
+  promptTemplates: normalizeTemplates(loadSettings().promptTemplates),
+  childPartDefault: CHILD_PART,
 }));
 handle("settings:set", async (s) => {
-  saveSettings({ ...loadSettings(), copilotCommand: String(s.copilotCommand ?? "").trim(), relay: s.relay !== false, contextTier: normalizeTier(s.contextTier) ?? "default", queueMidTurn: s.queueMidTurn === true, activityPanel: normalizePanelMode(s.activityPanel), brokerRepo: String(s.brokerRepo ?? "").trim() });
+  const next = { ...loadSettings(), copilotCommand: String(s.copilotCommand ?? "").trim(), relay: s.relay !== false, contextTier: normalizeTier(s.contextTier) ?? "default", queueMidTurn: s.queueMidTurn === true, activityPanel: normalizePanelMode(s.activityPanel), brokerRepo: String(s.brokerRepo ?? "").trim() };
+  // the prompt parts only when sent (a form without them keeps them); promptChild null: back to the built-in text
+  saveSettings(applyPromptSettings(next, s));
   lister?.kill();
   lister = null;
   return true;
@@ -1618,6 +1713,11 @@ if (!app.requestSingleInstanceLock()) {
     win.focus();
   });
   fixPath();
+  try {
+    clearPromptDirs(promptRoot); // the folders of processes an earlier run did not see exit (before any connect)
+  } catch (e) {
+    console.warn(`[session-prompts] could not clear ${promptRoot}: ${e.message}`);
+  }
   app.whenReady().then(() => {
     // the default menu without its zoom items: Ctrl + +/-/0 belong to the chat text size (see the renderer)
     Menu.setApplicationMenu(
@@ -1655,6 +1755,16 @@ if (!app.requestSingleInstanceLock()) {
       app.quit();
     }
     else leavingConfirmed = false; // the app keeps running and everything was stopped: the next quit asks afresh
+  });
+  // the killed processes take their prompt folders with them as they exit: quitting waits a moment for that, so
+  // none is left behind (one that does not exit in time leaves its folder to the next start)
+  let promptsAwaited = false;
+  app.on("will-quit", (e) => {
+    const live = [...promptProcs].filter((c) => !c.exited);
+    if (promptsAwaited || !live.length) return;
+    promptsAwaited = true;
+    e.preventDefault();
+    Promise.all(live.map((c) => exited(c, 3500))).then(() => app.quit());
   });
   app.on("before-quit", (e) => {
     if (confirmLeavingChildren()) {

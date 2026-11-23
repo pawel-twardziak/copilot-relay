@@ -18,7 +18,8 @@ test("adopt and release through the tools, the card answer and the streams", asy
   await until(() => c.parentChanges.length === 1, "parent_changed");
   assert.deepEqual(c.parentChanges[0], { parentKey: "cli:p1", adopted: true });
   assert.deepEqual((await links(b)).map((l) => [l.key, l.parent, l.adopted]), [["cli:c1", "cli:p1", true]]);
-  await until(() => p.got.some((m) => /is now your child/.test(m.text)), "the parent's notice");
+  await until(() => p.got.some((m) => /will send you its result/.test(m.text)), "the parent's notice");
+  await until(() => c.got.some((m) => /waits for your report/.test(m.text)), "the child's note");
   // the child's next registration carries the link
   await b.disconnect(c);
   const c2 = await b.connect("cli:c1", { alias: "app:c1", caps: ["links"] });

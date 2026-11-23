@@ -16,7 +16,8 @@ contextBridge.exposeInMainWorld("api", {
   listSessions: () => call("sessions:list"),
   // { sessions, complete }: complete is false when Copilot had more pages than main fetches
   listSessionsChecked: () => call("sessions:listChecked"),
-  newSession: (cwd) => call("sessions:new", cwd),
+  // own: the session's own part of its system prompt (see electron/session-prompts.mjs)
+  newSession: (cwd, own = "") => call("sessions:new", cwd, own),
   openSession: (sessionId, cwd, replayId) => call("sessions:open", sessionId, cwd, replayId),
   // source: "app" (typed here), "human" (relay web GUI) or "relay" (another session) – see sessions:prompt
   prompt: (sessionId, text, source = "relay") => call("sessions:prompt", sessionId, text, source),
@@ -38,10 +39,14 @@ contextBridge.exposeInMainWorld("api", {
   setConfig: (sessionId, configId, value) => call("sessions:setConfig", sessionId, configId, value),
   // closes the session for a restart with the new context window; the caller reopens it
   setContextTier: (sessionId, value) => call("sessions:setContextTier", sessionId, value),
+  // { own, defaultPart, childPart, isChild }: the parts of the session's prompt
+  getPrompt: (sessionId) => call("sessions:getPrompt", sessionId),
+  // a new own part: { refused } | { unchanged: true } | { reopen: true } (closed for the restart; the caller reopens it)
+  setPrompt: (sessionId, own) => call("sessions:setPrompt", sessionId, own),
   answerPermission: (sessionId, reqId, optionId) => call("permission:answer", sessionId, reqId, optionId),
   // a delivered report or notice has started its prompt: the broker may forget it
   relayAck: (sessionId, id) => call("relay:ack", sessionId, id),
-  answerDelegation: (requestId, approved) => call("delegation:answer", requestId, approved),
+  answerDelegation: (requestId, approved, own) => call("delegation:answer", requestId, approved, own),
   // the broker's sub-session links ({ key: "cli:<id>", parent, name, task, createdAt, reported, parentDeleted, online,
   // busy }): the cached snapshot at once, the fresh one follows through onLinks
   getLinks: () => call("links:get"),

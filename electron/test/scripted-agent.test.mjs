@@ -1,7 +1,7 @@
 // Tests for the scripted ACP agent the UI checks run the app against (electron/test/fixtures/acp/scripted-agent.mjs).
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
@@ -35,10 +35,10 @@ const freshCwd = () => {
 /** The agent as the app starts it (with flags it must ignore), and a client that keeps every message it sent. The
  *  test t kills it when it ends, and waits for its exit, also after a failed assertion or a timeout (a child left
  *  running would keep node --test from exiting). */
-function start(t, cwd, scenarioFile = scenario) {
+function start(t, cwd, scenarioFile = scenario, env = {}) {
   const proc = spawn(process.execPath, [AGENT, "--acp", "--stdio", "--context", "long_context"], {
     cwd,
-    env: { ...process.env, SCRIPTED_SCENARIO: scenarioFile },
+    env: { ...process.env, SCRIPTED_SCENARIO: scenarioFile, ...env },
     stdio: ["pipe", "pipe", "inherit"],
   });
   const exited = new Promise((resolve) => proc.once("exit", resolve));
@@ -204,4 +204,44 @@ test("a scenario's load option holds the load's answer back and makes it an erro
   assert.ok(Date.now() - started >= 140); // the delay is 150 ms; a margin for the two processes' clocks
   assert.equal(b.seen[loaded].error?.message, "no luck");
   assert.equal(b.updates(from, loaded).length, 4); // the prompt and its three updates
+});
+
+test("the agent records the instructions it was started with", async (t) => {
+  const cwd = freshCwd();
+  const folder = path.join(tmp, "instructions-1");
+  mkdirSync(path.join(folder, ".github", "instructions"), { recursive: true });
+  writeFileSync(path.join(folder, ".github", "instructions", "a.instructions.md"), "R1");
+  writeFileSync(path.join(folder, ".github", "instructions", "notes.md"), "not an instructions file");
+  const missing = path.join(tmp, "no-such-folder");
+  const env = { COPILOT_CUSTOM_INSTRUCTIONS_DIRS: `${missing},${folder}` };
+  const starts = () => JSON.parse(readFileSync(path.join(cwd, ".scripted-agent.json"), "utf8")).starts;
+
+  const a = start(t, cwd, scenario, env);
+  await a.request("initialize", { protocolVersion: 1 });
+  const sessionId = a.seen[await a.request("session/new", { cwd, mcpServers: [] })].result.sessionId;
+  await a.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "first" }] }); // a save keeps the starts
+  a.stop();
+  assert.deepEqual(starts(), [{ instructions: ["R1"] }]);
+
+  const b = start(t, cwd, scenario, { COPILOT_CUSTOM_INSTRUCTIONS_DIRS: "" });
+  await b.request("initialize", { protocolVersion: 1 });
+  const loaded = await b.request("session/load", { sessionId, cwd, mcpServers: [] });
+  b.stop();
+  assert.ok(!b.seen[loaded].error);
+  assert.deepEqual(starts(), [{ instructions: ["R1"] }, { instructions: [] }]);
+});
+
+test("session/load takes the session id it is asked for", async (t) => {
+  const cwd = freshCwd();
+  const a = await newSession(t, cwd);
+  await prompt(a, "first");
+  a.stop();
+  const b = start(t, cwd);
+  await b.request("initialize", { protocolVersion: 1 });
+  const from = b.seen.length;
+  const loaded = await b.request("session/load", { sessionId: "forked-id", cwd, mcpServers: [] });
+  b.stop();
+  assert.ok(!b.seen[loaded].error);
+  const ids = new Set(b.updates(from, loaded).map((p) => p.sessionId));
+  assert.deepEqual([...ids], ["forked-id"]);
 });

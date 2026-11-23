@@ -210,8 +210,8 @@ an ordinary session: it appears in the list, you can open it, read what it did, 
   folder (or its task), with **Approve** and **Reject**; as for a new session, nothing changes without your click.
   Only an open desktop-app session that has no parent (or whose parent was deleted) can be adopted, and never one of the caller's ancestors. An
   adopted child is a sub-session like any other (the tree, closing, reopen cards, the delete dialog, `report_result`),
-  except that it was given no task, so it owes no report: it sends no "ended without reporting" notice and the quit
-  question does not count it. A released child becomes a top-level session and keeps its own sub-sessions; reports it
+  except that it was given no task: it still owes its parent a report, so its parent gets the "ended without
+  reporting" notice if it ends without one, and the quit question counts it. A released child becomes a top-level session and keeps its own sub-sessions; reports it
   already sent are still delivered. The parent is told the outcome; an open child is told when the link is made or ended. A card whose answer did not reach the
   broker keeps its buttons; one the broker no longer has (after a broker restart, or when one of the two sessions
   went away) says "This request is no longer pending."
@@ -259,6 +259,41 @@ an ordinary session: it appears in the list, you can open it, read what it did, 
   never resumed automatically.
 - `create_session`, `report_result`, `adopt_session` and `release_session` exist only for sessions opened in this app,
   not for terminal sessions or sessions started from the broker's web GUI.
+
+## Session prompts
+
+Every session's Copilot gets a system prompt made of up to three parts, joined by a blank line (empty parts are
+left out):
+
+- **Default part** (Settings): for every session.
+- **Child part** (Settings): only for child sessions, delegated or adopted. Its built-in text tells the child to
+  finish with `report_result`, exactly once, and to use `send_message` only to ask its parent something. Emptying it
+  in Settings means no child part; "Restore default" goes back to the built-in text.
+  After updating the app, restart the broker (Settings -> "Update and restart broker") so the new adopted-child rule
+  and notes apply.
+- **Own part**: written per session, in the Prompt dialog.
+
+**Templates** (Settings) are named texts for the own part. Picking one *copies* its text into the editor: it is not
+linked, so editing or deleting a template later changes no session.
+
+**Where you edit the own part:**
+
+- On creation: **New session** opens the editor before Start; a forked session starts with a copy of its source's
+  own part.
+- On a child's card: the card that asks you to approve a new child has the editor, so you can add to the child's
+  prompt before you click **Approve**.
+- In a running session: the **Prompt** button. **Save and restart** restarts that session's Copilot with the new
+  prompt; the history is kept. It needs no running turn, and the session's subagents and shell commands stop.
+
+Changes in **Settings** (default part, child part, templates) reach a session at its next start; running sessions
+are not restarted. A child's part is also taken at the start after it is adopted (and dropped after it is released).
+
+The prompt reaches Copilot as an instructions folder under the app's data folder, named by
+`COPILOT_CUSTOM_INSTRUCTIONS_DIRS` for that one process and removed when the process ends; nothing is written to
+`~/.copilot`. Your own `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` entries are kept.
+
+**Every child reports.** A delegated child and an adopted child both owe their parent a `report_result`; one that
+ends without it gets its parent the "ended without reporting" notice, and the quit question counts it.
 
 ## Schedules
 

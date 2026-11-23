@@ -140,7 +140,8 @@ scripted ACP agent).
     (`CHILD_PART`); `settings:set` takes `promptDefault`, `promptChild` (`null` removes the key), `promptTemplates`
     (through `normalizeTemplates`).
   - main-internal: `promptFor(sessionId: string, { own?: string, isChild?: boolean }) -> string`,
-    `childLinkOf(sessionId) -> { parent: string, adopted: boolean } | null` (from the links cache, Task 0 step 4).
+    `childLinkOf(sessionId) -> { parent: string, adopted: boolean } | null`: the link with `key === "cli:<sessionId>"`
+    and a `parent` in `readLinksCache(linksCacheFile()).links` (v0.22.0 shape `{ links, held }`, checked in Task 0).
   - `context-tier.mjs`: `saveAndReopen({ prev, save, restore, refusal, close }) -> Promise<{ refused } | { reopen: true }>`;
     `switchTier` keeps its signature and uses it.
   - scripted agent: on start it appends `{ instructions: string[] }` (the text of every

@@ -275,12 +275,32 @@ export async function launch({ scenario, settings = {}, width = 1280, height = 8
       ev,
       check,
       resize,
-      /** A new session in the work folder (scripted-work, or the launch's sessionId); later calls act on it. */
-      async newSession() {
+      /** A real Enter key press on the focused element (not a synthetic event: it takes the browser's own
+       *  handling, such as a form's implicit submit). */
+      async pressEnter() {
+        const key = { key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 };
+        await cdp("Input.dispatchKeyEvent", { type: "keyDown", ...key, text: "\r" }, "pressing Enter");
+        await cdp("Input.dispatchKeyEvent", { type: "keyUp", ...key }, "releasing Enter");
+      },
+      /** A new session in the work folder (scripted-work, or the launch's sessionId), with own as its own prompt
+       *  part; later calls act on it. */
+      async newSession({ own } = {}) {
         sessionId = scriptedId ?? `scripted-${path.basename(work)}`;
-        await ev(`newSession(${JSON.stringify(work)})`);
+        await this.startSession(work, { own });
         await check(`${view()} && !${view()}.busy`, "the new session");
         return sessionId;
+      },
+      /** The page's newSession(cwd) through its prompt dialog: waits for #prompt-dialog, puts own (if given) into the
+       *  editor's text area and presses Start; resolves once newSession has returned (the view is built). Later calls
+       *  still act on the session of newSession(). */
+      async startSession(cwd, { own } = {}) {
+        await ev(`(window.__newSession = newSession(${JSON.stringify(cwd)}), true)`);
+        await check(`document.querySelector("#prompt-dialog").open`, "the prompt dialog");
+        if (own != null) {
+          await ev(`(() => { const t = document.querySelector("#prompt-dialog .pe-own"); t.value = ${JSON.stringify(own)}; t.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+        }
+        await ev(`document.querySelector("#prompt-ok").click()`);
+        await ev(`window.__newSession`, "newSession to return");
       },
       /** Types text into the message box and presses Enter; resolves once its message is in the log. */
       async send(text) {

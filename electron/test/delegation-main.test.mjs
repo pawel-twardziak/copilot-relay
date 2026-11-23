@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
   PendingRequests,
   childPrompt,
+  REMINDER,
   findModelOption,
   isRelayTool,
   linkCardOf,
@@ -94,7 +95,14 @@ test("the child prompt names the parent, the task and report_result", () => {
   assert.match(t, /^\[from glowna\]\n/);
   assert.match(t, /Sprawdź X/);
   assert.match(t, /report_result/);
-  assert.match(t, /cannot see/);
+});
+
+test("childPrompt keeps the headers, the task and the reminder", () => {
+  const t = childPrompt({ parentName: "p", task: "T", folder: "/f" });
+  assert.ok(t.startsWith('[from p]\n[folder "/f"]\n'), t);
+  assert.ok(t.includes(REMINDER));
+  assert.ok(t.endsWith("T"));
+  assert.doesNotMatch(t, /cannot see this session's chat/);
 });
 
 test("the child prompt carries the parent folder line when there is one", () => {
@@ -112,9 +120,9 @@ test("unreportedChildren returns children without a report from any iterable", (
   assert.deepEqual(unreportedChildren(entries.values()), [entries.get("a"), entries.get("d")]);
 });
 
-test("an adopted child is not counted as unreported", () => {
-  const entries = [{ parentSessionId: "p", reported: false, adopted: true }, { parentSessionId: "p", reported: false }];
-  assert.deepEqual(unreportedChildren(entries), [entries[1]]);
+test("unreportedChildren counts adopted children", () => {
+  const entries = [{ parentSessionId: "p", adopted: true, reported: false }, { parentSessionId: "p", adopted: true, reported: true }];
+  assert.deepEqual(unreportedChildren(entries), [entries[0]]);
 });
 
 test("isRelayTool knows the relay's six tools by their prefixed title", () => {

@@ -17,8 +17,8 @@ const LINK = {
   cycle: (name) => `"${name}" is one of your ancestors, so it cannot become your child.`,
   closedNow: (name) => `Session "${name}" is closed now. Open it and ask again.`,
   notChild: (name) => `"${name}" is not one of your children.`,
-  linkedParent: (child) => `Session "${child}" is now your child. It can send you results with report_result.`,
-  linkedChild: (parent) => `The user made this session a child of "${parent}". Send it results with the report_result tool.`,
+  linkedParent: (child) => `Session "${child}" is now your child. It will send you its result with report_result.`,
+  linkedChild: (parent) => `The user made this session a child of "${parent}". "${parent}" cannot see this chat and waits for your report. When the work you are doing is done, always send it the result (or a short summary, or a note that it is finished) with the report_result tool, exactly once.`,
   releasedParent: (child) => `Session "${child}" is no longer your child.`,
   releasedChild: (parent) => `The user ended the link to "${parent}". You no longer report to it.`,
   rejected: (kind, child) => `The user rejected the request to ${kind === "adopt" ? "link" : "release"} "${child}".`,
@@ -514,11 +514,11 @@ export class Delegation {
   }
 
   /**
-   * The child's session ended for good (decided by the caller): notify the parent once, unless it reported or was
-   * adopted (an adopted child was given no task, so it owes no report).
+   * The child's session ended for good (decided by the caller): notify the parent once, unless it reported (every child, delegated
+   * or adopted, owes its parent a report).
    */
   died(childKey) {
-    if (this.store.isReported(childKey) || this.store.isAdopted(childKey)) return;
+    if (this.store.isReported(childKey)) return;
     this.#endedNotice(childKey);
   }
 
