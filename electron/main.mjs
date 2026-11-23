@@ -943,7 +943,7 @@ async function setConfigOption(sessionId, entry, configId, value) {
 }
 
 /** Create the approved child and link it to its parent. Never throws: every failure ends as an outcome for the parent. */
-async function createChild(req) {
+async function createChild(req, own = "") {
   const { parentSessionId, name, task, agent, model } = req;
   const parent = open.get(parentSessionId);
   if (!parent) return;
@@ -959,7 +959,7 @@ async function createChild(req) {
   };
   try {
     const tier = sessionTier(parentSessionId); // the child works on the parent's context window
-    child = await createSession(parent.cwd, { name, parentKey: `cli:${parentSessionId}` }, deadline, tier);
+    child = await createSession(parent.cwd, { name, parentKey: `cli:${parentSessionId}` }, deadline, tier, own);
     const { sessionId, entry } = child;
     tiers.set(sessionId, tier); // as an override, so a later reopen keeps it
     if (!entry.relay) throw new Error("The relay is switched off in this app, so the new session cannot be linked to its parent.");
@@ -995,10 +995,10 @@ async function createChild(req) {
 }
 
 // reachable only from the window (preload): nothing the broker or a session sends can answer a request
-handle("delegation:answer", async (requestId, approved) => {
+handle("delegation:answer", async (requestId, approved, own) => {
   const req = pendingRequests.take(requestId);
   if (!req) return false;
-  if (approved === true) await createChild(req);
+  if (approved === true) await createChild(req, String(own ?? ""));
   else tellParent(req, "rejected", `The user rejected the request to create session "${req.name}".`);
   return true;
 });

@@ -38,12 +38,15 @@ export function resolveConfig(options, { agent, model, inheritedModel } = {}) {
   return { sets };
 }
 
+/** The last line of the intro of a child's first message, also said in the child part of its prompt. */
+export const REMINDER = "When you are done, always send the result (or a short summary) with report_result.";
+
 export function childPrompt({ parentName, task, folder }) {
   return (
     `[from ${parentName}]\n` +
     (folder ? `[folder ${JSON.stringify(folder)}]\n` : "") +
     `You were started by the session "${parentName}" to do the task below. ` +
-    `${parentName} cannot see this session's chat, so when you are done, send the result with the report_result tool, exactly once.\n\n` +
+    `${REMINDER}\n\n` +
     task
   );
 }

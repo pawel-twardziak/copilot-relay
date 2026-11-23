@@ -11,6 +11,7 @@
 //                        The prompt is one line, or the last paragraph after a waiting relay notice. The tool's text
 //                        reply is sent as an agent message chunk; any other prompt (a relay notice "[from relay]…")
 //                        does nothing
+//                        "create_session <name> <task…>" calls create_session with { name, task }
 // session/cancel (Stop) ends the running prompt as Copilot does: it answers "cancelled" (if not answered yet) and
 // plays none of its remaining steps; a pause or an unanswered permission request it waits on ends at once.
 // Every prompt (as a user_message_chunk, as Copilot replays it) and every update sent is recorded in
@@ -22,13 +23,15 @@
 // <dir>/.github/instructions/ of each dir in $COPILOT_CUSTOM_INSTRUCTIONS_DIRS, as Copilot reads them) are appended
 // as { instructions: string[] } to the file's `starts` when the process opens its session (session/new or load; a
 // process that opens none, like the app's lister, writes nothing). session/new keeps the starts of the folder's file.
+// The scenario's optional uniqueIds: true gives every session/new after the first one in a folder its own id
+// (scripted-<folder>-2, …), for a delegated child, which starts in its parent's folder.
 // Unknown arguments (--acp --stdio, the context tier…) are ignored.
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 
-const { prompts = [], load = {} } = process.env.SCRIPTED_SCENARIO ? (await import(pathToFileURL(process.env.SCRIPTED_SCENARIO).href)).default : {};
+const { prompts = [], load = {}, uniqueIds = false } = process.env.SCRIPTED_SCENARIO ? (await import(pathToFileURL(process.env.SCRIPTED_SCENARIO).href)).default : {};
 
 const send = (msg) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...msg }) + "\n");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -83,10 +86,14 @@ function ask(method, params) {
 /** { relay: "prompt" }: the tool's text reply for a prompt that names a relay tool (see the header), else null. */
 async function relayTool(text) {
   // a relay notice that was waiting is put in front of the next prompt ("[from relay]…\n\n<prompt>"): the last paragraph counts
-  const m = /(?:^|\n\n)(adopt_session|release_session|send_message|report_result) ([^\n]*)$/.exec(text);
+  const m = /(?:^|\n\n)(adopt_session|release_session|send_message|report_result|create_session) ([^\n]*)$/.exec(text);
   if (!m) return null;
   let args = { name: m[2] };
   if (m[1] === "report_result") args = { text: m[2] };
+  if (m[1] === "create_session") {
+    const [name, ...rest] = m[2].split(" ");
+    args = { name, task: rest.join(" ") };
+  }
   if (m[1] === "send_message") {
     const [to, ...rest] = m[2].split(" ");
     args = { to, text: rest.join(" ") };
@@ -149,7 +156,13 @@ const handlers = {
   initialize: () => ({ protocolVersion: 1, agentCapabilities: { loadSession: true } }),
   "session/list": () => ({ sessions: [] }),
   "session/new": ({ cwd = process.cwd(), mcpServers } = {}) => {
-    open(cwd, true, mcpServers);
+    let id = sessionIdOf(cwd);
+    if (uniqueIds && !process.env.SCRIPTED_SESSION_ID) {
+      const file = path.join(cwd, ".scripted-agent.json");
+      const used = existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")).starts?.length ?? 0) : 0;
+      if (used > 0) id = `${id}-${used + 1}`;
+    }
+    open(cwd, true, mcpServers, id);
     return { sessionId: session.id, configOptions: [] };
   },
   "session/load": async ({ sessionId, cwd = process.cwd(), mcpServers } = {}) => {

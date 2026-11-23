@@ -9,6 +9,8 @@ import { fileURLToPath } from "node:url";
 import { LATE_TEXT } from "../../electron/test/fixtures/acp/late-group-scenario.mjs";
 import { PARTS } from "../../electron/test/fixtures/acp/panel-scroll-scenario.mjs";
 import { RUNNING_TITLE } from "../../electron/test/fixtures/acp/tool-split-scenario.mjs";
+import { CHILD_PART } from "../../electron/session-prompts.mjs";
+import { REMINDER } from "../../electron/delegation.mjs";
 import { gitIn } from "../../electron/test/git-helper.mjs";
 import { launch, until } from "./driver.mjs";
 
@@ -48,6 +50,7 @@ const WAIT_SCENARIO = path.join(FIXTURES, "panel-wait-scenario.mjs");
 const SPLIT_SCENARIO = path.join(FIXTURES, "tool-split-scenario.mjs");
 const CHANGES_SCENARIO = path.join(FIXTURES, "changes-scenario.mjs");
 const LINK_SCENARIO = path.join(FIXTURES, "link-scenario.mjs");
+const CHILD_PROMPT_SCENARIO = path.join(FIXTURES, "child-prompt-scenario.mjs");
 const PANEL_MODES = ["subagents", "all"];
 const savedMode = (app) => app.ev(`api.getSettings().then((s) => s.activityPanel)`);
 
@@ -1137,6 +1140,37 @@ export const checks = [
       assert.match(await app.ev(release), /becomes a top-level session and keeps its own sub-sessions\./);
     },
   },
+  ...[
+    ["child-prompt", {}, (own) => `D\n\n${CHILD_PART}\n\n${own}`],
+    ["child-prompt-no-child-part", { promptChild: "" }, (own) => `D\n\n${own}`],
+  ].map(([name, extra, expected]) => ({
+    // create_session through a real broker: the approved child starts with the default part, the child part (unless
+    // the setting is empty) and the own part written on the card; its first message carries the reminder
+    name,
+    modes: ["off"],
+    scenario: CHILD_PROMPT_SCENARIO,
+    settings: { relay: true, promptDefault: "D", ...extra },
+    broker: true,
+    async run(app) {
+      await app.newSession();
+      const work = path.join(app.dir, "work");
+      const file = path.join(work, ".scripted-agent.json");
+      const saved = () => JSON.parse(readFileSync(file, "utf8"));
+      await app.check(`(() => { const v = ${V}; return !!v?.relayName && !v.relayChip.hidden && !v.relayChip.classList.contains("off"); })()`, "the parent to connect to the broker");
+      await app.ev(`api.onDelegationRequest((r) => { window.__request = r.requestId; })`);
+      await app.send("create_session kid Do-it");
+      await app.check(`!!window.__request && !!${V}.el.querySelector(".perm.delegation")`, "the delegation card");
+      await app.ev(`api.answerDelegation(window.__request, true, "K")`);
+      const CHILD = "scripted-work-2";
+      const C = `views.get(${JSON.stringify(CHILD)})`;
+      await app.check(`!!${C}`, "the child's view");
+      await until(async () => saved().updates.some((u) => JSON.stringify(u).includes("Do-it")), "the child's first message");
+      const { starts, updates } = saved();
+      assert.equal(starts.length, 2, "the parent's and the child's start");
+      assert.deepEqual(starts[1].instructions, [expected("K")]);
+      assert.ok(JSON.stringify(updates).includes(REMINDER), "the child's first message carries the reminder");
+    },
+  })),
   {
     // adopt_session and release_session through a real broker (the driver's: its own port and state files): the
     // agent calls the tool, main carries the card to the window and the answer back, the broker changes the link and
