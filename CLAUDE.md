@@ -21,3 +21,9 @@ in the repo. A scratch ledger, a worktree or the conversation is not a backlog: 
 A version tag (`vX.Y.Z`, annotated, message = the tag name) goes on the merge commit on `main`
 (`git merge --no-ff`), never on a commit of a feature or fix branch. Pushing a `v*` tag starts the "Desktop app"
 release workflow.
+
+## Reviews
+
+Task reviews, re-reviews of fix rounds, and design or spec reviews run on Opus 5.5 (`model: opus`) with high
+reasoning effort (`effort: high`). The final whole-branch review runs on Fable 5.2 (`model: fable`) with medium
+reasoning effort (`effort: medium`). Set both explicitly on every review dispatch. Implementers may use cheaper models.
