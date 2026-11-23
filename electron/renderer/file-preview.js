@@ -1,15 +1,15 @@
 // Full-screen changes browser: the files changed in the session's repositories (main's changes:* records), their
 // commits and the git diff of the selected one; a file link from the chat opens that file alone. This file holds
-// the state; changes-list.js draws the list. Show file puts the file on disk beside the diff; the file on show is
-// watched. Loaded before app.js; app.js calls createFilePreview once. File and diff text reach the DOM only as
-// textContent, as escaped highlight.js output, or through md() (marked + DOMPurify).
+// the state; changes-list.js draws the list. Diff, File and Both choose the panes: the diff, the file on disk, or the
+// two side by side; the file on show is watched. Loaded before app.js; app.js calls createFilePreview once. File and
+// diff text reach the DOM only as textContent, as escaped highlight.js output, or through md() (marked + DOMPurify).
 "use strict";
 
 const LINE_H = 18; // px, must match .fp-code line-height in style.css
 const OVERSCAN = 40; // extra lines rendered above and below the viewport in the windowed view
 // ChangesModel.locate compares paths as the main process's platform does (the renderer has no process.platform)
 const PLATFORM = /^win/i.test(navigator.platform) ? "win32" : "other";
-const PREFS_KEY = "copilot-sessions.changes.v1"; // { showFile, ratio } of the split, for all sessions
+const PREFS_KEY = "copilot-sessions.changes.v1"; // { view, ratio } of the right side, for all sessions
 
 function createFilePreview({ api, h, md, onStatus }) {
   const el = document.querySelector("#file-preview");
@@ -22,7 +22,7 @@ function createFilePreview({ api, h, md, onStatus }) {
   const splitEl = el.querySelector(".fp-split");
   const content = el.querySelector(".fp-content");
   const mdBtn = el.querySelector('[data-act="md"]');
-  const fileBtn = el.querySelector('[data-act="file"]');
+  const viewEl = el.querySelector(".fp-view");
   const confirmEl = el.querySelector(".fp-confirm");
   const errEl = h("div", { class: "fp-error", hidden: true });
   el.querySelector(".fp-head").after(errEl);
@@ -33,8 +33,12 @@ function createFilePreview({ api, h, md, onStatus }) {
   let dataOf = null;
   // the selection: key (a ChangesModel.key; find(sel.key) gives its file) and version ("uncommitted" or a commit's sha)
   let sel = null;
-  // "change": the diff pane shows, with Show file the content pane too; "file": the content pane shows; null: nothing
+  // "change": a repository file's row is on show (cur is its file); "file": a file without a diff (a loose row, a
+  // link; a link's row may be selected); null: nothing
   let mode = null;
+  let shown = null; // the view on show, "diff", "file" or "both" (ChangesModel.viewFor); null with nothing on show
+  let diffOf; // the selection whose diff the diff pane holds or reads; undefined: none (null is a selection too)
+  const diskNewer = new Set(); // keys of the files changed on disk since the list was read: their flags are older
   const collapsed = new Set(); // `${sessionId}\n${root}` of the folded groups
   const unfolded = new Set(); // `${sessionId}\n${key}` of the files that show their commits
   // key -> "loading", { error } or the file's commits, for the list on show; every list answer empties it
@@ -50,7 +54,7 @@ function createFilePreview({ api, h, md, onStatus }) {
   // a newer list request, a close or another session makes an older list, and the commits read for it, stale
   let listSeq = 0;
   let refreshSeq = 0; // a newer refresh makes older refreshes stale
-  let prefs = { showFile: false, ratio: 0.5 };
+  let prefs = { view: "diff", ratio: 0.5 };
   try {
     prefs = ChangesModel.parsePrefs(localStorage.getItem(PREFS_KEY));
   } catch {}
@@ -81,23 +85,41 @@ function createFilePreview({ api, h, md, onStatus }) {
     pathEl.textContent = path;
     syncMd();
   };
-  /** Which panes show; leaving both modes drops the file on show. */
-  function setMode(m) {
+  /** What is on show: mode `m`, in the view the stored one gives for a row of `kind` (ChangesModel.viewFor). Leaving
+   *  both modes drops the file and the diff on show. */
+  function setMode(m, kind) {
     mode = m;
-    const split = m === "change" && prefs.showFile;
-    content.hidden = m !== "file" && !split;
-    diffEl.hidden = m !== "change";
-    splitEl.hidden = !split;
-    diffEl.style.flex = split ? `0 0 ${prefs.ratio * 100}%` : "";
-    fileBtn.hidden = m !== "change";
-    fileBtn.textContent = prefs.showFile ? "Hide file" : "Show file";
+    shown = m ? ChangesModel.viewFor(prefs.view, kind) : null;
     if (m == null) {
       cur = null;
       fullText = null;
       content.replaceChildren();
+      diffEl.replaceChildren();
+      diffOf = undefined;
       watch(null);
     }
+    setPanes();
+  }
+  /** The panes of `shown`; the diff pane reads the selection's diff when it first shows for it. */
+  function setPanes() {
+    const diff = shown === "diff" || shown === "both";
+    diffEl.hidden = !diff;
+    content.hidden = shown !== "file" && shown !== "both";
+    splitEl.hidden = shown !== "both";
+    diffEl.style.flex = shown === "both" ? `0 0 ${prefs.ratio * 100}%` : "";
+    viewEl.hidden = shown == null;
+    for (const b of viewEl.querySelectorAll("button")) b.classList.toggle("active", b.dataset.view === shown);
     syncMd();
+    if (diff && diffOf !== sel) loadDiff(sel?.version);
+  }
+  /** A click on the control: this showing's view, and the stored one for the next showings. */
+  function setView(v) {
+    prefs.view = v;
+    savePrefs();
+    const wasHidden = content.hidden;
+    shown = v;
+    setPanes();
+    if (wasHidden) paintFile();
   }
   const savePrefs = () => {
     try {
@@ -229,11 +251,12 @@ function createFilePreview({ api, h, md, onStatus }) {
     refocus();
   }
 
-  /** A file that cannot be shown (gone, or no longer text): its name and path stay, `text` says why. */
+  /** "file" mode: cur cannot be shown (gone, or no longer text): its name and path stay, `text` says why. */
   function showUnavailable(filePath, text) {
-    fullText = null;
+    cur.result = null;
+    cur.note = text;
     setHeader(baseName(filePath), filePath);
-    message(text);
+    paintFile();
   }
 
   /** Watch the file on show; a path main has not read (an old entry) is refused, which only means no refresh. */
@@ -241,32 +264,33 @@ function createFilePreview({ api, h, md, onStatus }) {
 
   /** Show a file in the content pane without the confirmation (a loose file of the list). `my` is its selection's seq. */
   async function loadContent(my, filePath) {
-    setMode("file");
+    setMode("file", "nodiff");
     const v = view;
     let r;
     try {
       r = await api.readFile(v.cwd, filePath, { viewingCwd: v.cwd, confirmed: true });
     } catch (e) {
       if (my !== seq) return;
-      cur = { path: filePath, line: null, result: null, note: readNote(e) };
+      cur = { path: filePath, line: null, result: null, note: null };
       showUnavailable(filePath, e.message);
       return watch(filePath); // it may come back
     }
     if (my !== seq) return;
-    cur = { path: r.path ?? filePath, line: null, result: r };
+    cur = { path: r.path ?? filePath, line: null, result: r, note: null };
     watch(cur.path);
-    if (r.notText || r.outside || r.tier === "binary") showUnavailable(filePath, "This file is not a text file.");
+    if (notText(r)) showUnavailable(filePath, "This file is not a text file.");
     else {
       mdSource = false;
-      renderFile(r, null);
+      setHeader(r.name, cur.path); // also while its pane is hidden
+      paintFile();
     }
   }
 
   const notText = (r) => r.notText || r.outside || r.tier === "binary";
 
-  /** "change" mode: what the content pane shows of cur, when it shows. */
+  /** What the content pane shows of cur, when it shows. */
   function paintFile(keepScroll = false) {
-    if (mode !== "change" || content.hidden || !cur) return;
+    if (!mode || content.hidden || !cur) return;
     if (cur.result) return renderFile(cur.result, cur.line, keepScroll);
     fullText = null;
     if (cur.note) message(cur.note);
@@ -302,18 +326,6 @@ function createFilePreview({ api, h, md, onStatus }) {
   }
 
   // --- the split ----------------------------------------------------------------------------------------
-
-  /** Show file / Hide file: the content pane beside the diff; the choice is kept for all sessions. */
-  function toggleFile() {
-    prefs.showFile = !prefs.showFile;
-    savePrefs();
-    setMode("change");
-    if (prefs.showFile) paintFile();
-    else {
-      fullText = null;
-      content.replaceChildren();
-    }
-  }
 
   /** The divider drags with pointer capture, as dragPanel in app.js; the ratio is saved when it is let go. */
   function dragSplit(e) {
@@ -417,6 +429,7 @@ function createFilePreview({ api, h, md, onStatus }) {
     data = d;
     dataOf = v.sessionId;
     commitCache.clear();
+    diskNewer.clear();
     const reads = new Map();
     for (const id of unfolded) {
       const key = id.startsWith(`${dataOf}\n`) ? id.slice(dataOf.length + 1) : null;
@@ -461,21 +474,24 @@ function createFilePreview({ api, h, md, onStatus }) {
 
   // --- selection ----------------------------------------------------------------------------------------
 
-  /** Select a version of a row; with showDiff its diff and the file beside it. A loose file shows its content. Without
-   *  showDiff only the row is marked, and a content read in flight is left alone. */
+  /** Select a version of a row; with showDiff its diff and its file, in the view the stored one gives for it. A loose
+   *  file shows its content. Without showDiff only the row is marked (its diff read if the diff pane shows), and a
+   *  content read in flight is left alone. */
   function select(key, version = "uncommitted", showDiff = true) {
     const my = showDiff ? ++seq : seq;
     const found = find(key);
     sel = found ? { key, version } : null;
     renderList();
-    if (!showDiff) return;
+    if (!showDiff) return setPanes();
     if (!found) {
       setMode(null);
       setHeader("", "");
       return;
     }
     if (found.root == null) return loadContent(my, found.rel);
-    loadDiff(version); // switches to the diff pane
+    errEl.hidden = true;
+    setHeader(ChangesModel.splitName(found.rel).name, absPath(found.root, found.rel));
+    setMode("change", version === "uncommitted" ? "change" : "commit"); // reads the diff if its pane shows
     loadPaneFile(my, found.root, found.rel);
   }
 
@@ -484,10 +500,10 @@ function createFilePreview({ api, h, md, onStatus }) {
     if (mode !== "change" || sel?.key !== key) return select(key, sha);
     sel = { key, version: sha };
     renderList();
-    loadDiff(sha);
+    setMode("change", "commit");
   }
 
-  /** The file on show came from a link: mark its row when it is listed (no diff yet). */
+  /** The file on show came from a link: mark its row when it is listed (its diff is read if the diff pane shows). */
   function locateCur() {
     const found = cur && ChangesModel.locate(data, cur.path, PLATFORM);
     let key = found ? ChangesModel.key(found.root, found.rel) : null;
@@ -499,20 +515,18 @@ function createFilePreview({ api, h, md, onStatus }) {
 
   // --- diff ---------------------------------------------------------------------------------------------
 
-  /** Show the diff of the selected row's version `id` (switches to the diff pane; the file pane keeps its file).
-   *  `keep` (the file changed on disk): the diff is replaced in place, at the same scroll position. */
+  /** Show the diff of the selected row's version `id` in the diff pane; a selection without one (a loose row, a link
+   *  that is not listed) has no changes. `keep` (the file changed on disk): the diff is replaced in place, at the same
+   *  scroll position. */
   async function loadDiff(id, keep = false) {
     const found = find(sel?.key);
-    if (found?.root == null) return; // only a repository's file has versions
     const my = seq;
     const mine = ++diffSeq;
     const stale = () => my !== seq || mine !== diffSeq;
-    const { root, rel, file } = found;
     const v = view;
     if (!keep) {
-      setMode("change");
+      diffOf = sel;
       errEl.hidden = true;
-      setHeader(ChangesModel.splitName(rel).name, absPath(root, rel));
       diffEl.replaceChildren();
     }
     const { scrollTop, scrollLeft } = diffEl;
@@ -522,8 +536,11 @@ function createFilePreview({ api, h, md, onStatus }) {
       diffEl.scrollLeft = scrollLeft;
     };
     const say = (text) => show(h("div", { class: "fp-msg" }, text));
-    // only committed changes: no git call; a change on disk (keep) asks git, the list's flags are older than it
-    if (!keep && id === "uncommitted" && !file.uncommitted) return say("No changes.");
+    if (found?.root == null) return say("No changes."); // only a repository's file has versions
+    const { root, rel, file } = found;
+    // only committed changes: no git call; a change on disk (keep, or one seen since the list) asks git, the list's
+    // flags are older than it
+    if (!keep && id === "uncommitted" && !file.uncommitted && !diskNewer.has(sel.key)) return say("No changes.");
     try {
       // an untracked file has no diff: its content is the addition
       const r = id === "uncommitted" && file.state === "?" ? { added: true } : await api.changesDiff(v.sessionId, root, rel, id);
@@ -612,11 +629,11 @@ function createFilePreview({ api, h, md, onStatus }) {
     confirmEl.hidden = true;
     confirmOnly = false;
     showOverlay(v);
-    setMode("file");
+    setMode("file", "nodiff");
     mdSource = line != null;
-    cur = { path: r.path, line, result: r };
+    cur = { path: r.path, line, result: r, note: null };
     watch(r.path);
-    renderFile(r, line);
+    paintFile();
     // its row, when it is listed
     sel = null;
     renderList();
@@ -624,11 +641,18 @@ function createFilePreview({ api, h, md, onStatus }) {
     return true;
   }
 
-  /** The watched file changed: read it again and show it in place, and in "change" mode with Uncommitted on show its
-   *  diff too. The list, the mark and the scroll positions stay as they are. */
+  /** The watched file changed: read it again and show it in place, and with its row's Uncommitted selected its diff
+   *  too (now if the diff pane shows, else when it next shows). The list, the mark and the scroll positions stay. */
   async function refresh(changed) {
     if (el.hidden || !view || !mode || cur?.path !== changed) return;
-    if (mode === "change" && sel?.version === "uncommitted") loadDiff("uncommitted", true);
+    // a selected repository row is cur's file (in "file" mode the link's own row)
+    if (find(sel?.key)?.root != null) {
+      diskNewer.add(sel.key);
+      if (sel.version === "uncommitted") {
+        if (diffEl.hidden) diffOf = undefined;
+        else loadDiff("uncommitted", true);
+      }
+    }
     const my = seq;
     const mine = ++refreshSeq;
     const v = view;
@@ -638,18 +662,21 @@ function createFilePreview({ api, h, md, onStatus }) {
       r = await api.readFile(v.cwd, changed, { viewingCwd: v.cwd, confirmed: true });
     } catch (e) {
       if (stale()) return;
+      if (mode === "file") return showUnavailable(changed, e.message);
       cur.result = null;
       cur.note = readNote(e);
-      if (mode !== "change") return showUnavailable(changed, e.message);
       return paintFile();
     }
     if (stale()) return;
-    cur.result = notText(r) ? null : r;
-    if (mode === "change") {
-      cur.note = cur.result ? null : "This file is no longer a text file.";
-      paintFile(true);
-    } else if (!cur.result) showUnavailable(changed, "This file is no longer a text file.");
-    else renderFile(r, cur.line, true);
+    if (!notText(r)) {
+      cur.result = r;
+      cur.note = null;
+    } else if (mode === "file") return showUnavailable(changed, "This file is no longer a text file.");
+    else {
+      cur.result = null;
+      cur.note = "This file is no longer a text file.";
+    }
+    paintFile(true);
   }
   api.onFileChanged(refresh);
 
@@ -663,7 +690,6 @@ function createFilePreview({ api, h, md, onStatus }) {
     confirmOnly = false;
     confirmEl.hidden = true;
     loadingEl.hidden = true;
-    diffEl.replaceChildren();
     setHeader("", "");
     el.hidden = true;
     view = null;
@@ -672,19 +698,18 @@ function createFilePreview({ api, h, md, onStatus }) {
   // --- events -------------------------------------------------------------------------------------------
 
   el.addEventListener("click", (e) => {
+    const pick = e.target.closest(".fp-view button[data-view]")?.dataset.view;
+    if (pick && shown) return setView(pick);
     const act = e.target.closest("button[data-act]")?.dataset.act;
     if (act === "close") close();
     else if (act === "refresh" && view) reloadList();
     else if (act === "add" && view) addRepo();
     else if (act === "system" && view) {
-      const found = find(sel?.key);
-      const target = mode === "file" ? cur?.path : found?.root != null ? absPath(found.root, found.rel) : null;
-      if (target) api.openLink(view.cwd, target).catch((err) => fail(err.message));
+      if (cur?.path) api.openLink(view.cwd, cur.path).catch((err) => fail(err.message));
     } else if (act === "md" && !content.hidden && cur?.result) {
       mdSource = !mdSource;
       renderFile(cur.result, cur.line);
-    } else if (act === "file" && mode === "change") toggleFile();
-    else if (act === "allow" && pending) {
+    } else if (act === "allow" && pending) {
       const p = pending;
       pending = null;
       confirmEl.hidden = true;
@@ -708,8 +733,8 @@ function createFilePreview({ api, h, md, onStatus }) {
       if ((e.ctrlKey || e.metaKey) && ZOOM_KEY.test(e.key)) return; // the app's zoom guard swallows these
       e.stopImmediatePropagation();
       if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "a") {
-        e.preventDefault(); // select the pane that has the focus (else the diff), not the whole window
-        const inFile = !content.hidden && (mode === "file" || content.contains(document.activeElement));
+        e.preventDefault(); // select the pane that has the focus (else the diff, if it shows), not the whole window
+        const inFile = !content.hidden && (diffEl.hidden || content.contains(document.activeElement));
         const node = inFile ? content.querySelector(".fp-text, .fp-md") : diffEl.querySelector(".dv");
         if (node) {
           getSelection().selectAllChildren(node);

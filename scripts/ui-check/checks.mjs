@@ -1526,6 +1526,7 @@ export const checks = [
       await fpListed(app);
       await app.check(`${fpRow("notes.txt")}.classList.contains("active")`, "notes.txt's row selected");
       assert.equal(await app.ev(`${FP}.querySelector(".fp-diff").hidden`), true, "no diff pane for a file link");
+      assert.equal(await app.ev(`${FP}.querySelector(".fp-view button.active")?.dataset.view`), "file", "File for a file link");
       assert.equal(await app.ev(`${FP}.querySelector(".fp-content").hidden`), false, "the file's content");
 
       // b.txt stays unfolded (the fold state is kept per session) and its commits were read again with the list
@@ -1554,8 +1555,9 @@ export const checks = [
     },
   },
   {
-    // Show file puts the file on disk beside its diff; the divider drags, the split is kept for the next opening; a
-    // change on disk reads the file and its uncommitted diff again in place, without reading the list again
+    // Diff, File and Both choose the panes, kept with the divider's ratio for the next opening; a commit shows its
+    // diff and a file without a diff (a link) the file, for that showing only; a change on disk reads the file and its
+    // uncommitted diff again in place, without reading the list again
     name: "changes-split",
     modes: ["off"],
     scenario: CHANGES_SCENARIO,
@@ -1570,7 +1572,13 @@ export const checks = [
         await app.ev(`[...${V}.el.querySelectorAll(".head button")].find((b) => b.textContent === "Changes").click()`);
         await fpListed(app);
       };
-      const fileBtn = `${FP}.querySelector('[data-act="file"]')`;
+      const closeBrowser = async () => {
+        await app.ev(`document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))`);
+        await app.check(`${FP}.hidden`, "the browser to close");
+      };
+      const viewBtn = (v) => `${FP}.querySelector('.fp-view button[data-view="${v}"]')`;
+      const active = () => app.ev(`[...${FP}.querySelectorAll(".fp-view button.active")].map((b) => b.dataset.view).join()`);
+      const stored = () => app.ev(`JSON.parse(localStorage.getItem("copilot-sessions.changes.v1"))`);
       const panes = (a = app) => a.ev(`(() => {
         const w = (s) => { const e = ${FP}.querySelector(s); return e.checkVisibility() ? e.getBoundingClientRect() : null; };
         const d = w(".fp-diff"), c = w(".fp-content"), p = w(".fp-panes");
@@ -1580,13 +1588,15 @@ export const checks = [
 
       await openBrowser();
       await fpSelect(app, "README.md");
-      assert.equal(await app.ev(`${fileBtn}.textContent`), "Show file");
-      assert.equal((await panes()).content, 0, "no file pane before Show file");
-      await app.ev(`${fileBtn}.click()`);
+      assert.deepStrictEqual(await app.ev(`[...${FP}.querySelectorAll(".fp-view button")].map((b) => b.textContent)`), ["Diff", "File", "Both"]);
+      assert.equal(await active(), "diff", "Diff on the first opening");
+      assert.equal((await panes()).content, 0, "no file pane in Diff");
+
+      await app.ev(`${viewBtn("both")}.click()`);
       await contentShows("changed");
       const split = await panes();
-      assert.ok(split.beside && split.diff > 100 && split.content > 100, `the file beside its diff: ${JSON.stringify(split)}`);
-      assert.equal(await app.ev(`${fileBtn}.textContent`), "Hide file");
+      assert.ok(split.beside && split.diff > 100 && split.content > 100, `Both: the file beside its diff: ${JSON.stringify(split)}`);
+      assert.equal(await active(), "both");
 
       await app.ev(`(() => {
         const s = ${FP}.querySelector(".fp-split"), r = s.getBoundingClientRect();
@@ -1600,17 +1610,18 @@ export const checks = [
       await frames(app);
       const dragged = await panes();
       assert.ok(Math.abs(split.diff - 200 - dragged.diff) <= 2, `dragged 200 px left: ${split.diff} → ${dragged.diff}`);
+      const afterDrag = await stored();
+      assert.deepStrictEqual(afterDrag, { view: "both", ratio: afterDrag.ratio }, "stored: the view and the ratio");
+      assert.ok(Math.abs(afterDrag.ratio - dragged.ratio) <= 0.01, `stored ratio ${afterDrag.ratio}, dragged ${dragged.ratio}`);
 
-      await app.reload();
+      await closeBrowser();
       await openBrowser();
       await app.check(`${fpRow("README.md")}.classList.contains("active") && !!${FP}.querySelector(".fp-diff .dv")`, "README.md's diff again");
       await contentShows("changed");
       const again = await panes();
-      assert.ok(again.content > 100, "the file pane after the reload");
-      assert.ok(Math.abs(again.ratio - dragged.ratio) <= 0.01, `the ratio after the reload: ${dragged.ratio} → ${again.ratio}`);
-      const stored = await app.ev(`ChangesModel.parsePrefs(localStorage.getItem("copilot-sessions.changes.v1"))`);
-      assert.equal(stored.showFile, true, "stored: the file pane shows");
-      assert.ok(Math.abs(stored.ratio - again.ratio) <= 0.01, `stored ratio ${stored.ratio}`);
+      assert.equal(await active(), "both", "Both after reopening");
+      assert.ok(again.content > 100, "the file pane after reopening");
+      assert.ok(Math.abs(again.ratio - dragged.ratio) <= 0.01, `the ratio after reopening: ${dragged.ratio} → ${again.ratio}`);
 
       const adds = `${FP}.querySelectorAll(".fp-diff .dv-line.add").length`;
       const addsBefore = await app.ev(adds);
@@ -1623,9 +1634,9 @@ export const checks = [
       const sameRows = await app.ev(`(() => { const now = [...${FP}.querySelectorAll(".fp-row")]; return now.length === window.__fpRows.length && now.every((r, i) => r === window.__fpRows[i]); })()`);
       assert.equal(sameRows, true, "the list's rows are the same nodes");
 
-      // Ctrl+A selects the pane that has the focus
+      // Ctrl+A selects the pane that has the focus; with the diff pane hidden, the file pane
       const selectAllIn = (pane) => app.ev(`(() => {
-        ${FP}.querySelector(${JSON.stringify(pane)}).focus();
+        (${JSON.stringify(pane)} ? ${FP}.querySelector(${JSON.stringify(pane)}) : ${FP}).focus();
         document.dispatchEvent(new KeyboardEvent("keydown", { key: "a", ctrlKey: true, bubbles: true }));
         const s = getSelection(), where = s.rangeCount ? s.getRangeAt(0).commonAncestorContainer : null;
         const r = { content: !!where && ${FP}.querySelector(".fp-content").contains(where), diff: !!where && ${FP}.querySelector(".fp-diff").contains(where) };
@@ -1643,28 +1654,66 @@ export const checks = [
       await contentShows("edited on disk");
       await app.check(`${FP}.querySelectorAll(".fp-diff .dv .dv-line.add").length > 0`, "b.txt's diff after the edit on disk");
 
-      await app.ev(`${fileBtn}.click()`);
-      const single = await panes();
-      assert.ok(single.content === 0 && Math.abs(single.ratio - 1) < 0.01, `Hide file: the diff alone ${JSON.stringify(single)}`);
-      assert.equal(await app.ev(`${fileBtn}.textContent`), "Show file");
-      assert.equal((await app.ev(`ChangesModel.parsePrefs(localStorage.getItem("copilot-sessions.changes.v1"))`)).showFile, false, "stored: hidden");
+      await app.ev(`${viewBtn("file")}.click()`);
+      const fileOnly = await panes();
+      assert.ok(fileOnly.diff === 0 && fileOnly.content > 100, `File: the file alone ${JSON.stringify(fileOnly)}`);
+      await contentShows("edited on disk");
+      assert.equal(await active(), "file");
+      assert.equal((await stored()).view, "file", "stored: File");
+      assert.deepStrictEqual(await selectAllIn(null), { content: true, diff: false }, "Ctrl+A with the diff pane hidden");
+      // edited on disk while the diff pane is hidden: git is asked when the pane shows, not the list's older flags
+      appendFileSync(path.join(work, "b.txt"), "edited again\n");
+      await contentShows("edited again");
+      await app.ev(`${viewBtn("diff")}.click()`);
+      await app.check(`[...${FP}.querySelectorAll(".fp-diff .dv-line.add")].some((l) => l.textContent.includes("edited again"))`, "b.txt's diff once its pane shows");
+      await app.ev(`${viewBtn("file")}.click()`);
 
-      // a file link shows the file alone, without the button; a click on its row brings the stored split back
-      await app.ev(`${fileBtn}.click()`);
-      await app.ev(`document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))`);
-      await app.check(`${FP}.hidden`, "the browser to close");
+      // a commit shows its diff with File stored; the next row shows the stored view again
+      await app.ev(`${fpArrow("b.txt")}.click()`);
+      await app.check(`!!${fpCommitsOf("b.txt")}?.querySelector(".fp-commit")`, "b.txt's commits");
+      await app.ev(`${fpCommitsOf("b.txt")}.querySelector(".fp-commit").click()`);
+      await app.check(`${fpCommitsOf("b.txt")}.querySelector(".fp-commit").classList.contains("active") && !!${FP}.querySelector(".fp-diff .dv")`, "b.txt's commit diff");
+      assert.equal(await active(), "diff", "Diff for a commit");
+      const commitPanes = await panes();
+      assert.ok(commitPanes.diff > 100 && commitPanes.content === 0, `the commit's diff alone ${JSON.stringify(commitPanes)}`);
+      assert.equal((await stored()).view, "file", "stored: still File");
+      await app.ev(`${fpRow("README.md")}.click()`);
+      await app.check(`${fpRow("README.md")}.classList.contains("active")`, "README.md's row selected");
+      await contentShows("appended on disk");
+      assert.equal(await active(), "file", "File again for a changed file");
+      assert.equal((await panes()).diff, 0, "no diff pane in File");
+
+      // a file link shows the file alone with Both stored; Both then shows its diff beside it
+      await app.ev(`${viewBtn("both")}.click()`);
+      await app.check(`!!${FP}.querySelector(".fp-diff .dv")`, "README.md's diff in Both");
+      await closeBrowser();
       await app.ev(`${V}.log.querySelector('.diff-path[data-path="notes.txt"]').click()`);
       await contentShows("hello");
       await fpListed(app);
       await app.check(`${fpRow("notes.txt")}.classList.contains("active")`, "notes.txt's row selected");
-      assert.equal(await app.ev(`${fileBtn}.hidden`), true, "no Show file for a file link");
+      assert.equal(await active(), "file", "File for a file link");
       assert.equal((await panes()).diff, 0, "no diff pane for a file link");
-      await fpSelect(app, "notes.txt");
+      assert.equal((await stored()).view, "both", "stored: still Both");
+      await app.ev(`${viewBtn("both")}.click()`);
       await app.check(`!!${FP}.querySelector(".fp-diff .dv")`, "notes.txt's diff");
+      const types = await fpDiffTypes(app);
+      assert.ok(types.length > 0 && types.every((t) => t === "add"), `notes.txt is all added: ${types}`);
       const linked = await panes();
       assert.ok(linked.beside && Math.abs(linked.ratio - again.ratio) <= 0.01, `the stored split for the linked file: ${JSON.stringify(linked)}`);
       assert.ok(await app.ev(`${FP}.querySelector(".fp-content").textContent.includes("hello")`), "the linked file beside its diff");
-      assert.equal(await app.ev(`${fileBtn}.textContent`), "Hide file");
+
+      // an old stored value: Show file is Both
+      await app.ev(`localStorage.setItem("copilot-sessions.changes.v1", '{"showFile":true,"ratio":0.3}')`);
+      await app.reload();
+      await openBrowser();
+      await app.check(`!!${FP}.querySelector(".fp-row.active") && !!${FP}.querySelector(".fp-diff .dv, .fp-diff .fp-msg")`, "a row's diff after the reload");
+      assert.equal(await active(), "both", "Both from the old Show file");
+      const old = await panes();
+      assert.ok(Math.abs(old.ratio - 0.3) <= 0.01, `the old ratio: ${JSON.stringify(old)}`);
+
+      // a file deleted while its row is on show
+      await fpSelect(app, "notes.txt");
+      await contentShows("hello");
       rmSync(path.join(work, "notes.txt"));
       await contentShows("This file is deleted.");
 
@@ -1676,8 +1725,8 @@ export const checks = [
       rmSync(path.join(work, "notes.txt"));
       await app.check(`!${FP}.querySelector(".fp-content").textContent.includes("hello")`, "the file pane to drop notes.txt's text");
       await fpSelect(app, "notes.txt");
-      await app.ev(`${fileBtn}.click()`); // hide, then show again: the pane is painted from cur
-      await app.ev(`${fileBtn}.click()`);
+      await app.ev(`${viewBtn("diff")}.click()`); // hide, then show again: the pane is painted from cur
+      await app.ev(`${viewBtn("both")}.click()`);
       await contentShows("This file is deleted.");
     },
   },

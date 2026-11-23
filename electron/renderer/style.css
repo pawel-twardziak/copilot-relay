@@ -453,6 +453,14 @@ span.img-chip.off { border: 1px dashed var(--border); }
 .fp-path { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; user-select: text; }
 .fp-actions { display: flex; gap: 6px; }
 .fp-actions button[hidden] { display: none; }
+/* Diff | File | Both: one control of joined buttons, the view on show marked */
+.fp-view { display: flex; }
+.fp-view[hidden] { display: none; }
+.fp-view button { border-radius: 0; }
+.fp-view button + button { margin-left: -1px; }
+.fp-view button:first-child { border-radius: 6px 0 0 6px; }
+.fp-view button:last-child { border-radius: 0 6px 6px 0; }
+.fp-view button.active { position: relative; background: #1f6feb33; border-color: #1f6feb66; }
 .fp-content { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .fp-msg { padding: 24px; color: var(--muted); }
 .fp-scroll { flex: 1; min-height: 0; overflow: auto; position: relative; }

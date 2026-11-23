@@ -71,14 +71,16 @@ test("clampRatio: a finite number clamped to 0.2–0.8, anything else 0.5", () =
   assert.equal(ChangesModel.clampRatio("0.3"), 0.5);
 });
 
-test("parsePrefs: the stored split, defaults for missing or broken text", () => {
-  const defaults = { showFile: false, ratio: 0.5 };
-  assert.deepEqual(ChangesModel.parsePrefs(null), defaults);
-  assert.deepEqual(ChangesModel.parsePrefs("{"), defaults);
-  assert.deepEqual(ChangesModel.parsePrefs("null"), defaults);
-  assert.deepEqual(ChangesModel.parsePrefs("[1]"), defaults);
-  assert.deepEqual(ChangesModel.parsePrefs('{"showFile":true,"ratio":0.3}'), { showFile: true, ratio: 0.3 });
-  assert.deepEqual(ChangesModel.parsePrefs('{"showFile":"yes","ratio":2}'), { showFile: false, ratio: 0.8 });
+test("parsePrefs: the view and the ratio, old and broken values", () => {
+  const p = (v) => ChangesModel.parsePrefs(JSON.stringify(v));
+  assert.deepEqual(ChangesModel.parsePrefs(null), { view: "diff", ratio: 0.5 });
+  assert.deepEqual(ChangesModel.parsePrefs("{"), { view: "diff", ratio: 0.5 });
+  assert.deepEqual(p({ view: "both", ratio: 0.3 }), { view: "both", ratio: 0.3 });
+  assert.deepEqual(p({ view: "file" }), { view: "file", ratio: 0.5 });
+  assert.deepEqual(p({ showFile: true, ratio: 9 }), { view: "both", ratio: 0.8 });
+  assert.deepEqual(p({ showFile: false }), { view: "diff", ratio: 0.5 });
+  assert.deepEqual(p({ view: "sideways", showFile: true }), { view: "both", ratio: 0.5 });
+  assert.deepEqual(p({ view: "sideways" }), { view: "diff", ratio: 0.5 });
 });
 
 test("viewFor: the stored view, the diff for a commit, the file where there is no diff", () => {

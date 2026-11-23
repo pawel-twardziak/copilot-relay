@@ -128,14 +128,15 @@ function abs(root, rel, platform) {
 /** The diff pane's share of the split: a finite number clamped to 0.2–0.8, anything else 0.5. */
 const clampRatio = (value) => (typeof value === "number" && Number.isFinite(value) ? Math.min(0.8, Math.max(0.2, value)) : 0.5);
 
-/** The stored split (localStorage text): { showFile, ratio }, the defaults for missing or broken text. */
+/** The stored view and split (localStorage text): { view, ratio }; an old { showFile: true } is "both". */
 function parsePrefs(text) {
   let raw = null;
   try {
     raw = JSON.parse(text ?? "null");
   } catch {}
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) raw = {};
-  return { showFile: raw.showFile === true, ratio: clampRatio(raw.ratio) };
+  const view = ["diff", "file", "both"].includes(raw.view) ? raw.view : raw.showFile === true ? "both" : "diff";
+  return { view, ratio: clampRatio(raw.ratio) };
 }
 
 const ChangesModel = { key, pick, viewFor, samePath, openedShown, openedLabel, commitLabel, keepVersion, splitName, locate, abs, clampRatio, parsePrefs };
