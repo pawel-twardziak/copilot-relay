@@ -39,9 +39,11 @@ on purpose: the fix rounds moved them; the symbol or test name is given instead.
    `electron/renderer/file-preview.js` re-reads up to 20 MB per change, and an untracked file twice (`showAdded`
    and `refresh`), though nothing on screen uses it. The first read per selection is needed, because the main
    process only watches a path it has read.
-   *Proposal:* with the pane hidden, mark `cur` as out of date on a change and read on `Show file`; reuse the text
-   `showAdded` already has.
-6. **Two races between a link and the version strip.** Since `loadDiff` got its own counter (`diffSeq`), a strip
+   *Proposal:* with the pane hidden, mark `cur` as out of date on a change and read when `File` or `Both` is chosen;
+   reuse the text `showAdded` already has. Since the changes tree the diff is no longer read while its pane is
+   hidden; the file read is the part that remains.
+6. **Two races between a link and the version strip.** (The first race is moot since the changes tree,
+   2026-11-23: the strip is gone; the second still applies.) Since `loadDiff` got its own counter (`diffSeq`), a strip
    click no longer cancels a link read in flight: the link's answer still switches to `file` mode and the diff is
    written into the hidden pane. And `openTarget` bumps `seq` before it knows it will take over, so a link to an
    image or a broken link clicked while a diff loads leaves the diff pane empty. Both windows are milliseconds
@@ -70,7 +72,7 @@ on purpose: the fix rounds moved them; the symbol or test name is given instead.
     runs jumps back.
 14. `.fp-dir` uses `unicode-bidi: bidi-override` for the cut-at-start trick, which shows a folder name in a
     right-to-left script reversed (`isolate` may do; not tried).
-15. After `⟳` the version strip goes back to its first entry; the chosen version is not kept.
+15. After `⟳` the version strip goes back to its first entry; the chosen version is not kept. Moot since the changes tree (2026-11-23).
 16. `ChangesList.render` rebuilds every group and row on each selection (up to 2000 rows per repository) and drops
     hover state; toggling `active` on two rows would do.
 17. A deleted listed file named like link text (`a%20b.txt`, `x.md:12`) can show another existing file
@@ -79,10 +81,11 @@ on purpose: the fix rounds moved them; the symbol or test name is given instead.
 
 17a. In `file` mode a file that turns into a non-text file gets no note (`refresh` in `file-preview.js`): a blank
     pane after a strip entry + `Show file`, and after delete → restore → binary a stale "This file is deleted."
-    Set and clear `cur.note` on every read, in both modes.
+    Set and clear `cur.note` on every read, in both modes. The strip case is moot since the changes tree
+    (2026-11-23); the delete → restore → binary case was not looked at again.
 17b. With `Show file` already on, a strip entry chosen from `file` mode does not repaint the pane (`loadDiff` calls
     `setMode("change")` without `paintFile`): it keeps the raw read error ("File not found…") instead of "This
-    file is deleted." until toggled.
+    file is deleted." until toggled. Moot since the changes tree (2026-11-23).
 17c. A second click on `✕` before the list re-renders now shows "This repository is not listed for this session."
     (the first remove already took it); the line stays when the list ends empty or the browser is in `file` mode.
     Reload the list on a failed remove too, or ignore `✕` while a remove is pending.
@@ -134,16 +137,16 @@ on purpose: the fix rounds moved them; the symbol or test name is given instead.
   check that the note is the last child.
 - `main.mjs`: `allowClicked` and `knownSession` have no test (the file cannot be loaded by `node --test`).
 - UI checks (`scripts/ui-check/checks.mjs`): none for the `No repository` group, the empty state with
-  `+ Add repository`, `error` / `note` / `truncated` rows, `✕`, choosing a strip entry in `file` mode, a
+  `+ Add repository`, `error` / `note` / `truncated` rows, `✕`, choosing a strip entry in `file` mode (moot since the changes tree, 2026-11-23), a
   stale-answer path, the preference read at start (`reload()` does not reload the page), following the disk with
   the pane hidden, either scroll position. `changes-records`' "removed repository after another replay" relies on
   `reload()` waiting 300 ms. `ChangesList.render` takes `h` as an argument and could cover the list rows with the
   stub `h` of `diff-view.test.mjs` under `node --test`.
 - `changes-split`'s last step clicks `.fp-version` without waiting for the strip that `openTarget` has just emptied
-  (the earlier use of that flow waits): on a slow machine a `null.click()` failure, never a false pass.
+  (the earlier use of that flow waits): on a slow machine a `null.click()` failure, never a false pass. Moot since the changes tree (2026-11-23).
 - Final fix wave: the note set in `loadContent`'s `catch` (a loose or linked file that cannot be read) is not
   reached by any check; the tab-stop fix (`.dv-text { display: inline-block; }`) has no assertion of its own.
-- `file-preview.js` is 756 lines; the next addition should move the split (divider drag, preferences) into its own
+- `file-preview.js` is 868 lines (2026-11-23); the next addition should move the split (divider drag, preferences) into its own
   script.
 
 ## Not verified

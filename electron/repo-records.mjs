@@ -1,5 +1,6 @@
 // A small JSON-file store of what the changes browser knows per session: the repositories the session worked in
-// (with the start point each was first seen at) and the loose files it touched outside any repository.
+// (with the start point each was first seen at), the loose files it touched outside any repository and the files
+// opened from links in the chat.
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
@@ -14,12 +15,17 @@ export function sameRoot(a, b, platform = process.platform) {
   return norm(a) === norm(b);
 }
 
+const OPENED_LIMIT = 200;
+
+/** Whether two file paths are the same file: equal text, lower-cased on win32. */
+const sameFile = (a, b, platform) => (platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b);
+
 const clone = (x) => JSON.parse(JSON.stringify(x));
 
 /** The string members of an array; [] for anything else. */
 const strings = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string") : []);
 
-/** The stored data as { [sessionId]: { repos, loose } }; {} when the file is missing, unreadable or malformed. */
+/** The stored data as { [sessionId]: { repos, loose, opened } }; {} when the file is missing, unreadable or malformed. */
 function load(file) {
   let raw;
   try {
@@ -38,6 +44,7 @@ function load(file) {
             .map((r) => ({ ...r, dirtyAtStart: strings(r.dirtyAtStart), touched: strings(r.touched) }))
         : [],
       loose: strings(entry.loose),
+      opened: strings(entry.opened),
     };
   }
   return data;
@@ -59,11 +66,11 @@ export function createRecordStore(file) {
     }
   };
   const find = (sessionId, root) => data[sessionId]?.repos.find((r) => sameRoot(r.root, root));
-  const entry = (sessionId) => (data[sessionId] ??= { repos: [], loose: [] });
+  const entry = (sessionId) => (data[sessionId] ??= { repos: [], loose: [], opened: [] });
 
   return {
     session(sessionId) {
-      return clone(data[sessionId] ?? { repos: [], loose: [] });
+      return clone(data[sessionId] ?? { repos: [], loose: [], opened: [] });
     },
     repo(sessionId, root) {
       const r = find(sessionId, root);
@@ -88,6 +95,21 @@ export function createRecordStore(file) {
       if (e.loose.includes(abs)) return;
       e.loose.push(abs);
       save();
+    },
+    addOpened(sessionId, abs, platform = process.platform) {
+      if (typeof abs !== "string" || !abs) return;
+      const e = entry(sessionId);
+      e.opened = [abs, ...e.opened.filter((p) => !sameFile(p, abs, platform))].slice(0, OPENED_LIMIT);
+      save();
+    },
+    removeOpened(sessionId, abs, platform = process.platform) {
+      const e = data[sessionId];
+      if (!e || typeof abs !== "string") return false;
+      const left = e.opened.filter((p) => !sameFile(p, abs, platform));
+      if (left.length === e.opened.length) return false;
+      e.opened = left;
+      save();
+      return true;
     },
     removeRepo(sessionId, root) {
       const repos = data[sessionId]?.repos;

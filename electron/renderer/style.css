@@ -408,9 +408,19 @@ span.img-chip.off { border: 1px dashed var(--border); }
 .fp-group-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fp-note { padding: 2px 12px 6px 28px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .fp-note.err { color: var(--err); }
-.fp-row { display: flex; align-items: center; gap: 6px; padding: 3px 8px 3px 26px; cursor: pointer; border-left: 2px solid transparent; white-space: nowrap; }
+.fp-row { display: flex; align-items: center; gap: 6px; padding: 3px 8px 3px 12px; cursor: pointer; border-left: 2px solid transparent; white-space: nowrap; }
 .fp-row:hover { background: var(--panel-2); }
 .fp-row.active { background: var(--panel-2); border-left-color: var(--accent); }
+/* a commit of the file is selected: a weaker mark, so the file is findable while its commits are folded */
+.fp-row.current { border-left-color: var(--muted); }
+/* fixed width, also when empty (a file without commits), so the names line up */
+.fp-arrow { flex: none; width: 1em; color: var(--muted); text-align: center; }
+.fp-arrow:not(:empty):hover { color: var(--text); }
+/* under the file's name: the row's border, padding, arrow, state and one flag come to about 69px */
+.fp-commits .fp-note { padding: 2px 12px 4px 72px; }
+.fp-commit { padding: 2px 8px 2px 70px; cursor: pointer; border-left: 2px solid transparent; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; }
+.fp-commit:hover { background: var(--panel-2); color: var(--text); }
+.fp-commit.active { background: var(--panel-2); border-left-color: var(--accent); color: var(--text); }
 .fp-state { flex: none; width: 1.2ch; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; color: var(--muted); }
 .fp-flags { flex: none; display: flex; min-width: 1.2em; color: var(--muted); font-size: 11px; }
 .fp-flag { width: 1.2em; text-align: center; }
@@ -419,10 +429,11 @@ span.img-chip.off { border: 1px dashed var(--border); }
 .fp-dir { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; direction: rtl; color: var(--muted); }
 .fp-dir > span { direction: ltr; unicode-bidi: bidi-override; }
 .fp-file { flex: 0 0 auto; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
-.fp-versions { display: flex; gap: 6px; padding: 6px 12px; overflow-x: auto; border-bottom: 1px solid var(--border); background: var(--panel); }
-.fp-versions[hidden] { display: none; }
-.fp-version { flex: none; max-width: 360px; padding: 2px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.fp-version.active { border-color: var(--accent); color: var(--text); background: var(--user); }
+/* the files opened from links that the list above does not hold */
+.fp-opened { margin-top: 6px; border-top: 1px solid var(--border); }
+.fp-opened-title { padding: 6px 8px 3px 12px; color: var(--muted); font-size: 12px; letter-spacing: .04em; text-transform: uppercase; cursor: default; }
+.fp-forget { flex: none; padding: 0 4px; border: none; background: none; color: var(--muted); }
+.fp-forget:hover { color: var(--text); }
 .fp-panes { flex: 1; min-height: 0; display: flex; }
 .fp-panes > * { flex: 1; min-width: 0; }
 .fp-diff { overflow: auto; outline: none; }
@@ -449,6 +460,14 @@ span.img-chip.off { border: 1px dashed var(--border); }
 .fp-path { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; user-select: text; }
 .fp-actions { display: flex; gap: 6px; }
 .fp-actions button[hidden] { display: none; }
+/* Diff | File | Both: one control of joined buttons, the view on show marked */
+.fp-view { display: flex; }
+.fp-view[hidden] { display: none; }
+.fp-view button { border-radius: 0; }
+.fp-view button + button { margin-left: -1px; }
+.fp-view button:first-child { border-radius: 6px 0 0 6px; }
+.fp-view button:last-child { border-radius: 0 6px 6px 0; }
+.fp-view button.active { position: relative; background: #1f6feb33; border-color: #1f6feb66; }
 .fp-content { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .fp-msg { padding: 24px; color: var(--muted); }
 .fp-scroll { flex: 1; min-height: 0; overflow: auto; position: relative; }

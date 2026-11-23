@@ -1,5 +1,6 @@
-// Pure list model of the changes browser: keys, selection, versions of a file, path location and joining, the
-// split's stored preferences (no DOM).
+// Pure list model of the changes browser: keys, the selection kept across lists, the view for a kind of row, a
+// file's commit labels, the opened files the list shows and their labels, path location and joining, the split's
+// stored preferences (no DOM).
 // Loaded as a classic <script> (sets globalThis.ChangesModel) and via require() in tests.
 "use strict";
 (function () {
@@ -7,24 +8,87 @@
 /** A file's key in the list: root null for a loose file (rel is then its absolute path). */
 const key = (root, rel) => JSON.stringify([root, rel]);
 
-/** The previous key when it is still listed, else the first file of the first repository with files, else the first loose file, else null. */
-function pick(data, prevKey) {
+/** The view for a kind of row: "change" the stored view, "commit" the stored view but the diff for "file", "nodiff" (no diff exists) the file. */
+function viewFor(prefView, kind) {
+  if (kind === "nodiff") return "file";
+  if (kind === "commit" && prefView === "file") return "diff";
+  return prefView;
+}
+
+/** Equal paths: equal text; on win32 without case and with "/" equal to "\". */
+function samePath(a, b, platform) {
+  if (platform !== "win32") return a === b;
+  const n = (p) => String(p).replace(/\\/g, "/").toLowerCase();
+  return n(a) === n(b);
+}
+
+/** The opened paths (newest first) the changes list does not hold, the first `limit`. */
+function openedShown(data, platform, limit = 20) {
+  const out = [];
+  for (const p of data?.opened ?? []) {
+    const at = locate(data, p, platform);
+    const inRepo = at && (data.repos.find((r) => r.root === at.root)?.files ?? []).some((f) => f.path === at.rel);
+    if (inRepo || (data.loose ?? []).some((l) => samePath(l, p, platform))) continue;
+    out.push(p);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+/** An opened file's label: relative to cwd when inside it, else absolute; dir ends with its separator. */
+function openedLabel(abs, cwd, platform) {
+  const win = platform === "win32";
+  const sep = win ? "\\" : "/";
+  const norm = (p) => (win ? p.replace(/\\/g, "/").toLowerCase() : p);
+  let shown = abs;
+  if (cwd) {
+    const root = norm(cwd).replace(/\/+$/, "");
+    if (norm(abs).startsWith(root + "/") && abs.length > root.length + 1) shown = abs.slice(root.length + 1);
+  }
+  const i = shown.lastIndexOf(sep);
+  return { dir: shown.slice(0, i + 1), name: shown.slice(i + 1) };
+}
+
+/** A commit's list text: "<sha7> <subject>" and the tooltip "<author> · <date>". */
+function commitLabel(c) {
+  return { label: `${c.sha.slice(0, 7)} ${c.subject}`, title: `${c.author} · ${c.date}` };
+}
+
+/** The selected version when `commits` still holds it, else "uncommitted". */
+function keepVersion(version, commits) {
+  return version !== "uncommitted" && (commits ?? []).some((c) => c.sha === version) ? version : "uncommitted";
+}
+
+/** The previous key when it is still listed (a changed file, a loose file or a shown opened file); a file that moved
+ *  between the changes list and the opened files is followed to its new row; else the first repository file, else the
+ *  first loose file, else the first shown opened file, else null. */
+function pick(data, prevKey, platform) {
   const repos = data?.repos ?? [];
   const loose = data?.loose ?? [];
+  const opened = openedShown(data, platform);
   if (prevKey != null) {
     for (const r of repos) for (const f of r.files ?? []) if (key(r.root, f.path) === prevKey) return prevKey;
     for (const p of loose) if (key(null, p) === prevKey) return prevKey;
+    for (const p of opened) if (key(null, p) === prevKey) return prevKey;
+    // the file moved between the changes list and the opened files: follow it
+    let prev = null;
+    try {
+      prev = JSON.parse(prevKey);
+    } catch {}
+    if (Array.isArray(prev) && typeof prev[1] === "string") {
+      if (prev[0] === null) {
+        const at = locate(data, prev[1], platform);
+        if (at && (repos.find((r) => r.root === at.root)?.files ?? []).some((f) => f.path === at.rel)) return key(at.root, at.rel);
+      } else {
+        const path = abs(prev[0], prev[1], platform);
+        const p = opened.find((o) => samePath(o, path, platform));
+        if (p !== undefined) return key(null, p);
+      }
+    }
   }
   for (const r of repos) if (r.files?.length) return key(r.root, r.files[0].path);
-  return loose.length ? key(null, loose[0]) : null;
-}
-
-/** The versions of a file to choose from: "Uncommitted" when it has uncommitted changes, then one per commit. */
-function versions(file, commits) {
-  const out = [];
-  if (file?.uncommitted) out.push({ id: "uncommitted", label: "Uncommitted", title: "" });
-  for (const c of commits ?? []) out.push({ id: c.sha, label: `${c.sha.slice(0, 7)} ${c.subject}`, title: `${c.author} · ${c.date}` });
-  return out;
+  if (loose.length) return key(null, loose[0]);
+  return opened.length ? key(null, opened[0]) : null;
 }
 
 /** "electron/main.mjs" -> { dir: "electron/", name: "main.mjs" }. */
@@ -67,17 +131,18 @@ function abs(root, rel, platform) {
 /** The diff pane's share of the split: a finite number clamped to 0.2–0.8, anything else 0.5. */
 const clampRatio = (value) => (typeof value === "number" && Number.isFinite(value) ? Math.min(0.8, Math.max(0.2, value)) : 0.5);
 
-/** The stored split (localStorage text): { showFile, ratio }, the defaults for missing or broken text. */
+/** The stored view and split (localStorage text): { view, ratio }; an old { showFile: true } is "both". */
 function parsePrefs(text) {
   let raw = null;
   try {
     raw = JSON.parse(text ?? "null");
   } catch {}
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) raw = {};
-  return { showFile: raw.showFile === true, ratio: clampRatio(raw.ratio) };
+  const view = ["diff", "file", "both"].includes(raw.view) ? raw.view : raw.showFile === true ? "both" : "diff";
+  return { view, ratio: clampRatio(raw.ratio) };
 }
 
-const ChangesModel = { key, pick, versions, splitName, locate, abs, clampRatio, parsePrefs };
+const ChangesModel = { key, pick, viewFor, samePath, openedShown, openedLabel, commitLabel, keepVersion, splitName, locate, abs, clampRatio, parsePrefs };
 globalThis.ChangesModel = ChangesModel;
 if (typeof module !== "undefined") module.exports = ChangesModel;
 })();
