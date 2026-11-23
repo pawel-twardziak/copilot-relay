@@ -29,3 +29,8 @@ test("titles and the switch rule", () => {
   assert.equal(HeldReplies.showSwitch({ hasChildren: false, held: 1 }), true);
   assert.equal(HeldReplies.showSwitch({ hasChildren: true, held: 0 }), true);
 });
+
+test("comeBackLine has a singular form", () => {
+  assert.equal(HeldReplies.comeBackLine(1), "1 reply from sub-sessions will come back when the session is open again.");
+  assert.equal(HeldReplies.comeBackLine(2), "2 replies from sub-sessions will come back when the session is open again.");
+});

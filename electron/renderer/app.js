@@ -286,11 +286,13 @@ function isEditableBubble(el) {
 }
 
 class SessionView {
-  constructor({ sessionId, cwd, title, parentSessionId, seenDeliveries, pendingNotes, holdInbox, held }) {
+  constructor({ sessionId, cwd, title, parentSessionId, seenDeliveries, pendingNotes, holdInbox, held, discarded }) {
     Object.assign(this, { sessionId, cwd, title: title ?? "" });
     // set for a session created by another one (from relay:status); the sidebar and the relation bar use `tree`
     this.parentSessionId = parentSessionId ?? null;
     this.seenDeliveries = seenDeliveries ?? new Set(); // report ids already taken (the broker redelivers until acked)
+    // ids of replies you discarded whose acknowledgement did not get through (a closed session): acknowledged when the broker delivers them again
+    this.discarded = discarded ?? new Set();
     this.pendingNotes = pendingNotes ?? []; // non-waking notices, passed to the model with the next prompt
     this.openCards = new Set(); // permission, delegation, reopen and link cards still waiting for an answer
     // requestId -> previews element of its reopen card while it is open, null once answered (the broker re-emits a
@@ -1152,13 +1154,19 @@ class SessionView {
     if (list.length) {
       this.heldEl.append(h("div", { class: "held-head" }, h("span", {}, HeldReplies.listTitle(list.length))));
       for (const item of list) {
+        const first = item.text.split("\n")[0];
+        const heldText = h("span", { class: "held-text", title: item.text }, first);
+        heldText.onclick = () => {
+          const open = heldText.classList.toggle("expanded"); // the full text, as plain text
+          heldText.textContent = open ? item.text : first;
+        };
         this.heldEl.append(
           h(
             "div",
             { class: "held-row" },
             h("span", { class: "held-from" }, item.from),
             h("span", { class: "held-time", title: MessageTimes.full(item.arrivedAt) }, MessageTimes.clock(item.arrivedAt)),
-            h("span", { class: "held-text", title: item.text }, item.text.split("\n")[0]),
+            heldText,
             h("button", { class: "held-approve", title: "Send this reply to Copilot", disabled: this.dead || this.deleting, onclick: () => this.approveHeld(item) }, "Approve"),
             h("button", { class: "held-discard", title: "Discard this reply", onclick: () => this.discardHeld(item) }, "✕"),
           ),
@@ -1192,10 +1200,19 @@ class SessionView {
     const i = this.held.indexOf(item);
     if (i < 0) return;
     this.held.splice(i, 1);
-    api.relayAck(this.sessionId, item.deliveryId).catch(() => {}); // the broker must not deliver it again
+    this.discarded.add(item.deliveryId);
+    this.ackDiscarded(item.deliveryId); // the broker must not deliver it again
     this.system(`Discarded a reply from ${item.from}.`);
     this.renderHeld();
     renderList();
+  }
+
+  /** Acknowledges a discarded reply; only a confirmed ack (not false, not an error) lets the id go. */
+  ackDiscarded(id) {
+    api
+      .relayAck(this.sessionId, id)
+      .then((ok) => ok !== false && this.discarded.delete(id))
+      .catch(() => {});
   }
 
   /** The switch: off sends every held reply to the queue (oldest first); on moves nothing back. */
@@ -1377,6 +1394,10 @@ class SessionView {
 
   /** A message from another session (or the relay GUI) arrived; it becomes a prompt when the session is idle. */
   incoming(m) {
+    if (m.deliveryId && this.discarded.has(m.deliveryId)) {
+      this.ackDiscarded(m.deliveryId);
+      return;
+    }
     if (!UiState.acceptDelivery(this.seenDeliveries, m.deliveryId)) return;
     if (m.wake === false) {
       // informational: no turn of its own, the model gets it with the next prompt
@@ -2599,7 +2620,7 @@ class SessionView {
   heldComeBack() {
     if (!this.held.length) return;
     for (const item of this.held) this.seenDeliveries.delete(item.deliveryId); // the broker delivers them again
-    this.system(`${this.held.length} replies from sub-sessions will come back when the session is open again.`);
+    this.system(HeldReplies.comeBackLine(this.held.length));
     this.held = [];
     this.renderHeld();
   }
@@ -2678,7 +2699,7 @@ async function openSession(s, { activate: show = true } = {}) {
     views.delete(s.sessionId);
     // resuming a dead view: what was waiting in it moves to the new one (unpaused: a new view), with the delivery
     // ids it took, so the broker's redelivery of a queued report is not taken twice
-    s = { ...s, seenDeliveries: s.seenDeliveries ?? existing.seenDeliveries, pendingNotes: s.pendingNotes ?? existing.pendingNotes, held: s.held ?? existing.held };
+    s = { ...s, seenDeliveries: s.seenDeliveries ?? existing.seenDeliveries, pendingNotes: s.pendingNotes ?? existing.pendingNotes, held: s.held ?? existing.held, discarded: s.discarded ?? existing.discarded };
   }
   const v = new SessionView(s);
   views.set(s.sessionId, v);
@@ -2757,13 +2778,13 @@ function dropView(id) {
  *  pause). keepFollowUp: the history is unchanged, so a task waiting to be continued after the answers (paused by
  *  your Stop) still waits; false when the history was cut (the task may be gone with it). */
 async function reopenView(old, error, { holdInbox = false, typed, keepFollowUp = true } = {}) {
-  const { sessionId, cwd, title, queue, paused, parentSessionId, seenDeliveries, pendingNotes, held } = old;
+  const { sessionId, cwd, title, queue, paused, parentSessionId, seenDeliveries, pendingNotes, held, discarded } = old;
   const followUpDue = keepFollowUp && old.followUp.answerDue();
   typed ??= old.recallEl ? old.draft : old.input.value; // what you typed (not a recalled earlier message)
   if (views.get(sessionId) === old) views.delete(sessionId);
   old.el.remove();
   // handed over before the replay: a report redelivered while the session reopens must already count as seen
-  await openSession({ sessionId, cwd, title, parentSessionId, seenDeliveries, pendingNotes, holdInbox, held });
+  await openSession({ sessionId, cwd, title, parentSessionId, seenDeliveries, pendingNotes, holdInbox, held, discarded });
   const v = views.get(sessionId);
   if (!v) return;
   if (error) v.error(error);

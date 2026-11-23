@@ -22,11 +22,14 @@ function sidebarCount({ view, brokerHeld, sessionId }) {
 
 const markTitle = (n) => (n === 1 ? "1 reply from sub-sessions waits for your approval" : `${n} replies from sub-sessions wait for your approval`);
 
+/** The line in a view that is dead after the open: its held replies are delivered again once the session is open. */
+const comeBackLine = (n) => (n === 1 ? "1 reply from sub-sessions will come back when the session is open again." : `${n} replies from sub-sessions will come back when the session is open again.`);
+
 const listTitle = (n) => `Replies from sub-sessions (${n})`;
 
 /** The approval switch shows for a session with children or with held replies. */
 const showSwitch = ({ hasChildren, held }) => hasChildren || held > 0;
 
-const HeldReplies = { WAIT_NOTE_MS, approvedPrompt, sidebarCount, markTitle, listTitle, showSwitch };
+const HeldReplies = { WAIT_NOTE_MS, approvedPrompt, sidebarCount, markTitle, listTitle, comeBackLine, showSwitch };
 globalThis.HeldReplies = HeldReplies;
 if (typeof module !== "undefined") module.exports = HeldReplies;

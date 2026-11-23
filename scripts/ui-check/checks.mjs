@@ -2079,6 +2079,11 @@ export const checks = [
       // 2. a redelivery is ignored
       await child("h1", "docs-9f8e7d");
       assert.equal(await rows(), 2, "a redelivered held message adds no row");
+      // the row expands to the full text (plain text) and back
+      await clickIn(".held-text");
+      assert.equal(await app.ev(`${V}.el.querySelector(".held-text").textContent`), "first\nmore");
+      await clickIn(".held-text");
+      assert.equal(await app.ev(`${V}.el.querySelector(".held-text").textContent`), "first");
       // 3. a message that is not from a child goes the old way
       await app.ev(`${V}.setBusy(true)`);
       await app.ev(`${V}.incoming({ from: "relay", text: "note", prompt: "P-note", deliveryId: "n1", wake: true })`);
@@ -2137,6 +2142,14 @@ export const checks = [
       await frames(app);
       assert.equal(await app.ev(`${V}.el.querySelector(".held-approve").disabled`), true);
       assert.equal(await app.ev(`${V}.el.querySelector(".held-discard").disabled`), false);
+      // the discard of a dead view does not reach the broker (the harness has no relay client): the id is kept, and a
+      // redelivery is dropped, not held again
+      await clickIn(".held-discard");
+      assert.equal(await rows(), 0);
+      assert.equal(await app.ev(`${V}.discarded.has("h8")`), true, "the unconfirmed discard is remembered");
+      await child("h8", "docs-9f8e7d");
+      assert.equal(await rows(), 0, "a redelivered discarded reply is not held again");
+      assert.equal(await app.ev(`${V}.discarded.has("h8")`), true, "still unconfirmed");
     },
   },
 ];

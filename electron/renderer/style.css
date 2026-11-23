@@ -576,3 +576,6 @@ body.schedules-open #session-list .item.active { background: none; border-color:
 .held-switch-label { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); }
 .held-switch-label[hidden] { display: none; }
 .held-mark { margin-left: 6px; font-size: 11px; color: var(--warn); }
+.held-text { cursor: pointer; }
+.held-text.expanded { white-space: pre-wrap; overflow: visible; text-overflow: clip; }
+.held-row:has(.held-text.expanded) { align-items: flex-start; }
