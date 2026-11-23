@@ -93,9 +93,10 @@ describe("readLastActivity", () => {
     assert.equal(await read(id), null);
   });
 
-  test("an events file that is there but cannot be read: unknown, not the creation time", async () => {
+  // a folder stands in for a file that cannot be read; Windows opens a folder as an empty file, so not there
+  test("an events file that is there but cannot be read: unknown, not the creation time", { skip: process.platform === "win32" }, async () => {
     const id = put(null, { createdAt: "2026-11-01T10:00:00.000Z" });
-    fs.mkdirSync(path.join(home, "session-state", id, "events.jsonl")); // a folder: reading it fails on every platform
+    fs.mkdirSync(path.join(home, "session-state", id, "events.jsonl"));
     assert.equal(await read(id), null);
   });
 
