@@ -43,6 +43,23 @@ function setup({ registry = new Registry() } = {}) {
   return { dir, file, store, registry, d, parentPush, parentControl, childPush, childControl, parentPeer };
 }
 
+/** Three unlinked desktop-app sessions that can show link cards. */
+function linkSetup() {
+  const base = setup({ registry: new Registry() });
+  const { registry, store, d } = base;
+  store.unlink("cli:child"); // setup() linked it
+  registry.get("cli:child").parentKey = null;
+  const pushes = { "cli:p": [], "cli:c": [], "cli:x": [] };
+  const controls = { "cli:p": [], "cli:c": [], "cli:x": [] };
+  for (const [key, name] of [["cli:p", "szef"], ["cli:c", "pomocnik"], ["cli:x", "trzeci"]])
+    registry.upsert({ key, name, kind: "cli", cwd: `/work/${name}`, app: true, linkCards: true,
+      push: (m) => (pushes[key].push(m), true), control: (...a) => controls[key].push(a) });
+  const nm = (k) => registry.get(k).name;
+  const cards = (k) => controls[k].filter((c) => c[0] === "link_request").map((c) => c[1]);
+  const adopt = (parent, child) => d.requestLink(parent, "adopt", nm(child));
+  return { ...base, pushes, controls, nm, cards, adopt };
+}
+
 test("create_session is refused when the app connection is down", () => {
   const { d, registry, parentControl } = setup();
   registry.disconnect("cli:parent");
@@ -379,6 +396,36 @@ test("reopens survive a new store instance", () => {
   assert.equal(again.reopenFor("cli:a", "cli:b").requestId, "r1");
   again.removeReopen("r1");
   assert.equal(new DelegationStore(file).reopenFor("cli:a", "cli:b"), null);
+});
+
+test("adopt writes a fresh link and drops an orphan's old task and date", async () => {
+  const { store, file } = setup(); // cli:child is linked to cli:parent
+  store.setTask("cli:child", "old task");
+  const before = store.linkOf("cli:child").createdAt;
+  store.forget("cli:parent"); // cli:child is an orphan now
+  await tick();
+  store.adopt("cli:child", "cli:other", "badacz");
+  const l = new DelegationStore(file).linkOf("cli:child"); // on disk
+  assert.deepEqual({ ...l, createdAt: 0 }, { parent: "cli:other", name: "badacz", reported: false, ended: false, createdAt: 0, adopted: true });
+  assert.ok(l.createdAt > before);
+  assert.equal(store.isAdopted("cli:child"), true);
+});
+
+test("link keeps adopted for the same parent (a rename) and unlink removes the link only", () => {
+  const { store, file } = setup();
+  store.link("cli:grand", "cli:child", "wnuk");
+  store.adopt("cli:child", "cli:parent", "badacz");
+  store.link("cli:child", "cli:parent", "nowa-nazwa");
+  assert.equal(store.isAdopted("cli:child"), true);
+  store.enqueue({ id: "r1", toKey: "cli:parent", from: "badacz", text: "report", prompt: "report" });
+  assert.equal(store.unlink("cli:child"), true);
+  assert.equal(store.unlink("cli:child"), false);
+  const fresh = new DelegationStore(file);
+  assert.equal(fresh.linkOf("cli:child"), null);
+  assert.equal(fresh.isAdopted("cli:child"), false);
+  assert.deepEqual(fresh.childrenOf("cli:child"), ["cli:grand"]); // its own children stay
+  assert.equal(fresh.linkOf("cli:grand").parentDeleted, undefined); // and are not orphaned
+  assert.equal(fresh.pending("cli:parent").length, 1); // a report already sent stays
 });
 
 test("a child can request its own child", () => {
@@ -809,4 +856,221 @@ test("a task that starts with a newline shows its first non-empty line", () => {
   const { d } = setup();
   d.setTask("cli:child", "\r\nWrite the docs\r\nthen stop");
   assert.match(d.familyBlock("cli:parent"), /task: Write the docs$/m);
+});
+
+// ---- adopt_session / release_session: link requests the user approves ----
+
+test("adopt_session asks the parent's app and changes nothing until answered", () => {
+  const s = linkSetup();
+  const reply = s.d.requestLink("cli:p", "adopt", s.nm("cli:c").toUpperCase());
+  assert.match(reply, /^The user was asked to approve it\./);
+  const [card] = s.cards("cli:p");
+  assert.doesNotMatch(reply, new RegExp(card.requestId));
+  assert.deepEqual(card, { requestId: card.requestId, kind: "adopt", childKey: "cli:c", childName: s.nm("cli:c"),
+    childCwd: "/work/pomocnik", parentName: s.nm("cli:p"), task: "" });
+  assert.equal(s.store.linkOf("cli:c"), null);
+  assert.equal(s.registry.get("cli:c").parentKey ?? null, null);
+});
+
+test("an adopted child is listed as adopted without a task; a linked one without a task as not recorded", () => {
+  const s = linkSetup();
+  s.adopt("cli:p", "cli:c");
+  s.d.answerLink("cli:p", s.cards("cli:p")[0].requestId, true);
+  s.d.link("cli:x", "cli:p");
+  const block = s.d.familyBlock("cli:p");
+  assert.match(block, new RegExp(`"${s.nm("cli:c")}" — .* — adopted, no task`));
+  assert.match(block, new RegExp(`"${s.nm("cli:x")}" — .* — task: \\(task not recorded\\)`));
+  assert.doesNotMatch(block.split("\n").find((l) => l.includes(s.nm("cli:c"))), /task not recorded/);
+  const notice = s.pushes["cli:p"].at(-1);
+  assert.match(notice.prompt, /adopted, no task/);
+  assert.doesNotMatch(notice.prompt.split("\n").find((l) => l.includes(`"${s.nm("cli:c")}" —`)), /task not recorded/);
+});
+
+test("an approved adopt links the pair, wakes the parent and only informs the child", () => {
+  const s = linkSetup();
+  s.adopt("cli:p", "cli:c");
+  const { requestId } = s.cards("cli:p")[0];
+  const out = s.d.answerLink("cli:p", requestId, true);
+  assert.equal(out.result, "linked");
+  const l = s.store.linkOf("cli:c");
+  assert.equal(l.parent, "cli:p");
+  assert.equal(l.adopted, true);
+  assert.equal(l.task, undefined);
+  assert.equal(s.registry.get("cli:c").parentKey, "cli:p");
+  assert.deepEqual(s.controls["cli:c"].at(-1), ["parent_changed", { parentKey: "cli:p", adopted: true }]);
+  const toParent = s.pushes["cli:p"].at(-1);
+  assert.match(toParent.text, new RegExp(`^Session "${s.nm("cli:c")}" is now your child\\.`));
+  assert.equal(toParent.wake, true);
+  assert.ok(toParent.deliveryId);
+  assert.equal(s.store.pending("cli:p").length, 1); // durable until acked
+  const toChild = s.pushes["cli:c"].at(-1);
+  assert.match(toChild.text, new RegExp(`^The user made this session a child of "${s.nm("cli:p")}"\\.`));
+  assert.equal(toChild.wake, false);
+  assert.equal(toChild.deliveryId, undefined);
+  assert.equal(s.store.pending("cli:c").length, 0);
+  assert.equal(s.d.answerLink("cli:p", requestId, true), null); // answered once
+  assert.equal(s.d.snapshot().find((x) => x.key === "cli:c").adopted, true);
+});
+
+test("a rejected adopt changes nothing and tells the parent", () => {
+  const s = linkSetup();
+  s.adopt("cli:p", "cli:c");
+  const out = s.d.answerLink("cli:p", s.cards("cli:p")[0].requestId, false);
+  assert.equal(out.result, "rejected");
+  assert.equal(s.store.linkOf("cli:c"), null);
+  assert.match(s.pushes["cli:p"].at(-1).text, /rejected the request to link/);
+  assert.equal(s.pushes["cli:c"].length, 0);
+});
+
+test("adopt_session refuses what cannot be linked", () => {
+  const s = linkSetup();
+  const ask = (name, from = "cli:p") => s.d.requestLink(from, "adopt", name);
+  assert.match(ask("nikt"), /^No open session "nikt"\./);
+  assert.match(ask(s.nm("cli:p")), /cannot adopt yourself/);
+  s.registry.get("cli:x").online = false;
+  assert.match(ask(s.nm("cli:x")), /^No open session/);
+  s.registry.get("cli:x").online = true;
+  s.registry.get("cli:x").app = false;
+  assert.match(ask(s.nm("cli:x")), /not a desktop-app session/);
+  s.registry.get("cli:x").app = true;
+  s.d.link("cli:c", "cli:p");
+  assert.match(ask(s.nm("cli:c")), /is already your child/);
+  assert.match(ask(s.nm("cli:c"), "cli:x"), new RegExp(`already has a parent \\("${s.nm("cli:p")}"\\)`));
+  assert.match(ask(s.nm("cli:p"), "cli:c"), /one of your ancestors/); // a cycle
+  s.registry.get("cli:p").linkCards = false;
+  assert.match(ask(s.nm("cli:x")), /older than the relay broker/);
+  s.registry.get("cli:p").linkCards = true;
+  s.registry.get("cli:p").control = null;
+  assert.match(ask(s.nm("cli:x")), /app connection is not connected/);
+  assert.equal(s.cards("cli:p").length + s.cards("cli:c").length + s.cards("cli:x").length, 0);
+});
+
+test("two approved requests for one child: the first links, the second is refused", () => {
+  const s = linkSetup();
+  s.adopt("cli:p", "cli:c");
+  s.adopt("cli:x", "cli:c");
+  assert.equal(s.d.answerLink("cli:p", s.cards("cli:p")[0].requestId, true).result, "linked");
+  const second = s.d.answerLink("cli:x", s.cards("cli:x")[0].requestId, true);
+  assert.equal(second.result, "refused");
+  assert.match(second.text, /already has a parent/);
+  assert.equal(s.store.parentOf("cli:c"), "cli:p");
+  assert.match(s.pushes["cli:x"].at(-1).text, /already has a parent/);
+});
+
+test("a child that closed before the approval is refused; a renamed one is linked under its new name", () => {
+  const s = linkSetup();
+  s.adopt("cli:p", "cli:c");
+  s.registry.get("cli:c").online = false;
+  const out = s.d.answerLink("cli:p", s.cards("cli:p")[0].requestId, true);
+  assert.equal(out.result, "refused");
+  assert.match(out.text, /is closed now/);
+  assert.equal(s.store.linkOf("cli:c"), null);
+  s.registry.get("cli:c").online = true;
+  s.adopt("cli:p", "cli:c");
+  const renamed = s.registry.rename("cli:c", "inna");
+  assert.equal(s.d.answerLink("cli:p", s.cards("cli:p").at(-1).requestId, true).result, "linked");
+  assert.match(s.pushes["cli:p"].at(-1).text, new RegExp(`"${renamed}" is now your child`));
+  assert.equal(s.store.nameOf("cli:c"), renamed);
+});
+
+test("the same request twice shares one id; attached asks again; a removed peer drops adopt requests", () => {
+  const s = linkSetup();
+  s.adopt("cli:p", "cli:c");
+  s.adopt("cli:p", "cli:c");
+  const [a, b] = s.cards("cli:p");
+  assert.equal(a.requestId, b.requestId);
+  s.d.attached("cli:p");
+  assert.equal(s.cards("cli:p").length, 3);
+  s.registry.remove("cli:c");
+  assert.equal(s.d.answerLink("cli:p", a.requestId, true), null);
+});
+
+test("an answer from another session than the parent finds nothing", () => {
+  const s = linkSetup();
+  s.adopt("cli:p", "cli:c");
+  const { requestId } = s.cards("cli:p")[0];
+  assert.equal(s.d.answerLink("cli:c", requestId, true), null);
+  assert.equal(s.d.answerLink("cli:p", requestId, true).result, "linked");
+});
+
+test("an orphan can be adopted again after its parent was deleted", () => {
+  const s = linkSetup();
+  s.adopt("cli:p", "cli:c");
+  s.d.answerLink("cli:p", s.cards("cli:p")[0].requestId, true);
+  s.d.forget("cli:p");
+  assert.equal(s.store.linkOf("cli:c").parentDeleted, true);
+  s.adopt("cli:x", "cli:c");
+  assert.equal(s.d.answerLink("cli:x", s.cards("cli:x")[0].requestId, true).result, "linked");
+  assert.equal(s.store.linkOf("cli:c").parent, "cli:x");
+  assert.equal(s.store.linkOf("cli:c").parentDeleted, undefined);
+});
+
+test("an approved release unlinks, keeps the child's children and report, and drops the pair's reopen requests and budget", () => {
+  const s = linkSetup();
+  s.d.link("cli:c", "cli:p");
+  s.d.setTask("cli:c", "zadanie");
+  s.d.link("cli:x", "cli:c"); // a grandchild
+  s.d.report("cli:c", "wynik");
+  s.registry.send("cli:p", s.nm("cli:c"), "hej"); // charges the pair budget
+  assert.equal(s.registry.pairBudgets.has("cli:p|cli:c"), true);
+  s.registry.get("cli:c").online = false;
+  s.d.messageClosed("cli:p", s.nm("cli:c"), "queued"); // a reopen request with one awaiting message
+  const reopenId = s.store.reopensFrom("cli:p")[0].requestId;
+  assert.match(s.d.requestLink("cli:p", "release", s.nm("cli:c").toUpperCase()), /^The user was asked/); // a closed child
+  const card = s.cards("cli:p").at(-1);
+  assert.deepEqual({ kind: card.kind, childKey: card.childKey, task: card.task }, { kind: "release", childKey: "cli:c", task: "zadanie" });
+  const out = s.d.answerLink("cli:p", card.requestId, true);
+  assert.equal(out.result, "released");
+  assert.equal(s.store.linkOf("cli:c"), null);
+  assert.equal(s.registry.get("cli:c").parentKey ?? null, null);
+  assert.deepEqual(s.store.childrenOf("cli:c"), ["cli:x"]);
+  assert.ok(s.store.pending("cli:p").some((i) => i.text === "wynik"));
+  assert.equal(s.store.reopensFrom("cli:p").length, 0);
+  assert.equal(s.store.awaitingFor(reopenId).length, 0);
+  assert.equal(s.d.answerReopen("cli:p", reopenId, true), false); // its card finds nothing
+  assert.ok(s.pushes["cli:p"].some((m) => /was ended; your queued message was not delivered/.test(m.text)));
+  assert.ok(s.pushes["cli:p"].some((m) => /is no longer your child/.test(m.text)));
+  assert.equal(s.registry.pairBudgets.has("cli:p|cli:c"), false);
+  assert.match(s.d.report("cli:c", "x"), /not a delegated session/);
+});
+
+test("an open released child is told and its stream gets parent_changed", () => {
+  const s = linkSetup();
+  s.d.link("cli:c", "cli:p");
+  s.d.requestLink("cli:p", "release", s.nm("cli:c"));
+  s.d.answerLink("cli:p", s.cards("cli:p")[0].requestId, true);
+  assert.deepEqual(s.controls["cli:c"].at(-1), ["parent_changed", { parentKey: null, adopted: false }]);
+  const m = s.pushes["cli:c"].at(-1);
+  assert.match(m.text, /^The user ended the link to/);
+  assert.equal(m.wake, false);
+});
+
+test("release_session refuses a session that is not a direct child", () => {
+  const s = linkSetup();
+  s.d.link("cli:c", "cli:p");
+  s.d.link("cli:x", "cli:c");
+  assert.match(s.d.requestLink("cli:p", "release", s.nm("cli:x")), /is not one of your children/); // a grandchild
+  assert.match(s.d.requestLink("cli:c", "release", s.nm("cli:p")), /is not one of your children/); // its parent
+  assert.match(s.d.requestLink("cli:p", "release", "nikt"), /is not one of your children/);
+});
+
+test("a release request outlives its child leaving the registry and is refused once the link is gone", () => {
+  const s = linkSetup();
+  s.d.link("cli:c", "cli:p");
+  s.d.requestLink("cli:p", "release", s.nm("cli:c"));
+  const { requestId } = s.cards("cli:p")[0];
+  s.registry.remove("cli:c");
+  s.store.unlink("cli:c");
+  assert.equal(s.d.answerLink("cli:p", requestId, true).result, "refused");
+});
+
+test("an adopted child owes no report but can report once", () => {
+  const s = linkSetup();
+  s.adopt("cli:p", "cli:c");
+  s.d.answerLink("cli:p", s.cards("cli:p")[0].requestId, true);
+  const before = s.pushes["cli:p"].length;
+  s.d.died("cli:c");
+  assert.equal(s.pushes["cli:p"].length, before); // no "ended without reporting"
+  assert.match(s.d.report("cli:c", "gotowe"), /^Report delivered/);
+  assert.match(s.d.report("cli:c", "znowu"), /already reported/);
 });

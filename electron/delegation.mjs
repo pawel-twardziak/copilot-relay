@@ -71,8 +71,20 @@ export function reloadWarning(children, requests, reopens = 0) {
   };
 }
 
+/** Children that still owe their parent a report. An adopted child was given no task, so it owes none. */
 export function unreportedChildren(entries) {
-  return [...entries].filter((e) => isChild(e) && !e.reported);
+  return [...entries].filter((e) => isChild(e) && !e.reported && !e.adopted);
+}
+
+/** The relay's own tools, by the server-prefixed title of their tool call: they run without Copilot's prompt
+ *  (adopt_session and release_session are approved on the app's link card instead). */
+export function isRelayTool(title) {
+  return /^relay-(send_message|list_sessions|create_session|report_result|adopt_session|release_session)$/.test(title ?? "");
+}
+
+/** The window's link card for the broker's link_request, shown in the view of `sessionId` (the parent that asked). */
+export function linkCardOf(sessionId, { requestId, kind, childKey, childName, childCwd, parentName, task }) {
+  return { sessionId, requestId, kind, childSessionId: String(childKey ?? "").replace(/^cli:/, ""), childName, childCwd, parentName, task };
 }
 
 export class PendingRequests {

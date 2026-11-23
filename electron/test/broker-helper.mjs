@@ -63,10 +63,23 @@ export async function startBroker(t, { script = SERVER, port: wanted, env } = {}
   const url = `http://127.0.0.1:${port}`;
 
   /** A session's stream: resolves once registered; got holds every message it was pushed, in order. */
-  const connect = (key, { name, parentKey, alias } = {}) =>
+  const connect = (key, { name, parentKey, alias, caps } = {}) =>
     new Promise((resolve) => {
       const got = [];
-      const client = new RelayClient({ url, key, cwd: tmp, name, parentKey, alias, onMessage: (m) => got.push(m), onRegistered: () => resolve({ client, got, key }) });
+      const linkRequests = [];
+      const parentChanges = [];
+      const peer = { client: null, got, key, linkRequests, parentChanges, registered: null };
+      const client = new RelayClient({
+        url, key, cwd: tmp, name, parentKey, alias, caps,
+        onMessage: (m) => got.push(m),
+        onLinkRequest: (p) => linkRequests.push(p),
+        onParentChanged: (p) => parentChanges.push(p),
+        onRegistered: (_name, payload) => {
+          peer.registered = payload;
+          resolve(peer);
+        },
+      });
+      peer.client = client;
       clients.push(client);
       client.start();
     });
@@ -77,14 +90,19 @@ export async function startBroker(t, { script = SERVER, port: wanted, env } = {}
     await until(async () => (await online(peer.key)) === false, "the broker to see the stream close");
   };
   /** Call a relay tool as the session registered with `alias` (the MCP endpoint the app gives Copilot). */
-  const tool = async (alias, name, args) => {
+  const withMcp = async (alias, fn) => {
     const mcp = new Client({ name: "test", version: "1" });
     await mcp.connect(new StreamableHTTPClientTransport(new URL(`${url}/mcp?peer=${encodeURIComponent(alias)}`)));
     try {
-      return (await mcp.callTool({ name, arguments: args })).content[0].text;
+      return await fn(mcp);
     } finally {
       await mcp.close();
     }
   };
-  return { url, port, proc, exited, tmp, connect, disconnect, tool };
+  const tool = (alias, name, args) => withMcp(alias, async (mcp) => (await mcp.callTool({ name, arguments: args })).content[0].text);
+  /** The names of the tools the MCP endpoint offers the session registered with `alias`. */
+  const tools = (alias) => withMcp(alias, async (mcp) => (await mcp.listTools()).tools.map((x) => x.name));
+  /** The tools (name and description) the MCP endpoint offers the session registered with `alias`. */
+  const toolList = (alias) => withMcp(alias, async (mcp) => (await mcp.listTools()).tools.map((x) => ({ name: x.name, description: x.description })));
+  return { url, port, proc, exited, tmp, connect, disconnect, tool, tools, toolList };
 }

@@ -51,7 +51,8 @@ function buildServer(registry, getKey, { mailbox, delegation = null, fixedKey = 
         "send_message delivers asynchronously — never wait for a reply in the same turn unless using wait_for_message." +
         (delegation && delegationToolsAllowed(fixedKey)
           ? " create_session asks the user to approve a new delegated session (you cannot approve it yourself); " +
-            "a delegated session ends its work with report_result. list_sessions also shows your children and your parent."
+            "a delegated session ends its work with report_result. list_sessions also shows your children and your parent. " +
+            "adopt_session and release_session ask the user to link or unlink an existing session as your child; use them only when the user explicitly asks."
           : ""),
     },
   );
@@ -98,10 +99,40 @@ function buildServer(registry, getKey, { mailbox, delegation = null, fixedKey = 
       },
     );
     server.registerTool(
+      "adopt_session",
+      {
+        description:
+          "Ask the user to make an existing open session your child, so it can send you results with report_result. " +
+          "Use it only when the user has explicitly asked, in this conversation, to link these sessions. Never on your own initiative. " +
+          "The user must approve a card in the app; the outcome arrives later as a message from relay. Do not wait for it.",
+        inputSchema: { name: z.string().describe("Name of the open session to adopt (see list_sessions)") },
+      },
+      async ({ name }) => {
+        const key = getKey();
+        if (!key) return text("You are not registered with the relay broker.");
+        return text(delegation.requestLink(key, "adopt", name));
+      },
+    );
+    server.registerTool(
+      "release_session",
+      {
+        description:
+          "Ask the user to end the link to one of your children; the session stays open and keeps its history. " +
+          "Use it only when the user has explicitly asked, in this conversation, to unlink these sessions. Never on your own initiative. " +
+          "The user must approve a card in the app; the outcome arrives later as a message from relay. Do not wait for it.",
+        inputSchema: { name: z.string().describe("Name of your child session to release (see list_sessions)") },
+      },
+      async ({ name }) => {
+        const key = getKey();
+        if (!key) return text("You are not registered with the relay broker.");
+        return text(delegation.requestLink(key, "release", name));
+      },
+    );
+    server.registerTool(
       "report_result",
       {
         description:
-          "Delegated sessions only: send your final result to the session that created you. Use it once, when the task is done.",
+          "Delegated sessions only: send your final result to your parent session (the one that created or adopted you). Use it once, when the task is done.",
         inputSchema: { text: z.string().min(1).describe("The result to report") },
       },
       async ({ text: t }) => {

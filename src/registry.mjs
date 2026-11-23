@@ -89,6 +89,11 @@ export class Registry extends EventEmitter {
     return true;
   }
 
+  /** The pair is no longer linked: forget its budget. */
+  dropPair(parentKey, childKey) {
+    this.pairBudgets.delete(`${parentKey}|${childKey}`);
+  }
+
   /** Permanent unique name for `key` based on `wanted`: `<base>-<6 hex of the key hash>` (see uniqueName). */
   freeName(wanted, key) {
     return uniqueName(wanted, key, (n) => this.byName.has(n) && this.byName.get(n).key !== key);
@@ -96,10 +101,11 @@ export class Registry extends EventEmitter {
 
   /**
    * Add or re-attach a peer. Re-attaching (same key) keeps the name and flushes the inbox.
-   * `app`: the control stream is the desktop app's (it can show reopen cards); a re-attach that leaves it out keeps it.
+   * `app`: the control stream is the desktop app's (it can show reopen cards); `linkCards`: that app can also show
+   * link cards. A re-attach that leaves either out keeps it.
    * @returns peer
    */
-  upsert({ key, name, kind, cwd = "", role = "", model = "", push = null, parentKey = null, control = null, app }) {
+  upsert({ key, name, kind, cwd = "", role = "", model = "", push = null, parentKey = null, control = null, app, linkCards }) {
     let peer = this.byKey.get(key);
     if (peer) {
       clearTimeout(peer.offlineTimer);
@@ -108,13 +114,14 @@ export class Registry extends EventEmitter {
       peer.parentKey = parentKey ?? peer.parentKey;
       peer.control = control ?? peer.control;
       peer.app = app ?? peer.app;
+      peer.linkCards = linkCards ?? peer.linkCards;
       Object.assign(peer, { cwd: cwd || peer.cwd });
       this.emit("peer_updated", this.describe(peer));
       this.#flush(peer);
       return peer;
     }
     if (name && !NAME_RE.test(name)) name = sanitizeName(name);
-    peer = { key, name: this.freeName(name, key), kind, cwd, role, model, push, parentKey, control, app: app === true, inbox: [], waiters: [], online: true };
+    peer = { key, name: this.freeName(name, key), kind, cwd, role, model, push, parentKey, control, app: app === true, linkCards: linkCards === true, inbox: [], waiters: [], online: true };
     this.byKey.set(key, peer);
     this.byName.set(peer.name, peer);
     this.emit("peer_added", this.describe(peer));

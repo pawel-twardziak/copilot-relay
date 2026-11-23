@@ -1,5 +1,6 @@
-// The UI checks run by scripts/ui-check/run.mjs: { name, scenario?, modes?, run(app) }, each throwing on failure.
-// app is a driver (driver.mjs) launched with the check's scenario (default panel-scenario.mjs), its mode already set.
+// The UI checks run by scripts/ui-check/run.mjs: { name, scenario?, modes?, settings?, sessionId?, broker?, run(app) },
+// each throwing on failure. app is a driver (driver.mjs) launched with the check's scenario (default
+// panel-scenario.mjs), settings, sessionId and broker, its mode already set.
 import assert from "node:assert/strict";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -9,7 +10,7 @@ import { LATE_TEXT } from "../../electron/test/fixtures/acp/late-group-scenario.
 import { PARTS } from "../../electron/test/fixtures/acp/panel-scroll-scenario.mjs";
 import { RUNNING_TITLE } from "../../electron/test/fixtures/acp/tool-split-scenario.mjs";
 import { gitIn } from "../../electron/test/git-helper.mjs";
-import { launch } from "./driver.mjs";
+import { launch, until } from "./driver.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const FIXTURES = path.join(ROOT, "electron", "test", "fixtures", "acp");
@@ -46,6 +47,7 @@ const HISTORY_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"; // a session Copilot'
 const WAIT_SCENARIO = path.join(FIXTURES, "panel-wait-scenario.mjs");
 const SPLIT_SCENARIO = path.join(FIXTURES, "tool-split-scenario.mjs");
 const CHANGES_SCENARIO = path.join(FIXTURES, "changes-scenario.mjs");
+const LINK_SCENARIO = path.join(FIXTURES, "link-scenario.mjs");
 const PANEL_MODES = ["subagents", "all"];
 const savedMode = (app) => app.ev(`api.getSettings().then((s) => s.activityPanel)`);
 
@@ -1097,6 +1099,163 @@ export const checks = [
       await frames(app);
       assert.equal(await shown(app, `${V}.panel`), false, "the delegation card closed the drawer");
       assert.equal(await shown(app, `${V}.el.querySelector(".perm.delegation")`), true, "the delegation card shows");
+    },
+  },
+  {
+    // the link and unlink cards (as main would send them: no broker request stands behind them)
+    name: "link-card",
+    modes: ["off"],
+    async run(app) {
+      await firstTurn(app);
+      await app.ev(`${V}.linkCard({ requestId: "ui-adopt", kind: "adopt", childName: "docs-9f8e7d", childCwd: "/tmp/docs", parentName: "backend-a1b2c3", task: "" })`);
+      await frames(app);
+      const text = (sel) => app.ev(`${V}.el.querySelector(${JSON.stringify(sel)}).textContent`);
+      assert.match(await text(".perm.link"), /Link sessions/);
+      assert.match(await text(".perm.link"), /backend-a1b2c3 asks to take docs-9f8e7d as its sub-session\./);
+      assert.match(await text(".perm.link"), /Closing backend-a1b2c3 will also close docs-9f8e7d\./);
+      // the same id again adds no second card
+      await app.ev(`${V}.linkCard({ requestId: "ui-adopt", kind: "adopt", childName: "x", childCwd: "", parentName: "y", task: "" })`);
+      assert.equal(await app.ev(`${V}.el.querySelectorAll(".perm.link").length`), 1);
+      // the harness runs the app with relay: false, so the session has no relay client and the answer does not
+      // arrive (it throws, it is not a 404): the card says so and both buttons come back
+      await app.ev(`${V}.el.querySelector(".perm.link button.primary").click()`);
+      await app.check(`!!${V}.el.querySelector(".perm.link .opts .err")`, "the answer that did not arrive");
+      assert.match(await text(".perm.link .opts"), /Could not answer:.*no longer connected to copilot-relay\./);
+      assert.equal(await app.ev(`${V}.el.querySelector(".perm.link").classList.contains("done")`), false, "the card still open");
+      assert.deepEqual(await app.ev(`[...${V}.el.querySelectorAll(".perm.link .opts button")].map((b) => b.textContent)`), ["Approve", "Reject"]);
+      await app.ev(`${V}.linkCard({ requestId: "ui-release", kind: "release", childName: "docs-9f8e7d", childCwd: "", parentName: "backend-a1b2c3", task: "Update the API reference" })`);
+      await frames(app);
+      const release = `${V}.el.querySelectorAll(".perm.link")[1].textContent`;
+      assert.match(await app.ev(release), /Unlink sessions/);
+      assert.match(await app.ev(release), /backend-a1b2c3 asks to release its sub-session docs-9f8e7d\./);
+      assert.match(await app.ev(release), /Update the API reference/);
+      assert.match(await app.ev(`${V}.el.querySelectorAll(".perm.link")[1].querySelector(".task")?.textContent ?? ""`), /Update the API reference/, "the task sits in .perm.link .task");
+      assert.match(await app.ev(release), /becomes a top-level session and keeps its own sub-sessions\./);
+    },
+  },
+  {
+    // adopt_session and release_session through a real broker (the driver's: its own port and state files): the
+    // agent calls the tool, main carries the card to the window and the answer back, the broker changes the link and
+    // tells both sessions. The parent is the driver's session, the child a second one in <app.dir>/child.
+    name: "link-e2e",
+    modes: ["off"],
+    scenario: LINK_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      const PARENT = "scripted-work";
+      const CHILD = "scripted-child";
+      const C = `views.get(${JSON.stringify(CHILD)})`;
+      await app.newSession();
+      const childDir = path.join(app.dir, "child");
+      mkdirSync(childDir);
+      await app.ev(`newSession(${JSON.stringify(childDir)})`);
+      await app.check(`!!${C} && !${C}.busy`, "the child session");
+      await app.ev(`activate(${JSON.stringify(PARENT)})`);
+      const connected = (v) => `(() => { const v = ${v}; return !!v?.relayName && !v.relayChip.hidden && !v.relayChip.classList.contains("off"); })()`;
+      await app.check(connected(V), "the parent to connect to the broker");
+      await app.check(connected(C), "the child to connect to the broker");
+      const parentName = await app.ev(`${V}.relayName`);
+      const childName = await app.ev(`${C}.relayName`);
+
+      // the broker's own view: a session it lists as online has registered with it
+      const online = async (id) => (await (await fetch(`${app.broker.url}/api/peer/list?key=none`)).json()).find((p) => p.key === `cli:${id}`)?.online;
+      const linkedOnBroker = async () => (await (await fetch(`${app.broker.url}/api/links`)).json()).links.some((l) => l.key === `cli:${CHILD}` && l.parent === `cli:${PARENT}`);
+      const parentOf = () => app.ev(`tree.parentOf.get(${JSON.stringify(CHILD)}) ?? null`);
+      const texts = (v, sel) => app.ev(`[...${v}.log.querySelectorAll(${JSON.stringify(sel)})].map((e) => e.textContent)`);
+      const childPrompts = () => app.ev(`${C}.log.querySelectorAll(":scope > .msg.user, :scope > .msg.relay").length`);
+      const card = (i) => `${V}.el.querySelectorAll(".perm.link")[${i}]`;
+      const cardResult = (i) => app.ev(`${card(i)}.querySelector(".opts").textContent`);
+      /** Sends the tool's prompt in the parent; the agent's reply (the tool's text) says the user was asked. */
+      const ask = async (tool) => {
+        const replies = ":scope > .msg.agent > .md"; // the body only: its Markdown is rendered after the element exists
+        const before = (await texts(V, replies)).length;
+        await app.send(`${tool} ${childName}`);
+        await app.check(`!!${V}.log.querySelectorAll(${JSON.stringify(replies)})[${before}]?.textContent.trim()`, `the reply to ${tool}`);
+        const reply = (await texts(V, replies))[before];
+        assert.match(reply, /^The user was asked to approve it\./, `the reply to ${tool}: ${reply}`);
+      };
+      /** Waits for link card i to be open (the only open card of the parent), returns its text. */
+      const openCard = async (i) => {
+        await app.check(`!!${card(i)} && !${card(i)}.classList.contains("done")`, `link card ${i + 1}`);
+        await frames(app);
+        assert.equal(await app.ev(`${V}.el.querySelectorAll(".perm:not(.done)").length`), 1, "one open card in the parent");
+        return app.ev(`${card(i)}.textContent`);
+      };
+      const click = (i, approve) => app.ev(`${card(i)}.querySelector(${JSON.stringify(approve ? ".opts button.primary" : ".opts button:not(.primary)")}).click()`);
+      const answered = async (i) => {
+        await app.check(`${card(i)}.classList.contains("done")`, `link card ${i + 1} to be answered`);
+        return cardResult(i);
+      };
+      const notice = (v, sel, text, what) => app.check(`[...${v}.log.querySelectorAll(${JSON.stringify(sel)})].some((e) => e.textContent.includes(${JSON.stringify(text)}))`, what);
+
+      // 1. the request: a card, nothing linked yet
+      await ask("adopt_session");
+      const adopt = await openCard(0);
+      assert.match(adopt, /Link sessions/);
+      assert.ok(adopt.includes(childName), adopt);
+      assert.equal(await linkedOnBroker(), false, "nothing linked before the answer");
+
+      // 2. approved: linked in the tree and in both views; the child is told without a turn of its own
+      const childBefore = await childPrompts();
+      await click(0, true);
+      assert.equal(await answered(0), "→ Linked");
+      await app.check(`tree.parentOf.get(${JSON.stringify(CHILD)}) === ${JSON.stringify(PARENT)}`, "the link in the tree (links:update)");
+      assert.equal(await linkedOnBroker(), true, "linked on the broker after the approval");
+      await notice(C, ":scope > .msg.system", `The user made this session a child of "${parentName}". Send it results with the report_result tool.`, "the child's notice");
+      await notice(V, ":scope > .msg.relay", `Session "${childName}" is now your child. It can send you results with report_result.`, "the parent's notice");
+      await app.check(`${C}.parentSessionId === ${JSON.stringify(PARENT)}`, "the child's parentSessionId");
+      await frames(app);
+      assert.equal(await app.ev(`${C}.busy`), false, "the child started no turn");
+      assert.equal(await childPrompts(), childBefore, "no prompt in the child's log");
+
+      // 3. the unlink request
+      await app.idle();
+      await ask("release_session");
+      assert.match(await openCard(1), /Unlink sessions/);
+
+      // 4. rejected: the link stays (checked after the parent's notice, so a links:update would have come)
+      await click(1, false);
+      assert.equal(await answered(1), "→ Rejected");
+      await notice(V, ":scope > .msg.relay", `The user rejected the request to release "${childName}".`, "the parent's notice of the rejection");
+      assert.equal(await parentOf(), PARENT, "the child still under the parent");
+      assert.equal(await linkedOnBroker(), true, "still linked on the broker after the rejection");
+
+      // 5. asked again and approved: released
+      await app.idle();
+      await ask("release_session");
+      assert.match(await openCard(2), /Unlink sessions/);
+      await click(2, true);
+      assert.equal(await answered(2), "→ Released");
+      await app.check(`tree.parentOf.get(${JSON.stringify(CHILD)}) !== ${JSON.stringify(PARENT)}`, "the link gone from the tree");
+      assert.equal(await linkedOnBroker(), false, "unlinked on the broker after the release");
+      await app.check(`${C}.parentSessionId === null`, "the child's parentSessionId cleared");
+      await notice(C, ":scope > .msg.system", `The user ended the link to "${parentName}". You no longer report to it.`, "the child's notice of the release");
+
+      // 6. the broker restarts while the card is open: its request is gone
+      await app.idle();
+      await ask("adopt_session");
+      await openCard(3);
+      await app.broker.restart();
+      // the chip alone does not show the gap (it stays "connected" through a short outage: RelayClient logs the lost
+      // stream before it clears connected); the new broker lists both sessions once they have registered with it
+      await until(async () => (await online(PARENT)) && (await online(CHILD)), "both sessions to register with the restarted broker");
+      await app.check(connected(V), "the parent's relay chip connected again");
+      await click(3, true);
+      assert.equal(await answered(3), "This request is no longer pending.");
+      assert.equal(await linkedOnBroker(), false, "nothing linked after the restart");
+
+      // 7. the child closes while the card is open: the broker refuses at approval
+      await app.idle();
+      await app.check(connected(V), "the parent connected");
+      await ask("adopt_session");
+      await openCard(4);
+      await app.ev(`closeView(${JSON.stringify(CHILD)})`);
+      await app.check(`!views.has(${JSON.stringify(CHILD)})`, "the child's view to close");
+      await until(async () => (await online(CHILD)) === false, "the broker to see the child offline");
+      await click(4, true);
+      assert.equal(await answered(4), `Session "${childName}" is closed now. Open it and ask again.`);
+      assert.equal(await linkedOnBroker(), false, "nothing linked after the refusal");
     },
   },
   {

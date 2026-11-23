@@ -175,10 +175,91 @@ test("the client calls onReopenRequest and onLinksChanged for their events, and 
   await new Promise((r) => server.close(r));
 });
 
+test("the client's answerLink returns the result, and throws with the status when the request is not pending", async () => {
+  const bodies = [];
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      const b = JSON.parse(body);
+      bodies.push(b);
+      if (b.requestId === "r1") return res.writeHead(200, { "content-type": "application/json" }).end('{"result":"linked","text":"ok"}');
+      res.writeHead(404, { "content-type": "application/json" }).end('{"error":"This link request is not pending."}');
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const client = new RelayClient({ url: `http://127.0.0.1:${server.address().port}`, key: "cli:me", cwd: "/", onMessage() {} });
+  try {
+    assert.deepEqual(await client.answerLink("r1", true), { result: "linked", text: "ok" });
+    await assert.rejects(client.answerLink("r2", true), (e) => e.status === 404 && /not pending/.test(e.message));
+    assert.deepEqual(bodies[0], { key: "cli:me", requestId: "r1", approved: true });
+  } finally {
+    server.closeAllConnections();
+    await new Promise((r) => server.close(r));
+  }
+});
+
+test("the client sends caps and calls onLinkRequest and onParentChanged for their events", async () => {
+  let seenUrl = "";
+  const server = http.createServer((req, res) => {
+    seenUrl ||= req.url;
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.write('event: registered\ndata: {"name":"me"}\n\n');
+    res.write('event: link_request\ndata: {"requestId":"r1","kind":"adopt"}\n\n');
+    res.write('event: parent_changed\ndata: {"parentKey":null,"adopted":false}\n\n');
+    res.end();
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const linkRequests = [];
+  const parentChanges = [];
+  const client = new RelayClient({
+    url: `http://127.0.0.1:${server.address().port}`, key: "cli:me", cwd: "/", onMessage() {}, caps: ["links"],
+    onLinkRequest: (p) => linkRequests.push(p),
+    onParentChanged: (p) => parentChanges.push(p),
+  });
+  client.start();
+  try {
+    const until = Date.now() + 3000;
+    while ((!linkRequests.length || !parentChanges.length) && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
+  } finally {
+    client.stop();
+    server.closeAllConnections();
+    await new Promise((r) => server.close(r));
+  }
+  assert.equal(new URL(seenUrl, "http://x").searchParams.get("caps"), "links");
+  assert.deepEqual(linkRequests, [{ requestId: "r1", kind: "adopt" }]);
+  assert.deepEqual(parentChanges, [{ parentKey: null, adopted: false }]);
+});
+
 test("a runtime rename fires onChange", () => {
   const { registry, delegation } = setup();
   let changes = 0;
   delegation.onChange(() => changes++);
   registry.emit("peer_renamed", registry.get("cli:child"));
   assert.equal(changes, 1);
+});
+
+test("link-answer approves a pending request once and is 404 afterwards", () => {
+  const { routes, registry, delegation, controls } = setup(); // cli:child is linked to cli:parent
+  registry.get("cli:parent").linkCards = true;
+  delegation.requestLink("cli:parent", "release", registry.get("cli:child").name);
+  const { requestId } = controls.find((c) => c[1] === "link_request")[2];
+  assert.equal(routes["POST /api/peer/link-answer"]({ key: "cli:parent", approved: true }).status, 400);
+  assert.equal(routes["POST /api/peer/link-answer"]({ requestId, approved: true }).status, 400);
+  assert.equal(routes["POST /api/peer/link-answer"]({ key: "cli:child", requestId, approved: true }).status, 404);
+  const ok = routes["POST /api/peer/link-answer"]({ key: "cli:parent", requestId, approved: true });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.json.result, "released");
+  const again = routes["POST /api/peer/link-answer"]({ key: "cli:parent", requestId, approved: true });
+  assert.equal(again.status, 404);
+  assert.match(again.json.error, /not pending/);
+});
+
+test("link-answer treats anything but approved === true as a rejection", () => {
+  const { routes, registry, delegation, controls, store } = setup();
+  registry.get("cli:parent").linkCards = true;
+  delegation.requestLink("cli:parent", "release", registry.get("cli:child").name);
+  const { requestId } = controls.find((c) => c[1] === "link_request")[2];
+  assert.equal(routes["POST /api/peer/link-answer"]({ key: "cli:parent", requestId, approved: "true" }).json.result, "rejected");
+  assert.equal(store.parentOf("cli:child"), "cli:parent");
 });

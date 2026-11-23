@@ -50,6 +50,8 @@ contextBridge.exposeInMainWorld("api", {
   reportMissing: (keys) => call("links:missing", keys),
   // the user's answer to a reopen card; reason "missing" when the target session no longer exists
   answerReopen: (sessionId, requestId, approved, reason) => call("reopen:answer", sessionId, requestId, approved, reason),
+  // the user's answer to a link card (adopt_session, release_session): { result, text }, or false when no longer pending
+  answerLink: (sessionId, requestId, approved) => call("link:answer", sessionId, requestId, approved),
   pickDir: (title) => call("dialog:pickDir", title),
   // the Settings "Relay broker" section: status = the restart snapshot + working sessions + broker-web sessions
   brokerStatus: () => call("broker:status"),
@@ -115,4 +117,6 @@ contextBridge.exposeInMainWorld("api", {
   onLinks: on("links:update"),
   // { sessionId (the sender), requestId, targetSessionId, targetName, fromName, previews }
   onReopenRequest: on("reopen:request"),
+  // { sessionId (the parent that asked), requestId, kind ("adopt" | "release"), childSessionId, childName, childCwd, parentName, task }
+  onLinkRequest: on("link:request"),
 });

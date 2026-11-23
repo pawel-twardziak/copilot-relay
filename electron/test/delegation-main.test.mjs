@@ -5,6 +5,8 @@ import {
   PendingRequests,
   childPrompt,
   findModelOption,
+  isRelayTool,
+  linkCardOf,
   reloadWarning,
   resolveConfig,
   unreportedChildren,
@@ -108,6 +110,26 @@ test("unreportedChildren returns children without a report from any iterable", (
     ["d", { parentSessionId: "q" }],
   ]);
   assert.deepEqual(unreportedChildren(entries.values()), [entries.get("a"), entries.get("d")]);
+});
+
+test("an adopted child is not counted as unreported", () => {
+  const entries = [{ parentSessionId: "p", reported: false, adopted: true }, { parentSessionId: "p", reported: false }];
+  assert.deepEqual(unreportedChildren(entries), [entries[1]]);
+});
+
+test("isRelayTool knows the relay's six tools by their prefixed title", () => {
+  for (const n of ["send_message", "list_sessions", "create_session", "report_result", "adopt_session", "release_session"])
+    assert.equal(isRelayTool(`relay-${n}`), true);
+  assert.equal(isRelayTool("relay-adopt_session-x"), false);
+  assert.equal(isRelayTool("adopt_session"), false);
+  assert.equal(isRelayTool(undefined), false);
+});
+
+test("linkCardOf turns the broker's request into the window's card", () => {
+  assert.deepEqual(
+    linkCardOf("s1", { requestId: "r", kind: "release", childKey: "cli:abc", childName: "c", childCwd: "/w", parentName: "p", task: "t" }),
+    { sessionId: "s1", requestId: "r", kind: "release", childSessionId: "abc", childName: "c", childCwd: "/w", parentName: "p", task: "t" },
+  );
 });
 
 test("the reload warning names what it stops and discards", () => {

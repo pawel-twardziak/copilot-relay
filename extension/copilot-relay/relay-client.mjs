@@ -37,8 +37,11 @@ export class RelayClient {
    * @param {(req:object)=>void} [o.onSessionRequest] the broker forwards a session_request from this peer
    * @param {(req:object)=>void} [o.onReopenRequest] the user must approve reopening a closed relative
    * @param {()=>void} [o.onLinksChanged] the broker's link tree changed (refetch with fetchLinks)
+   * @param {string[]} [o.caps] stream capabilities this client supports, e.g. ["links"] (sent on every connection)
+   * @param {(req:object)=>void} [o.onLinkRequest] the user must approve linking or releasing a session
+   * @param {(p:{parentKey:?string,adopted:boolean})=>void} [o.onParentChanged] this session's parent changed
    * @param {()=>void} [o.onReported] this delegated session's report was stored
-   * @param {(name:string, payload?:{parentKey:?string,reported:boolean})=>void} [o.onRegistered]
+   * @param {(name:string, payload?:{parentKey:?string,reported:boolean,adopted:boolean})=>void} [o.onRegistered]
    * @param {(name:string)=>void} [o.onRenamed]   renamed elsewhere (GUI)
    * @param {(msg:string)=>void} [o.log]
    */
@@ -155,6 +158,15 @@ export class RelayClient {
     throw Object.assign(new Error(error ?? `broker answered ${r.status}`), { status: r.status });
   }
 
+  /** The user's answer to a link_request. Resolves with the broker's `{ result, text }`. Throws when it did not
+   *  arrive; a refusal carries the HTTP `status` (404: the request is not pending any more). */
+  async answerLink(requestId, approved) {
+    const r = await this.#post("/api/peer/link-answer", { key: this.key, requestId, approved });
+    if (r.ok) return r.json();
+    const error = await r.json().then((j) => j?.error, () => null);
+    throw Object.assign(new Error(error ?? `broker answered ${r.status}`), { status: r.status });
+  }
+
   /** The broker's link tree (array of links). Throws on a non-2xx answer. */
   async fetchLinks() {
     const r = await this.#fetch("/api/links");
@@ -217,6 +229,7 @@ export class RelayClient {
     if (this.requestedName) qs.set("name", this.requestedName);
     if (this.requestedParent) qs.set("parent", this.requestedParent);
     if (this.alias) qs.set("alias", this.alias);
+    if (this.caps?.length) qs.set("caps", this.caps.join(","));
     const res = await this.#fetch(`/api/peer/stream?${qs}`, { signal: this.abort.signal, headers: { accept: "text/event-stream" } });
     if (!res.ok || !res.body) throw new Error(`broker answered ${res.status}`);
     this.connected = true;
@@ -252,6 +265,10 @@ export class RelayClient {
           this.onSessionRequest?.(payload);
         } else if (event === "reopen_request") {
           this.onReopenRequest?.(payload);
+        } else if (event === "link_request") {
+          this.onLinkRequest?.(payload);
+        } else if (event === "parent_changed") {
+          this.onParentChanged?.(payload);
         } else if (event === "links_changed") {
           this.onLinksChanged?.();
         } else if (event === "reported") {

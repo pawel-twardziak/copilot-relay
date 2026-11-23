@@ -40,8 +40,27 @@ export class DelegationStore {
       createdAt: prev?.createdAt ?? Date.now(),
       ...(prev?.task ? { task: prev.task } : {}),
       ...(prev?.parentDeleted && prev.parent === parent ? { parentDeleted: true } : {}),
+      ...(prev?.adopted && prev.parent === parent ? { adopted: true } : {}),
     };
     this.#save();
+  }
+
+  /** Write a fresh link made by the user's approval; any previous link of `child` (task, date, flags) is replaced whole. */
+  adopt(child, parent, name) {
+    this.data.links[child] = { parent, name, reported: false, ended: false, createdAt: Date.now(), adopted: true };
+    this.#save();
+  }
+
+  /** Delete the child's link only (not its children's links, not queued reports); false when it has none. */
+  unlink(child) {
+    if (!this.data.links[child]) return false;
+    delete this.data.links[child];
+    this.#save();
+    return true;
+  }
+
+  isAdopted(child) {
+    return this.data.links[child]?.adopted === true;
   }
 
   /** Set the task once; false when there is no link or a task is already set. */

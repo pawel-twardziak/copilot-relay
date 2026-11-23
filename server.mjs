@@ -338,6 +338,7 @@ const server = http.createServer(async (req, res) => {
           if (res.destroyed) throw new Error("stream closed");
           res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
         };
+        const linkCards = (q.get("caps") ?? "").split(",").includes("links");
         const parent = q.get("parent");
         if (parent) delegation.link(key, parent); // before upsert: the first message may already depend on the link
         const onRenamed = (ev) => ev.key === key && write("renamed", { name: ev.name });
@@ -352,6 +353,7 @@ const server = http.createServer(async (req, res) => {
           parentKey: parent || delegationStore.parentOf(key) || null,
           control,
           app,
+          linkCards,
         });
         // explicit name (COPILOT_RELAY_NAME) on a fresh start wins even if the peer is still known; compared in its
         // final <base>-<suffix> form, so a peer already carrying it is not renamed on every registration
@@ -364,7 +366,7 @@ const server = http.createServer(async (req, res) => {
           }
         }
         persist(peer);
-        write("registered", { name: peer.name, parentKey: peer.parentKey ?? null, reported: delegationStore.isReported(key) });
+        write("registered", { name: peer.name, parentKey: peer.parentKey ?? null, reported: delegationStore.isReported(key), adopted: delegationStore.isAdopted(key) });
         delegation.attached(key);
         const ping = setInterval(() => res.write(": ping\n\n"), 25_000);
         req.on("close", () => {
