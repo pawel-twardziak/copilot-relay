@@ -268,7 +268,9 @@ left out):
 - **Default part** (Settings): for every session.
 - **Child part** (Settings): only for child sessions, delegated or adopted. Its built-in text tells the child to
   finish with `report_result`, exactly once, and to use `send_message` only to ask its parent something. Emptying it
-  in Settings means no child part; "Reset" goes back to the built-in text.
+  in Settings means no child part; "Restore default" goes back to the built-in text.
+  After updating the app, restart the broker (Settings -> "Update and restart broker") so the new adopted-child rule
+  and notes apply.
 - **Own part**: written per session, in the Prompt dialog.
 
 **Templates** (Settings) are named texts for the own part. Picking one *copies* its text into the editor: it is not
