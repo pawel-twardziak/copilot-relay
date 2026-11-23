@@ -263,3 +263,10 @@ test("link-answer treats anything but approved === true as a rejection", () => {
   assert.equal(routes["POST /api/peer/link-answer"]({ key: "cli:parent", requestId, approved: "true" }).json.result, "rejected");
   assert.equal(store.parentOf("cli:child"), "cli:parent");
 });
+
+test("GET /api/links answers links and held", () => {
+  const routes = linksRoutes({ delegation: { snapshot: () => [], heldCounts: () => ({ "cli:p": 2 }) }, log: () => {} });
+  const r = routes["GET /api/links"]();
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json, { links: [], held: { "cli:p": 2 } });
+});

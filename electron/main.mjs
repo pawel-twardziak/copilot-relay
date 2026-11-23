@@ -15,6 +15,7 @@ import { createUsagePusher } from "./usage.mjs";
 import { JobScheduler } from "./scheduler.mjs";
 import { scheduleInfo } from "./jobs.mjs";
 import { PendingRequests, childPrompt, findModelOption, isRelayTool, linkCardOf, reloadWarning, resolveConfig, unreportedChildren, withDeadline } from "./delegation.mjs";
+import { createHeldCache, createHoldStore } from "./held-replies.mjs";
 import { readLinksCache, writeLinksCache } from "./links-cache.mjs";
 import { listAllPages } from "./session-list.mjs";
 import { beginPrompt, endPrompt } from "./prompt-count.mjs";
@@ -83,6 +84,8 @@ const copilotCommand = () => loadSettings().copilotCommand || process.env.COPILO
 
 // Context window per session (200k / 1M): an override per session, else the Settings default (see context-tier.mjs)
 const tiers = createTierStore(path.join(app.getPath("userData"), "context-tiers.json"));
+const holds = createHoldStore(path.join(app.getPath("userData"), "held-replies.json"));
+const heldCache = createHeldCache();
 const sessionTier = (sessionId) => effectiveTier(tiers.get(sessionId), loadSettings().contextTier);
 /** The config options as the window gets them: Copilot's own plus the Context select. */
 const viewConfig = (sessionId, configOptions) => withContextOption(configOptions, tiers.get(sessionId), loadSettings().contextTier);
@@ -155,7 +158,13 @@ function relayStart(sessionId, cwd, { cfg, alias }, { name, parentKey } = {}) {
     caps: ["links"], // this app shows link cards (adopt_session, release_session)
     // `human` is set by the broker (true only for messages typed by a person in the relay GUI), not by the sender's name
     // human: true/false from this broker, undefined from an older one (the renderer then falls back to the sender name)
-    onMessage: (m) => send("relay:message", { sessionId, from: m.from, human: m.human, text: m.text, prompt: m.prompt, fromCwd: m.fromCwd, deliveryId: m.deliveryId, wake: m.wake }),
+    onMessage: (m) => {
+      // fromChild is set by the broker when a direct child sent it; such a message waits for the user's approval
+      const payload = { sessionId, from: m.from, human: m.human, text: m.text, prompt: m.prompt, fromCwd: m.fromCwd, deliveryId: m.deliveryId, wake: m.wake, fromChild: m.fromChild === true, arrivedAt: Date.now() };
+      send("relay:message", payload);
+      // cached whatever the switch says; the notification is only for a reply that really waits
+      if (payload.fromChild && m.deliveryId && heldCache.add(sessionId, payload) && holds.get(sessionId)) notifyIfUnfocused("A sub-session replied", `${m.from} → ${client.name}`);
+    },
     onSessionRequest: (req) => sessionRequested(sessionId, req),
     onReported: () => {
       const entry = open.get(sessionId);
@@ -220,12 +229,12 @@ async function loadLinks() {
   if (!cfg.enabled) return;
   const seq = ++linksSeq;
   const client = [...open.values()].find((e) => e.relay)?.relay;
-  const links = client ? await client.fetchLinks() : await brokerGetLinks(cfg.url);
-  if (!Array.isArray(links)) throw new Error("the broker answered without a links array");
+  const state = client ? await client.fetchLinkState() : await brokerGetLinks(cfg.url);
+  if (!Array.isArray(state.links)) throw new Error("the broker answered without a links array");
   if (seq !== linksSeq) return;
-  send("links:update", links);
+  send("links:update", state);
   try {
-    writeLinksCache(linksCacheFile(), links); // only the start-up view uses it: a failed write must not block the update
+    writeLinksCache(linksCacheFile(), state); // only the start-up view uses it: a failed write must not block the update
   } catch (e) {
     console.warn(`[links] cache: ${e.message}`);
   }
@@ -234,7 +243,8 @@ async function loadLinks() {
 async function brokerGetLinks(url) {
   const r = await fetch(`${url}/api/links`);
   if (!r.ok) throw new Error(`broker answered ${r.status}`);
-  return (await r.json()).links;
+  const body = await r.json();
+  return { links: body.links, held: body.held && typeof body.held === "object" ? body.held : {} };
 }
 
 /** POST to the broker without an open session (forget / missing take `cli:` keys); throws readable text. */
@@ -251,6 +261,7 @@ async function brokerPost(route, body) {
     const error = await r.json().then((j) => j?.error, () => null);
     throw new Error(`The relay broker refused the request: ${error ?? `HTTP ${r.status}`}.`);
   }
+  return r.json().catch(() => null); // the answer body, null when there is none (204)
 }
 
 function linkKeys(keys) {
@@ -355,6 +366,7 @@ function attach(sessionId, conn, cwd, relay, link) {
     open.delete(sessionId);
     dropReopenCards(sessionId);
     dropLinkCards(sessionId);
+    heldCache.drop(sessionId);
     usage.forget(sessionId);
     pendingRequests.dropForParent(sessionId);
     send("acp:exit", { sessionId, code, signal, stderr: stderr?.trim().slice(-800) });
@@ -458,6 +470,7 @@ async function resumeSession(sessionId, cwd) {
     // after a window reload the view is new: show the reopen and link cards it had again (a live view ignores known ids)
     for (const card of reopenCards.values()) if (card.sessionId === sessionId) send("reopen:request", card);
     for (const card of linkCards.values()) if (card.sessionId === sessionId) send("link:request", card);
+    for (const m of heldCache.list(sessionId)) send("relay:message", m);
     return { sessionId, cwd, configOptions: null, alreadyOpen: true };
   }
   refuseWhileDeleting(sessionId);
@@ -763,6 +776,7 @@ async function closeEntry(sessionId) {
   pendingRequests.dropForParent(sessionId);
   dropReopenCards(sessionId);
   dropLinkCards(sessionId);
+  heldCache.drop(sessionId);
   e.relay?.stop();
   await Promise.race([e.conn.request("session/close", { sessionId }).catch(() => {}), new Promise((r) => setTimeout(r, 2000))]);
   e.conn.kill();
@@ -931,10 +945,30 @@ handle("delegation:answer", async (requestId, approved) => {
 
 handle("relay:ack", async (sessionId, id) => {
   const relay = open.get(sessionId)?.relay;
-  if (!relay) return false;
+  if (!relay) {
+    // a dead view (the process has exited): the broker's durable item is acknowledged through its HTTP route, so a
+    // discarded reply does not come back when the view is closed instead of resumed
+    if (!isSessionId(sessionId)) return false;
+    try {
+      const answer = await brokerPost("/api/peer/ack", { key: `cli:${sessionId}`, id });
+      if (answer?.ok !== true) return false;
+    } catch {
+      return false; // broker down: the renderer keeps the id in its discarded set
+    }
+    heldCache.ack(sessionId, id);
+    return true;
+  }
   await relay.ack(id);
+  heldCache.ack(sessionId, id);
   return true;
 });
+
+const checkedSessionId = (sessionId) => {
+  if (!isSessionId(sessionId)) throw new Error(`Invalid session id: ${sessionId}`);
+  return sessionId;
+};
+handle("held:get", (sessionId) => holds.get(checkedSessionId(sessionId)));
+handle("held:set", (sessionId, on) => holds.set(checkedSessionId(sessionId), on !== false));
 
 // ---------- history: fork / delete from a message ----------
 
@@ -1011,6 +1045,7 @@ handle("sessions:fork", async (sessionId, target) => {
   refuseWhilePrompting(sessionId);
   refuseWhileDeleting(sessionId);
   const res = forkSession(sessionId, target);
+  holds.copy(sessionId, res.sessionId);
   tiers.copy(sessionId, res.sessionId); // a long history must not land in a smaller window
   return res;
 });
@@ -1051,6 +1086,7 @@ handle("sessions:delete", async (sessionId) => {
     }
     // missingOk: a session that never wrote its dir (or is already gone) just has its store rows removed
     const res = await deleteSession(sessionId, { missingOk: true });
+    holds.delete(sessionId);
     tiers.delete(sessionId);
     records.forget(sessionId);
     if (res.leftover) console.warn(`[delete] could not remove ${res.leftover}`);

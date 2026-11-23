@@ -45,6 +45,9 @@ contextBridge.exposeInMainWorld("api", {
   // the broker's sub-session links ({ key: "cli:<id>", parent, name, task, createdAt, reported, parentDeleted, online,
   // busy }): the cached snapshot at once, the fresh one follows through onLinks
   getLinks: () => call("links:get"),
+  // the per-session approval switch for replies from sub-sessions
+  getHoldReplies: (sessionId) => call("held:get", sessionId),
+  setHoldReplies: (sessionId, on) => call("held:set", sessionId, on),
   // keys are "cli:<sessionId>": removed from the tree by the user / no longer in Copilot's session list
   forgetLinks: (keys) => call("links:forget", keys),
   reportMissing: (keys) => call("links:missing", keys),

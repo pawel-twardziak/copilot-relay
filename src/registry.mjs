@@ -73,6 +73,7 @@ export class Registry extends EventEmitter {
     this.offlineRelative = null;
     /** Hook (toKey, prompt) => string: decorates prompts sent to a linked recipient. */
     this.decorate = null;
+    this.childMessage = null; // (fromKey, toKey, text) => boolean: the delegation service takes over a child→parent message
   }
 
   /** True when one of the two peers is the parent of the other. */
@@ -235,13 +236,15 @@ export class Registry extends EventEmitter {
     const budget = linked ? this.pairBudgets.get(`${parentKey}|${childKey}`) : this.budget;
     this.emit("message", { from: from.name, to: to.name, fromKey: from.key, toKey: to.key, text, budget });
     const prompt = relayPrompt(from.name, from.cwd, text);
-    this.#deliver(to, {
-      from: from.name,
-      ...(from.cwd ? { fromCwd: from.cwd } : {}),
-      human: false,
-      text,
-      prompt: linked && this.decorate ? this.decorate(to.key, prompt) : prompt,
-    });
+    // a child's message to its app parent is stored and delivered by the delegation service instead
+    if (!(from.parentKey === to.key && to.app && this.childMessage?.(from.key, to.key, text)))
+      this.#deliver(to, {
+        from: from.name,
+        ...(from.cwd ? { fromCwd: from.cwd } : {}),
+        human: false,
+        text,
+        prompt: linked && this.decorate ? this.decorate(to.key, prompt) : prompt,
+      });
     const how = to.kind === "mcp" ? "placed in their inbox" : to.online ? "delivered" : "queued (recipient briefly offline)";
     return `Message to ${to.name} ${how}. Their reply will arrive as a new message — do not wait for it.`;
   }

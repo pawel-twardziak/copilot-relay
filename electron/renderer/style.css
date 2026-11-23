@@ -564,3 +564,18 @@ body.schedules-open #session-list .item.active { background: none; border-color:
 .sch-out summary { cursor: pointer; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
 .sch-out .hint { margin: 6px 0; }
 .sch-out pre { background: var(--panel); border: 1px solid var(--border); padding: 8px 10px; border-radius: 6px; overflow: auto; max-height: 420px; margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+
+/* replies from sub-sessions waiting for approval */
+.held { padding: 6px 14px; border-top: 1px solid var(--border); background: var(--panel); font-size: 12px; color: var(--muted); }
+.held[hidden] { display: none; }
+.held-head { margin-bottom: 4px; }
+.held-row { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+.held-from { flex: none; color: var(--text); }
+.held-time { flex: none; }
+.held-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.held-switch-label { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); }
+.held-switch-label[hidden] { display: none; }
+.held-mark { margin-left: 6px; font-size: 11px; color: var(--warn); }
+.held-text { cursor: pointer; }
+.held-text.expanded { white-space: pre-wrap; overflow: visible; text-overflow: clip; }
+.held-row:has(.held-text.expanded) { align-items: flex-start; }

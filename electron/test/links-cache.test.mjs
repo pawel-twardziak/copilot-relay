@@ -12,14 +12,15 @@ const tempDir = (t) => {
   return dir;
 };
 
-test("a missing or corrupt cache reads as []", (t) => {
+test("a missing or corrupt cache reads as empty", (t) => {
   const dir = tempDir(t);
   const file = path.join(dir, "links-cache.json");
-  assert.deepEqual(readLinksCache(file), []);
+  const empty = { links: [], held: {} };
+  assert.deepEqual(readLinksCache(file), empty);
   writeFileSync(file, "{not json");
-  assert.deepEqual(readLinksCache(file), []);
-  writeFileSync(file, JSON.stringify({ links: [] })); // valid JSON, but not an array
-  assert.deepEqual(readLinksCache(file), []);
+  assert.deepEqual(readLinksCache(file), empty);
+  writeFileSync(file, JSON.stringify({ links: "x", held: [] })); // valid JSON of the wrong shape
+  assert.deepEqual(readLinksCache(file), empty);
 });
 
 test("write then read round-trips", (t) => {
@@ -29,9 +30,21 @@ test("write then read round-trips", (t) => {
     { key: "cli:a", parent: null, name: "main-1a2b3c", task: null, createdAt: 1, reported: false, parentDeleted: false, online: true, busy: false },
     { key: "cli:b", parent: "cli:a", name: "kid-4d5e6f", task: "Check X", createdAt: 2, reported: true, parentDeleted: false, online: false, busy: false },
   ];
-  writeLinksCache(file, links);
-  assert.deepEqual(readLinksCache(file), links);
-  writeLinksCache(file, []);
-  assert.deepEqual(readLinksCache(file), []);
+  writeLinksCache(file, { links, held: {} });
+  assert.deepEqual(readLinksCache(file), { links, held: {} });
+  writeLinksCache(file, { links: [], held: {} });
+  assert.deepEqual(readLinksCache(file), { links: [], held: {} });
   assert.deepEqual(readdirSync(path.dirname(file)), ["links-cache.json"]); // no temp file left behind
+});
+
+test("readLinksCache accepts an old array file", (t) => {
+  const file = path.join(tempDir(t), "links-cache.json");
+  writeFileSync(file, '[{"key":"cli:a"}]');
+  assert.deepEqual(readLinksCache(file), { links: [{ key: "cli:a" }], held: {} });
+});
+
+test("writeLinksCache and readLinksCache keep held", (t) => {
+  const file = path.join(tempDir(t), "links-cache.json");
+  writeLinksCache(file, { links: [], held: { "cli:p": 2 } });
+  assert.deepEqual(readLinksCache(file), { links: [], held: { "cli:p": 2 } });
 });

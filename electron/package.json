@@ -39,6 +39,7 @@
       "delegation.mjs",
       "prompt-count.mjs",
       "links-cache.mjs",
+      "held-replies.mjs",
       "repo-git.mjs",
       "repo-records.mjs",
       "repo-changes.mjs",
