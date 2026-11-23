@@ -65,7 +65,8 @@ survives broker restarts and `copilot --resume`. To change it:
 
 Terminal sessions (extension) get `relay_list_sessions`, `relay_send_message(to, text)` and `relay_set_name(name, role?)`.
 MCP clients get `list_sessions`, `send_message`, `set_name`, `read_inbox` and `wait_for_message(timeout_seconds)`.
-Desktop-app sessions also get `create_session(name, task, agent?, model?)` and `report_result(text)`, see
+Desktop-app sessions also get `create_session(name, task, agent?, model?)`, `report_result(text)`,
+`adopt_session(name)` and `release_session(name)`, see
 [Delegated sessions](electron/README.md#delegated-sessions).
 
 ### Other MCP clients (e.g. VS Code `mcp.json`)
@@ -89,6 +90,11 @@ agent and model. Every creation needs a click on **Approve** in the app. The chi
 can create children of its own, to any depth, with no limit on their number. The app shows them as a tree, in the
 session list and in a relation bar in each session. Session names are unique and permanent (`<base>-<6 hex>`).
 See [Delegated sessions](electron/README.md#delegated-sessions).
+
+A session can also ask to link an existing open session as its child (`adopt_session`) or to end such a link
+(`release_session`), only when the user asked for it in the conversation. Each request is a card in the app that the
+user must approve; the outcome arrives as a message from relay. A release only ends the link: both sessions stay open
+and keep their history. An adopted child owes no report, but it may still send one with `report_result`.
 
 ```bash
 npm run app:install   # once
@@ -238,6 +244,7 @@ default 12), refilled by a human prompt in either of the two. `report_result` an
 | `POST /api/peer/task` `{ key, task }` | a delegated session's task, set once |
 | `POST /api/peer/state` `{ key, busy }` | whether the session is working |
 | `POST /api/peer/died` `{ key }` | the session's process died while open: notifies an unreported child's parent |
+| `POST /api/peer/link-answer` `{ key, requestId, approved }` | desktop app: the user's answer to a link or unlink card (404 when it is not pending) |
 | `POST /api/peer/reopen-answer` `{ key, requestId, approved, reason? }` | desktop app: the user's answer to a reopen card (404 when it is not pending) |
 | `/mcp` | MCP endpoint (stateful; `?peer=<key>` is used internally for ACP sessions) |
 

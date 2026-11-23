@@ -28,5 +28,10 @@ export function linksRoutes({ delegation, log = console.log }) {
         : delegation.answerReopen(key, requestId, approved === true, reason)
           ? done
           : { status: 404, json: { error: "This reopen request is not pending." } }),
+    "POST /api/peer/link-answer": withKey(({ key, requestId, approved }) => {
+      if (typeof requestId !== "string") return bad("requestId required");
+      const out = delegation.answerLink(key, requestId, approved === true);
+      return out ? { status: 200, json: out } : { status: 404, json: { error: "This link request is not pending." } };
+    }),
   };
 }

@@ -238,3 +238,28 @@ test("a runtime rename fires onChange", () => {
   registry.emit("peer_renamed", registry.get("cli:child"));
   assert.equal(changes, 1);
 });
+
+test("link-answer approves a pending request once and is 404 afterwards", () => {
+  const { routes, registry, delegation, controls } = setup(); // cli:child is linked to cli:parent
+  registry.get("cli:parent").linkCards = true;
+  delegation.requestLink("cli:parent", "release", registry.get("cli:child").name);
+  const { requestId } = controls.find((c) => c[1] === "link_request")[2];
+  assert.equal(routes["POST /api/peer/link-answer"]({ key: "cli:parent", approved: true }).status, 400);
+  assert.equal(routes["POST /api/peer/link-answer"]({ requestId, approved: true }).status, 400);
+  assert.equal(routes["POST /api/peer/link-answer"]({ key: "cli:child", requestId, approved: true }).status, 404);
+  const ok = routes["POST /api/peer/link-answer"]({ key: "cli:parent", requestId, approved: true });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.json.result, "released");
+  const again = routes["POST /api/peer/link-answer"]({ key: "cli:parent", requestId, approved: true });
+  assert.equal(again.status, 404);
+  assert.match(again.json.error, /not pending/);
+});
+
+test("link-answer treats anything but approved === true as a rejection", () => {
+  const { routes, registry, delegation, controls, store } = setup();
+  registry.get("cli:parent").linkCards = true;
+  delegation.requestLink("cli:parent", "release", registry.get("cli:child").name);
+  const { requestId } = controls.find((c) => c[1] === "link_request")[2];
+  assert.equal(routes["POST /api/peer/link-answer"]({ key: "cli:parent", requestId, approved: "true" }).json.result, "rejected");
+  assert.equal(store.parentOf("cli:child"), "cli:parent");
+});
