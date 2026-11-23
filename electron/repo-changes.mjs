@@ -58,8 +58,8 @@ export function createChanges({ store, git, createdAt, allow, now = () => new Da
 
   return {
     async list(sessionId) {
-      const { repos, loose } = store.session(sessionId);
-      return { repos: await Promise.all(repos.map(view)), loose };
+      const { repos, loose, opened } = store.session(sessionId);
+      return { repos: await Promise.all(repos.map(view)), loose, opened };
     },
 
     async commits(sessionId, root, rel) {

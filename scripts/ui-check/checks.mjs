@@ -1426,6 +1426,17 @@ export const checks = [
       assert.equal(repo.source, "auto");
       assert.equal(repo.error, null);
       assert.deepStrictEqual(repo.files, [{ path: "notes.txt", state: "?", uncommitted: true, committed: false, touched: true, dirtyAtStart: false }]);
+      const opened = (p) => `api.changesOpened(${JSON.stringify(id)}, ${JSON.stringify(p)})`;
+      const readme = path.join(repo.root, "README.md");
+      assert.deepStrictEqual(live.opened, [], "nothing opened yet");
+      assert.match(await app.ev(`${opened(readme)}.then(() => "ok", (e) => e.message)`), /not opened in the preview/, "a path that was not read");
+      await app.ev(`api.readFile(${JSON.stringify(work)}, "README.md", { viewingCwd: ${JSON.stringify(work)} })`);
+      await app.ev(opened(readme));
+      assert.deepStrictEqual((await app.ev(list)).opened, [readme], "the opened file");
+      await app.reload();
+      assert.deepStrictEqual((await app.ev(list)).opened, [readme], "after the replay");
+      await app.ev(`api.changesForgetOpened(${JSON.stringify(id)}, ${JSON.stringify(readme)})`);
+      assert.deepStrictEqual((await app.ev(list)).opened, [], "forgotten");
       // removed while the session runs: the agent's next edit there records it again, with a later start point
       await app.ev(`api.changesRemove(${JSON.stringify(id)}, ${JSON.stringify(repo.root)})`);
       await app.send("Write the notes again.");

@@ -90,7 +90,7 @@ test("2: a permission request with locations records the same way", async (t) =>
 test("3: a pending edit without a path, session folder outside a repository: nothing", async (t) => {
   const { store, tracker } = setup(t, { folders: {} });
   await tracker.update("s", NONE, { sessionUpdate: "tool_call", kind: "edit", status: "pending" });
-  assert.deepEqual(store.session("s"), { repos: [], loose: [] });
+  assert.deepEqual(store.session("s"), { repos: [], loose: [], opened: [] });
 });
 
 test("4: a pending execute in a repository records the session folder's root with all dirty paths", async (t) => {
@@ -132,7 +132,7 @@ test("8: allow returning false means no git call and no record", async (t) => {
   await tracker.update("s", REPO, diffUpdate(at(REPO, "a.txt")));
   await tracker.update("s", REPO, { sessionUpdate: "tool_call", kind: "execute" });
   assert.equal(calls.where, 0);
-  assert.deepEqual(store.session("s"), { repos: [], loose: [] });
+  assert.deepEqual(store.session("s"), { repos: [], loose: [], opened: [] });
 });
 
 test("9: a file in a folder that does not exist yet is recorded below the nearest folder", async (t) => {
@@ -151,7 +151,7 @@ test("10: a file in no repository is loose, once", async (t) => {
   const { store, tracker } = setup(t, { folders: {} });
   await tracker.update("s", NONE, diffUpdate(at(NONE, "x.txt")));
   await tracker.update("s", NONE, diffUpdate(at(NONE, "x.txt")));
-  assert.deepEqual(store.session("s"), { repos: [], loose: [at(NONE, "x.txt")] });
+  assert.deepEqual(store.session("s"), { repos: [], loose: [at(NONE, "x.txt")], opened: [] });
 });
 
 test("11: git.where rejecting is reported, not thrown, and later updates still work", async (t) => {
@@ -164,7 +164,7 @@ test("11: git.where rejecting is reported, not thrown, and later updates still w
   });
   git.failWhere = true;
   await tracker.update("s", REPO, diffUpdate(at(REPO, "a.txt")));
-  assert.deepEqual(store.session("s"), { repos: [], loose: [] });
+  assert.deepEqual(store.session("s"), { repos: [], loose: [], opened: [] });
   assert.ok(warnings.length > 0 && warnings.every((w) => w.startsWith("[changes]")));
   git.failWhere = false;
   await tracker.update("s", REPO, diffUpdate(at(REPO, "b.txt")));

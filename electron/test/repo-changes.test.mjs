@@ -312,3 +312,9 @@ test("add: a listed root is detected before the start point is read", async (t) 
   assert.equal(res.message, "repo is already listed.");
   assert.equal(reads, 0);
 });
+
+test("list: the session's opened files, as stored", async (t) => {
+  const { store, changes } = setup(t);
+  store.addOpened(SID, "/x/a.txt");
+  assert.deepEqual((await changes.list(SID)).opened, ["/x/a.txt"]);
+});

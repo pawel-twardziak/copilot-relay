@@ -75,6 +75,8 @@ contextBridge.exposeInMainWorld("api", {
   changesDiff: (sessionId, root, rel, version) => call("changes:diff", sessionId, root, rel, version),
   changesAdd: (sessionId) => call("changes:add", sessionId),
   changesRemove: (sessionId, root) => call("changes:remove", sessionId, root),
+  changesOpened: (sessionId, p) => call("changes:opened", sessionId, p),
+  changesForgetOpened: (sessionId, p) => call("changes:forget-opened", sessionId, p),
   storage: () => call("storage:get"),
   openPastes: () => call("storage:openPastes"),
   clearPastes: () => call("storage:clearPastes"),
