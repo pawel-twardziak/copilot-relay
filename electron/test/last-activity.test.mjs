@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
-import { createLastActivity, readLastActivity } from "../last-activity.mjs";
+import { activityStamp, createLastActivity, readLastActivity } from "../last-activity.mjs";
 
 let root;
 let home;
@@ -79,6 +79,20 @@ describe("readLastActivity", () => {
     assert.equal(await read(id), "2026-11-23T13:26:30.000Z");
   });
 
+  test("found by reading the whole file when even the big tail has none", async () => {
+    const filler = Array.from({ length: 12 }, (_, i) => ev("model.messages_snapshot", "2026-11-23T14:00:00.000Z", { n: i, blob: "x".repeat(256 * 1024) }));
+    const id = put([START, ev("assistant.message", "2026-11-23T13:26:30.000Z"), ...filler], { createdAt: "2026-11-23T10:00:00.000Z" });
+    assert.equal(await read(id), "2026-11-23T13:26:30.000Z");
+  });
+
+  test("a history too big to search to the end: unknown, not the creation time", async () => {
+    const id = put([START, ev("assistant.message", "2026-11-23T13:26:30.000Z")], { createdAt: "2026-11-01T10:00:00.000Z" });
+    const file = path.join(home, "session-state", id, "events.jsonl");
+    fs.truncateSync(file, 65 * 1024 * 1024); // zero bytes, no line break: one endless "line" after the message
+    fs.appendFileSync(file, "\n" + ev("session.shutdown", "2026-11-23T22:36:00.000Z") + "\n");
+    assert.equal(await read(id), null);
+  });
+
   test("a half-written last line and an event without a readable time are skipped", async () => {
     const id = put([START, ev("user.message", "2026-11-23T13:00:00.000Z"), ev("assistant.message", "not a date"), '{"type":"assistant.message","timest']);
     assert.equal(await read(id), "2026-11-23T13:00:00.000Z");
@@ -93,26 +107,32 @@ describe("readLastActivity", () => {
 });
 
 describe("createLastActivity", () => {
-  const S = (sessionId, updatedAt) => ({ sessionId, updatedAt, cwd: "/a", title: sessionId });
+  const S = (sessionId) => ({ sessionId, updatedAt: "2026-11-23T22:37:00.000Z", cwd: "/a", title: sessionId });
+  /** A reader that records its calls, and stamps that the test changes by hand. */
+  function fake(value = (id, n) => `time ${n}`) {
+    const calls = [];
+    const stamps = {};
+    const add = createLastActivity({
+      read: async (id) => (calls.push(id), value(id, calls.length)),
+      stamp: async (id) => stamps[id] ?? null,
+    });
+    return { add, calls, stamps };
+  }
 
   test("adds lastActivityAt to every session and keeps the other fields", async () => {
-    const add = createLastActivity({ read: async (id) => (id === "a" ? "2026-11-23T13:00:00.000Z" : null) });
-    assert.deepEqual(await add([S("a", "t1"), S("b", "t1")]), [
-      { ...S("a", "t1"), lastActivityAt: "2026-11-23T13:00:00.000Z" },
-      { ...S("b", "t1"), lastActivityAt: null },
+    const { add } = fake((id) => (id === "a" ? "2026-11-23T13:00:00.000Z" : null));
+    assert.deepEqual(await add([S("a"), S("b")]), [
+      { ...S("a"), lastActivityAt: "2026-11-23T13:00:00.000Z" },
+      { ...S("b"), lastActivityAt: null },
     ]);
   });
 
-  test("reads a session again only when its updatedAt changed", async () => {
-    const calls = [];
-    const add = createLastActivity({
-      read: async (id) => {
-        calls.push(id);
-        return `time ${calls.length}`;
-      },
-    });
-    await add([S("a", "t1"), S("b", "t1")]);
-    const second = await add([S("a", "t1"), S("b", "t2")]);
+  test("reads a session again only when its events file changed", async () => {
+    const { add, calls, stamps } = fake();
+    Object.assign(stamps, { a: "1:10", b: "1:10" });
+    await add([S("a"), S("b")]);
+    stamps.b = "2:20";
+    const second = await add([S("a"), S("b")]);
     assert.deepEqual(calls, ["a", "b", "b"]);
     assert.deepEqual(
       second.map((s) => s.lastActivityAt),
@@ -121,33 +141,43 @@ describe("createLastActivity", () => {
   });
 
   test("forgets sessions that left the list", async () => {
-    const calls = [];
-    const add = createLastActivity({ read: async (id) => (calls.push(id), "t") });
-    await add([S("a", "t1")]);
+    const { add, calls, stamps } = fake();
+    stamps.a = "1:10";
+    await add([S("a")]);
     await add([]);
-    await add([S("a", "t1")]);
+    await add([S("a")]);
     assert.deepEqual(calls, ["a", "a"]);
   });
 
-  test("a failed read gives null and is tried again next time", async () => {
+  test("an unknown time and a session without an events file are read again next time", async () => {
+    const { add, calls, stamps } = fake((id) => (id === "unknown" ? null : "t"));
+    stamps.unknown = "1:10";
+    await add([S("unknown"), S("nofile")]);
+    await add([S("unknown"), S("nofile")]);
+    assert.deepEqual(calls, ["unknown", "nofile", "unknown", "nofile"]);
+  });
+
+  test("a failing read or stamp gives null, keeps the session and is tried again", async () => {
     let fail = true;
-    const add = createLastActivity({
-      read: async () => {
-        if (fail) throw new Error("boom");
-        return "t";
-      },
-    });
-    assert.equal((await add([S("a", "t1")]))[0].lastActivityAt, null);
-    fail = false;
-    assert.equal((await add([S("a", "t1")]))[0].lastActivityAt, "t");
+    const boom = async () => {
+      if (fail) throw new Error("boom");
+      return "t";
+    };
+    for (const add of [createLastActivity({ read: boom, stamp: async () => "1:10" }), createLastActivity({ read: async () => "t", stamp: boom })]) {
+      fail = true;
+      assert.deepEqual(await add([S("a")]), [{ ...S("a"), lastActivityAt: null }]);
+      fail = false;
+      assert.equal((await add([S("a")]))[0].lastActivityAt, "t");
+    }
   });
 
-  test("a session without updatedAt is read every time", async () => {
-    const calls = [];
-    const add = createLastActivity({ read: async (id) => (calls.push(id), "t") });
-    await add([S("a", undefined)]);
-    await add([S("a", undefined)]);
-    assert.deepEqual(calls, ["a", "a"]);
+  test("the real stamp: changes when events.jsonl grows, null without the file", async () => {
+    const id = put([START, ev("user.message", "2026-11-23T13:00:00.000Z")]);
+    const first = await activityStamp(id, { copilotHome: home });
+    fs.appendFileSync(path.join(home, "session-state", id, "events.jsonl"), ev("session.shutdown", "2026-11-23T22:36:00.000Z") + "\n");
+    assert.notEqual(await activityStamp(id, { copilotHome: home }), first);
+    assert.equal(await activityStamp(put(null), { copilotHome: home }), null);
+    assert.equal(await activityStamp("../escape", { copilotHome: home }), null);
   });
 
   test("many sessions: all read, a few at a time", async () => {
@@ -155,6 +185,7 @@ describe("createLastActivity", () => {
     let most = 0;
     const add = createLastActivity({
       limit: 4,
+      stamp: async () => null,
       read: async (id) => {
         most = Math.max(most, ++running);
         await new Promise((r) => setTimeout(r, 1));
@@ -162,7 +193,7 @@ describe("createLastActivity", () => {
         return id;
       },
     });
-    const list = Array.from({ length: 30 }, (_, i) => S(`s${i}`, "t1"));
+    const list = Array.from({ length: 30 }, (_, i) => S(`s${i}`));
     const out = await add(list);
     assert.deepEqual(
       out.map((s) => s.lastActivityAt),

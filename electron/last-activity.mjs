@@ -25,14 +25,18 @@ function lastEventTime(lines) {
   return null;
 }
 
+/** { time } of the file's last activity event (null: it has none, or there is no file); { unknown: true } when the
+ *  file is there but could not be read to the end of the search (it is too big, or a read failed). */
 async function lastEventTimeOf(file) {
+  let seen = false;
   for (const bytes of [...TAILS, null]) {
     const read = await readLines(file, bytes === null, bytes ?? undefined);
-    if (!read) return null;
-    const t = lastEventTime(read.lines);
-    if (t !== null || !read.truncated) return t;
+    if (!read) return seen ? { unknown: true } : { time: null };
+    seen = true;
+    const time = lastEventTime(read.lines);
+    if (time !== null || !read.truncated) return { time };
   }
-  return null;
+  return { unknown: true };
 }
 
 async function createdTimeOf(file) {
@@ -47,21 +51,36 @@ async function createdTimeOf(file) {
 
 /**
  * ISO time of the last message or tool call of session `sessionId`, or of its creation when that is later (a fork
- * copies older messages) or there are none. null when neither can be read. Never throws.
+ * copies older messages) or there are none. null when neither can be read, and when the search of a very big
+ * history had to stop (the creation time alone would make a used session look old). Never throws.
  */
 export async function readLastActivity(sessionId, { copilotHome } = {}) {
   if (!isSessionId(sessionId)) return null;
   const dir = path.join(copilotHome ?? copilotHomeDefault(), "session-state", sessionId);
-  const times = (await Promise.all([lastEventTimeOf(path.join(dir, "events.jsonl")), createdTimeOf(path.join(dir, "workspace.yaml"))])).filter((t) => t !== null);
+  const [event, created] = await Promise.all([lastEventTimeOf(path.join(dir, "events.jsonl")), createdTimeOf(path.join(dir, "workspace.yaml"))]);
+  if (event.unknown) return null;
+  const times = [event.time, created].filter((t) => t !== null);
   return times.length ? new Date(Math.max(...times)).toISOString() : null;
+}
+
+/** A value that changes whenever the session's events.jsonl does (its size and modification time); null without one. */
+export async function activityStamp(sessionId, { copilotHome } = {}) {
+  if (!isSessionId(sessionId)) return null;
+  try {
+    const st = await fs.stat(path.join(copilotHome ?? copilotHomeDefault(), "session-state", sessionId, "events.jsonl"));
+    return `${st.mtimeMs}:${st.size}`;
+  } catch {
+    return null;
+  }
 }
 
 /**
  * Returns `add(sessions)`: the sessions of session/list, each with `lastActivityAt` (ISO or null). A session is read
- * again only when its updatedAt changed (that is the file's modification time), at most `limit` files at a time.
+ * again only when its events.jsonl changed (`stamp`), at most `limit` sessions at a time. An unknown time (null) and
+ * a session without a stamp are not remembered: they are read again with the next list.
  */
-export function createLastActivity({ read = readLastActivity, limit = 8 } = {}) {
-  let cache = new Map(); // sessionId -> { updatedAt, value }
+export function createLastActivity({ read = readLastActivity, stamp = activityStamp, limit = 8 } = {}) {
+  let cache = new Map(); // sessionId -> { key, value }
   return async function add(sessions) {
     const next = new Map();
     const out = new Array(sessions.length);
@@ -70,18 +89,15 @@ export function createLastActivity({ read = readLastActivity, limit = 8 } = {}) 
       while (at < sessions.length) {
         const i = at++;
         const s = sessions[i];
-        const hit = cache.get(s.sessionId);
         let value = null;
-        if (hit && s.updatedAt && hit.updatedAt === s.updatedAt) {
-          value = hit.value;
-          next.set(s.sessionId, hit);
-        } else {
-          try {
-            value = (await read(s.sessionId)) ?? null;
-            next.set(s.sessionId, { updatedAt: s.updatedAt, value });
-          } catch {
-            // not remembered: tried again with the next list
-          }
+        try {
+          const key = await stamp(s.sessionId);
+          const hit = cache.get(s.sessionId);
+          if (key && hit?.key === key) value = hit.value;
+          else value = (await read(s.sessionId)) ?? null;
+          if (key && value !== null) next.set(s.sessionId, { key, value });
+        } catch {
+          // the list must never fail over a time
         }
         out[i] = { ...s, lastActivityAt: value };
       }
