@@ -34,16 +34,6 @@ test("pick: keeps a listed key, else first file, else loose, else null", () => {
   assert.equal(ChangesModel.pick({ repos: [], loose: [] }, "k"), null);
 });
 
-test("versions: with and without uncommitted", () => {
-  const commits = [{ sha: "0123456789abcdef", subject: "Fix it", date: "2026-11-22", author: "Ann" }];
-  assert.deepEqual(ChangesModel.versions(file("a", { uncommitted: true }), commits), [
-    { id: "uncommitted", label: "Uncommitted", title: "" },
-    { id: "0123456789abcdef", label: "0123456 Fix it", title: "Ann · 2026-11-22" },
-  ]);
-  assert.deepEqual(ChangesModel.versions(file("a"), commits).map((v) => v.id), ["0123456789abcdef"]);
-  assert.deepEqual(ChangesModel.versions(file("a"), []), []);
-});
-
 test("locate: win32 returns the spelling the list holds; otherwise rel stays as computed", () => {
   const win = { repos: [repo("c:/repo", [file("A/b.txt")])], loose: [] };
   assert.deepEqual(ChangesModel.locate(win, "C:\\Repo\\a\\B.TXT", "win32"), { root: "c:/repo", rel: "A/b.txt" });
@@ -81,12 +71,77 @@ test("clampRatio: a finite number clamped to 0.2–0.8, anything else 0.5", () =
   assert.equal(ChangesModel.clampRatio("0.3"), 0.5);
 });
 
-test("parsePrefs: the stored split, defaults for missing or broken text", () => {
-  const defaults = { showFile: false, ratio: 0.5 };
-  assert.deepEqual(ChangesModel.parsePrefs(null), defaults);
-  assert.deepEqual(ChangesModel.parsePrefs("{"), defaults);
-  assert.deepEqual(ChangesModel.parsePrefs("null"), defaults);
-  assert.deepEqual(ChangesModel.parsePrefs("[1]"), defaults);
-  assert.deepEqual(ChangesModel.parsePrefs('{"showFile":true,"ratio":0.3}'), { showFile: true, ratio: 0.3 });
-  assert.deepEqual(ChangesModel.parsePrefs('{"showFile":"yes","ratio":2}'), { showFile: false, ratio: 0.8 });
+test("parsePrefs: the view and the ratio, old and broken values", () => {
+  const p = (v) => ChangesModel.parsePrefs(JSON.stringify(v));
+  assert.deepEqual(ChangesModel.parsePrefs(null), { view: "diff", ratio: 0.5 });
+  assert.deepEqual(ChangesModel.parsePrefs("{"), { view: "diff", ratio: 0.5 });
+  assert.deepEqual(p({ view: "both", ratio: 0.3 }), { view: "both", ratio: 0.3 });
+  assert.deepEqual(p({ view: "file" }), { view: "file", ratio: 0.5 });
+  assert.deepEqual(p({ showFile: true, ratio: 9 }), { view: "both", ratio: 0.8 });
+  assert.deepEqual(p({ showFile: false }), { view: "diff", ratio: 0.5 });
+  assert.deepEqual(p({ view: "sideways", showFile: true }), { view: "both", ratio: 0.5 });
+  assert.deepEqual(p({ view: "sideways" }), { view: "diff", ratio: 0.5 });
+});
+
+test("viewFor: the stored view, the diff for a commit, the file where there is no diff", () => {
+  for (const v of ["diff", "file", "both"]) {
+    assert.equal(ChangesModel.viewFor(v, "change"), v);
+    assert.equal(ChangesModel.viewFor(v, "nodiff"), "file");
+  }
+  assert.equal(ChangesModel.viewFor("file", "commit"), "diff");
+  assert.equal(ChangesModel.viewFor("both", "commit"), "both");
+  assert.equal(ChangesModel.viewFor("diff", "commit"), "diff");
+});
+
+test("openedShown: without the files the changes list holds, the newest 20", () => {
+  const data = { repos: [repo("/r", [file("a.txt")])], loose: ["/tmp/l.txt"], opened: ["/r/a.txt", "/r/docs/b.md", "/tmp/l.txt", "/else/c.txt", "/r/A.txt"] };
+  // /r/docs/b.md is under a listed root but not a changed file: it stays
+  assert.deepEqual(ChangesModel.openedShown(data, "linux"), ["/r/docs/b.md", "/else/c.txt", "/r/A.txt"]);
+  const win = { repos: [repo("C:\\R", [file("Sub/A.txt")])], loose: ["C:\\T\\L.txt"], opened: ["c:\\r\\sub\\a.txt", "C:\\t\\l.TXT", "C:\\R\\other.txt"] };
+  assert.deepEqual(ChangesModel.openedShown(win, "win32"), ["C:\\R\\other.txt"]);
+  const many = { repos: [repo("/r", [file("a.txt")])], loose: [], opened: ["/r/a.txt", ...Array.from({ length: 25 }, (_, i) => `/o/${i}.txt`)] };
+  const shown = ChangesModel.openedShown(many, "linux");
+  assert.equal(shown.length, 20);
+  assert.equal(shown[0], "/o/0.txt"); // the hidden one does not use a place
+  assert.deepEqual(ChangesModel.openedShown(null, "linux"), []);
+  assert.deepEqual(ChangesModel.openedShown({ repos: [], loose: [] }, "linux"), []);
+});
+
+test("openedLabel: relative inside the session folder, else absolute", () => {
+  const l = ChangesModel.openedLabel;
+  assert.deepEqual(l("/w/docs/b.md", "/w", "linux"), { dir: "docs/", name: "b.md" });
+  assert.deepEqual(l("/w/b.md", "/w/", "linux"), { dir: "", name: "b.md" });
+  assert.deepEqual(l("/work2/a.txt", "/w", "linux"), { dir: "/work2/", name: "a.txt" });
+  assert.deepEqual(l("/else/c.txt", null, "linux"), { dir: "/else/", name: "c.txt" });
+  assert.deepEqual(l("C:\\W\\docs\\b.md", "c:\\w", "win32"), { dir: "docs\\", name: "b.md" });
+});
+
+test("samePath, commitLabel, keepVersion", () => {
+  assert.equal(ChangesModel.samePath("/a/B", "/a/b", "linux"), false);
+  assert.equal(ChangesModel.samePath("C:\\a\\B", "c:/A/b", "win32"), true);
+  const c = { sha: "a1b2c3d4e5f6", subject: "fix: x", author: "Ann", date: "2026-11-22 10:00" };
+  assert.deepEqual(ChangesModel.commitLabel(c), { label: "a1b2c3d fix: x", title: "Ann · 2026-11-22 10:00" });
+  assert.equal(ChangesModel.keepVersion("uncommitted", []), "uncommitted");
+  assert.equal(ChangesModel.keepVersion("a1b2c3d4e5f6", [c]), "a1b2c3d4e5f6");
+  assert.equal(ChangesModel.keepVersion("gone", [c]), "uncommitted");
+});
+
+test("pick: an opened row is kept while it is listed, and is the last fallback", () => {
+  const k = ChangesModel.key;
+  assert.equal(ChangesModel.pick({ repos: [], loose: [], opened: ["/o/x.txt"] }, null, "linux"), k(null, "/o/x.txt"));
+  const d = { repos: [repo("/r", [file("a.txt")])], loose: [], opened: ["/o/x.txt", "/r/a.txt"] };
+  assert.equal(ChangesModel.pick(d, k(null, "/o/x.txt"), "linux"), k(null, "/o/x.txt"));
+  assert.equal(ChangesModel.pick(d, k(null, "/r/a.txt"), "linux"), k("/r", "a.txt")); // hidden: it moved up
+});
+
+test("pick: the selection follows a file that moves between the two lists", () => {
+  const k = ChangesModel.key;
+  const up = { repos: [repo("/r", [file("z.txt"), file("a.txt")])], loose: [], opened: ["/r/a.txt"] };
+  assert.equal(ChangesModel.pick(up, k(null, "/r/a.txt"), "linux"), k("/r", "a.txt"));
+  const down = { repos: [], loose: [], opened: ["/o/x.txt", "/r/a.txt"] };
+  assert.equal(ChangesModel.pick(down, k("/r", "a.txt"), "linux"), k(null, "/r/a.txt"));
+  const win = { repos: [repo("C:\\R", [file("z.txt"), file("Sub/A.txt")])], loose: [], opened: ["c:\\r\\sub\\a.txt"] };
+  assert.equal(ChangesModel.pick(win, k(null, "c:\\r\\sub\\a.txt"), "win32"), k("C:\\R", "Sub/A.txt"));
+  assert.equal(ChangesModel.pick(up, k("/r", "gone.txt"), "linux"), k("/r", "z.txt"));
+  assert.equal(ChangesModel.pick(up, k(null, "/nowhere"), "linux"), k("/r", "z.txt"));
 });

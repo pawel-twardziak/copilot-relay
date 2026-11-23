@@ -135,12 +135,15 @@
           </div>
           <div class="fp-actions">
             <button data-act="md" hidden></button>
-            <button data-act="file" hidden title="The file as it is on disk, beside its diff">Show file</button>
+            <div class="fp-view" role="group" aria-label="View" hidden>
+              <button data-view="diff">Diff</button>
+              <button data-view="file">File</button>
+              <button data-view="both">Both</button>
+            </div>
             <button data-act="system" title="Open with the default application">Open in system app</button>
             <button data-act="close" title="Close (Esc)">✕</button>
           </div>
         </header>
-        <div class="fp-versions" hidden></div>
         <div class="fp-panes">
           <div class="fp-diff" tabindex="0" hidden></div>
           <div class="fp-split" hidden title="Drag to resize"></div>

@@ -1295,6 +1295,16 @@ handle("files:read", async (baseCwd, target, { viewingCwd, confirmed = false } =
   return r;
 });
 
+// A file opened from a link in the chat is remembered for the session (only one files:read returned in this run).
+handle("changes:opened", async (sessionId, p) => {
+  knownSession(sessionId);
+  if (typeof p !== "string" || !readablePaths.has(p)) throw new Error("This file was not opened in the preview");
+  records.addOpened(sessionId, p);
+});
+handle("changes:forget-opened", async (sessionId, p) => {
+  records.removeOpened(knownSession(sessionId), p);
+});
+
 // The file on show in the preview; a change makes the renderer read it again (files:read decides what it may see).
 const fileWatcher = createFileWatcher({ onChange: (p) => send("files:changed", p) });
 handle("files:watch", async (p) => {
