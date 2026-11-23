@@ -36,6 +36,17 @@ export function normalizeTemplates(value) {
   return out;
 }
 
+/** The prompt keys of a settings:set payload, put into next (the settings about to be saved): promptDefault only as
+ *  text; promptChild as text, or null to go back to the built-in text (the key is removed); promptTemplates only as
+ *  an array (normalized). A key that is absent or of any other type keeps what is stored. Returns next. */
+export function applyPromptSettings(next, payload) {
+  if (typeof payload.promptDefault === "string") next.promptDefault = payload.promptDefault;
+  if (payload.promptChild === null) delete next.promptChild;
+  else if (typeof payload.promptChild === "string") next.promptChild = payload.promptChild;
+  if (Array.isArray(payload.promptTemplates)) next.promptTemplates = normalizeTemplates(payload.promptTemplates);
+  return next;
+}
+
 /** Per-session own parts in a small JSON file ({ [sessionId]: string }); "" removes the entry.
  *  `set` throws when the file can't be written; `copy` and `delete` are bookkeeping after a fork / delete that
  *  already succeeded, so a failed write there is only logged. */

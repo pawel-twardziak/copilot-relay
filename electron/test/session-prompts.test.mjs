@@ -6,6 +6,7 @@ import path from "node:path";
 import { test } from "node:test";
 import {
   CHILD_PART,
+  applyPromptSettings,
   clearPromptDirs,
   composePrompt,
   createPromptStore,
@@ -55,6 +56,25 @@ test("normalizeTemplates keeps well-formed entries only", () => {
   ]);
   assert.deepEqual(normalizeTemplates({}), []);
   assert.deepEqual(normalizeTemplates(undefined), []);
+});
+
+test("applyPromptSettings stores only well-typed prompt keys", () => {
+  const stored = () => ({ relay: true, promptDefault: "D", promptChild: "C", promptTemplates: [{ id: "a", name: "A", text: "ta" }] });
+  // absent keys keep what is stored
+  assert.deepEqual(applyPromptSettings(stored(), {}), stored());
+  // present but undefined, or of another type: kept too (never the text "undefined")
+  assert.deepEqual(applyPromptSettings(stored(), { promptDefault: undefined, promptChild: undefined, promptTemplates: undefined }), stored());
+  assert.deepEqual(applyPromptSettings(stored(), { promptDefault: 5, promptChild: { x: 1 }, promptTemplates: "x" }), stored());
+  // text is stored as it is, "" included
+  assert.deepEqual(applyPromptSettings(stored(), { promptDefault: "", promptChild: "" }), { ...stored(), promptDefault: "", promptChild: "" });
+  assert.deepEqual(applyPromptSettings(stored(), { promptDefault: "D2", promptChild: "C2" }), { ...stored(), promptDefault: "D2", promptChild: "C2" });
+  // null: the child part goes back to the built-in text (no key)
+  const back = applyPromptSettings(stored(), { promptChild: null });
+  assert.equal("promptChild" in back, false);
+  assert.equal(effectiveChildPart(back.promptChild), CHILD_PART);
+  // templates: normalized, [] empties the list
+  assert.deepEqual(applyPromptSettings(stored(), { promptTemplates: [{ id: "b", name: "B" }, { name: "no id" }] }).promptTemplates, [{ id: "b", name: "B", text: "" }]);
+  assert.deepEqual(applyPromptSettings(stored(), { promptTemplates: [] }).promptTemplates, []);
 });
 
 test("the prompt store", (t) => {

@@ -4,6 +4,10 @@
 // `api` is the global exposed by preload.cjs (window.api)
 const $ = (sel, el = document) => el.querySelector(sel);
 
+// under the prompt editor of a running session, and under the prompt fields of Settings
+const RESTART_NOTE = "Saving restarts this session's Copilot. The history stays.";
+const SETTINGS_NOTE = "Changes here reach a running session the next time its Copilot starts.";
+
 const decodeURIComponentSafe = (x) => {
   try {
     return decodeURIComponent(x);
@@ -332,6 +336,7 @@ class SessionView {
 
     this.titleEl = h("b", { class: "renamable", onclick: () => this.renameSession() });
     this.selects = h("span", { class: "selects" });
+    this.promptBtn = h("button", { class: "prompt-btn", title: "This session's own prompt (saving restarts its Copilot)", onclick: () => this.editPrompt() }, "Prompt");
     this.relayChip = h("button", { class: "relay-chip", hidden: true, onclick: () => this.renameRelay() });
     this.usageFill = h("span", { class: "fill" });
     this.usageLabel = h("span", { class: "label" }, "context: —");
@@ -415,6 +420,7 @@ class SessionView {
         this.relayChip,
         this.usageChip,
         this.selects,
+        this.promptBtn,
         this.closeChildrenBtn,
         h("button", { title: "Changes in this session's repositories", onclick: () => filePreview.show(this) }, "Changes"),
         this.activityBtn,
@@ -1136,6 +1142,7 @@ class SessionView {
     this.stopBtn.disabled = !b || this.dead || this.deleting;
     this.input.disabled = this.dead || this.deleting;
     this.agentPicker.disabled = off;
+    this.promptBtn.disabled = off; // a new prompt takes a restart, as a new context window does
     this.showQueueStatus();
     renderList();
     if (!b) queueMicrotask(() => this.pump());
@@ -2081,16 +2088,22 @@ class SessionView {
     this.statusEl.textContent = "Waiting for your permission…";
   }
 
-  /** This session asks for a new session. Everything on the card is model-written: plain text only, never Markdown. */
+  /** This session asks for a new session. Everything on the card is model-written: plain text only, never Markdown.
+   *  The prompt editor between the task and the buttons takes the child's own part (Approve sends it, Reject not);
+   *  Approve waits until the editor has its Settings parts. */
   delegationCard({ requestId, name, task, agent, model, cwd }) {
     this.flush();
     const field = (label, value) => [h("dt", {}, label), h("dd", {}, value)];
+    let editor = null;
+    const promptSlot = h("div", { class: "delegation-prompt" }, h("p", { class: "hint" }, "Loading the prompt parts…"));
     const answer = async (approved) => {
       this.closeCard(card);
+      const own = approved ? (editor?.value() ?? "") : "";
+      for (const c of promptSlot.querySelectorAll("textarea, select, button")) c.disabled = true; // answered: nothing to edit
       opts.replaceChildren(h("span", {}, approved ? "Creating the session…" : "Rejecting…"));
       let result;
       try {
-        const stillOpen = await api.answerDelegation(requestId, approved);
+        const stillOpen = await api.answerDelegation(requestId, approved, own);
         result = !stillOpen ? "This request is no longer open." : approved ? "→ Approved" : "→ Rejected";
       } catch (e) {
         result = `Could not answer: ${e.message}`;
@@ -2098,15 +2111,25 @@ class SessionView {
       card.classList.add("done");
       opts.replaceChildren(h("span", {}, result));
     };
-    const opts = h("div", { class: "opts" }, h("button", { class: "primary", onclick: () => answer(true) }, "Approve"), h("button", { onclick: () => answer(false) }, "Reject"));
+    const approveBtn = h("button", { class: "primary", disabled: true, onclick: () => answer(true) }, "Approve");
+    const opts = h("div", { class: "opts" }, approveBtn, h("button", { onclick: () => answer(false) }, "Reject"));
     const card = h(
       "div",
       { class: "perm delegation" },
       h("div", { class: "q" }, h("b", {}, "New session requested")),
       h("dl", { class: "fields" }, field("Name", name), field("Agent", agent || "default"), field("Model", model || "inherited"), field("Folder", cwd)),
       h("div", { class: "task" }, task),
+      promptSlot,
       opts,
     );
+    api
+      .getSettings()
+      .then((s) => {
+        editor = PromptEditor.createPromptEditor({ defaultPart: s.promptDefault ?? "", childPart: s.promptChild ?? s.childPartDefault ?? "", templates: s.promptTemplates ?? [], own: "", h });
+        promptSlot.replaceChildren(editor.el);
+      })
+      .catch((e) => promptSlot.replaceChildren(h("p", { class: "hint" }, `Could not read the prompt parts (${e.message}). Approve starts the session without an own part.`)))
+      .finally(() => (approveBtn.disabled = false));
     this.append(card);
     this.openCard(card);
   }
@@ -2294,9 +2317,50 @@ class SessionView {
       }
     } catch (e) {
       failure = e;
-      await api.closeSession(this.sessionId).catch(() => {}); // closed for sure: the reopen replays it unchanged
     }
-    await reopenView(this, failure && `Could not change the context window: ${failure.message}`);
+    await this.restarted(failure, "the context window");
+  }
+
+  /** Main closed the session for a restart (a new context window or prompt), or failed while doing it: the reopen
+   *  replays it, with the failure as an error. */
+  async restarted(failure, what) {
+    if (failure) await api.closeSession(this.sessionId).catch(() => {}); // closed for sure: the reopen replays it unchanged
+    await reopenView(this, failure && `Could not change ${what}: ${failure.message}`);
+  }
+
+  /** The header's Prompt button: the session's own part in the prompt dialog; "Save and restart" restarts Copilot
+   *  with the new text (main closes the session, the reopen replays it). A refusal keeps the dialog open with the
+   *  text; an unchanged text closes it and restarts nothing. */
+  async editPrompt() {
+    if (this.busy || this.dead || this.deleting || $("#prompt-dialog").open) return;
+    let p, s;
+    try {
+      [p, s] = await Promise.all([api.getPrompt(this.sessionId), api.getSettings()]);
+    } catch (e) {
+      return this.error(`Could not read this session's prompt: ${e.message}`);
+    }
+    if (this.dead || this.deleting || views.get(this.sessionId) !== this) return;
+    const editor = PromptEditor.createPromptEditor({ defaultPart: p.defaultPart, childPart: p.isChild ? p.childPart : null, templates: s.promptTemplates ?? [], own: p.own, h });
+    let restart = false;
+    let failure = null;
+    const onOk = async (own) => {
+      if (this.dead || this.deleting || views.get(this.sessionId) !== this) return "This session is no longer open here. Open its prompt again.";
+      if (this.busy) return "Wait until Copilot finishes this turn.";
+      this.setBusy(true); // nothing starts a turn while main closes the session
+      this.statusEl.textContent = "Restarting Copilot with the new prompt…";
+      try {
+        const res = await api.setPrompt(this.sessionId, own);
+        if (res?.reopen) return void (restart = true);
+        this.setBusy(false); // refused or unchanged: nothing was closed
+        return res?.refused || undefined;
+      } catch (e) {
+        failure = e; // main may have closed it: the reopen below shows the failure
+        restart = true;
+      }
+    };
+    const title = `Prompt: ${this.titleEl.textContent || this.cwd}`;
+    await PromptEditor.openPromptDialog({ title, okLabel: "Save and restart", note: RESTART_NOTE, editor, onOk });
+    if (restart) await this.restarted(failure, "the prompt");
   }
 
   setConfig(configOptions) {
@@ -2745,7 +2809,7 @@ async function openSession(s, { activate: show = true } = {}) {
 }
 
 /** A new session in cwd (picked when not given): the prompt editor asks for its own prompt part first; Cancel
- *  starts nothing. */
+ *  starts nothing, a start that fails keeps the dialog open with the text and says why. */
 async function newSession(cwd) {
   try {
     if ($("#prompt-dialog").open) return; // one editor at a time
@@ -2753,11 +2817,18 @@ async function newSession(cwd) {
     if (!cwd) return;
     const s = await api.getSettings();
     const editor = PromptEditor.createPromptEditor({ defaultPart: s.promptDefault ?? "", childPart: null, templates: s.promptTemplates ?? [], own: "", h });
-    const own = await PromptEditor.openPromptDialog({ title: `New session in ${cwd}`, okLabel: "Start", editor });
-    if (own == null) return;
-    setStatus(`Starting Copilot in ${cwd}…`);
-    const res = await api.newSession(cwd, own);
-    setStatus("");
+    let res = null;
+    const onOk = async (own) => {
+      setStatus(`Starting Copilot in ${cwd}…`);
+      try {
+        res = await api.newSession(cwd, own);
+      } catch (e) {
+        return `Could not start the session: ${e.message}`;
+      } finally {
+        setStatus("");
+      }
+    };
+    if ((await PromptEditor.openPromptDialog({ title: `New session in ${cwd}`, okLabel: "Start", editor, onOk })) == null) return;
     const v = new SessionView({ sessionId: res.sessionId, cwd, title: "" });
     views.set(res.sessionId, v);
     flushEarly(v);
@@ -3448,9 +3519,47 @@ async function openSettings() {
   brokerRepoDefault = s.brokerRepoDefault;
   $("#set-broker-repo").value = s.brokerRepo || s.brokerRepoDefault;
   $("#set-broker-repo").placeholder = s.brokerRepoDefault;
+  renderPromptSettings(s);
   renderBroker(await api.brokerStatus().catch(() => null));
   $("#settings").showModal();
 }
+// "Prompts" section: the default part, the child part (childDefault: it shows the built-in text and is saved as
+// none, so a later version's text reaches it), and one row per template (the id stays with its row)
+let childPartDefault = "";
+let childDefault = true;
+function renderPromptSettings(s) {
+  childPartDefault = s.childPartDefault ?? "";
+  $("#set-prompt-default").value = s.promptDefault ?? "";
+  setChildPart(s.promptChild ?? childPartDefault, s.promptChild == null);
+  $("#set-templates").replaceChildren(...(s.promptTemplates ?? []).map(templateRow));
+  $("#set-prompt-note").textContent = SETTINGS_NOTE;
+}
+function setChildPart(text, isDefault) {
+  $("#set-prompt-child").value = text;
+  childDefault = isDefault;
+  $("#set-prompt-child-restore").disabled = isDefault;
+}
+function templateRow({ id, name, text }) {
+  const row = h(
+    "div",
+    { class: "tpl-row" },
+    h("input", { class: "tpl-name", spellcheck: "false", placeholder: "Name", "aria-label": "Template name" }),
+    h("button", { type: "button", class: "tpl-delete danger", title: "Delete this template", onclick: () => row.remove() }, "Delete"),
+    h("textarea", { class: "tpl-text", rows: "3", spellcheck: "false", placeholder: "The text it puts into a session's own part", "aria-label": "Template text" }),
+  );
+  row._id = id;
+  row.querySelector(".tpl-name").value = name;
+  row.querySelector(".tpl-text").value = text;
+  return row;
+}
+const promptTemplatesOfForm = () => [...$("#set-templates").querySelectorAll(".tpl-row")].map((r) => ({ id: r._id, name: r.querySelector(".tpl-name").value, text: r.querySelector(".tpl-text").value }));
+$("#set-prompt-child").addEventListener("input", () => setChildPart($("#set-prompt-child").value, false));
+$("#set-prompt-child-restore").addEventListener("click", () => setChildPart(childPartDefault, true));
+$("#set-template-add").addEventListener("click", () => {
+  const row = templateRow({ id: crypto.randomUUID(), name: `Template ${$("#set-templates").childElementCount + 1}`, text: "" });
+  $("#set-templates").append(row);
+  row.querySelector(".tpl-name").select();
+});
 // "Relay broker" section: one row per step of the restart run, the summary, the button locked while it runs
 let brokerRepoDefault = "";
 function renderBroker(st) {
@@ -3510,7 +3619,17 @@ $("#store-clear").addEventListener("click", async (e) => {
 
 $("#settings").addEventListener("close", async () => {
   if ($("#settings").returnValue !== "save") return;
-  await api.setSettings({ copilotCommand: $("#set-command").value, relay: $("#set-relay").checked, contextTier: $("#set-context").value, queueMidTurn: $("#set-queue").checked, activityPanel: $("#set-activity").value, brokerRepo: $("#set-broker-repo").value.trim() === brokerRepoDefault ? "" : $("#set-broker-repo").value });
+  await api.setSettings({
+    copilotCommand: $("#set-command").value,
+    relay: $("#set-relay").checked,
+    contextTier: $("#set-context").value,
+    queueMidTurn: $("#set-queue").checked,
+    activityPanel: $("#set-activity").value,
+    brokerRepo: $("#set-broker-repo").value.trim() === brokerRepoDefault ? "" : $("#set-broker-repo").value,
+    promptDefault: $("#set-prompt-default").value,
+    promptChild: childDefault ? null : $("#set-prompt-child").value, // null: back to the built-in text
+    promptTemplates: promptTemplatesOfForm(),
+  });
   queueMidTurn = $("#set-queue").checked;
   activityPanel = $("#set-activity").value;
   for (const v of views.values()) v.settingChanged();

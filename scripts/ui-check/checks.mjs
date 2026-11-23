@@ -14,6 +14,10 @@ import { REMINDER } from "../../electron/delegation.mjs";
 import { gitIn } from "../../electron/test/git-helper.mjs";
 import { launch, until } from "./driver.mjs";
 
+// the notes of the prompt editor in a running session and of Settings (global constraints: RESTART_NOTE, SETTINGS_NOTE)
+const RESTART_NOTE = "Saving restarts this session's Copilot. The history stays.";
+const SETTINGS_NOTE = "Changes here reach a running session the next time its Copilot starts.";
+
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const FIXTURES = path.join(ROOT, "electron", "test", "fixtures", "acp");
 export const PANEL_SCENARIO = path.join(FIXTURES, "panel-scenario.mjs");
@@ -51,6 +55,7 @@ const SPLIT_SCENARIO = path.join(FIXTURES, "tool-split-scenario.mjs");
 const CHANGES_SCENARIO = path.join(FIXTURES, "changes-scenario.mjs");
 const LINK_SCENARIO = path.join(FIXTURES, "link-scenario.mjs");
 const CHILD_PROMPT_SCENARIO = path.join(FIXTURES, "child-prompt-scenario.mjs");
+const PERMISSION_WAIT_SCENARIO = path.join(FIXTURES, "permission-wait-scenario.mjs");
 const PANEL_MODES = ["subagents", "all"];
 const savedMode = (app) => app.ev(`api.getSettings().then((s) => s.activityPanel)`);
 
@@ -2399,6 +2404,253 @@ export const checks = [
       await new Promise((r) => setTimeout(r, 500)); // a start would have written its entry by now
       assert.equal(starts().length, n, "no Copilot started");
       assert.equal(await app.ev(`views.size`), shown, "no view");
+    },
+  },
+  {
+    // a start that fails (a Copilot command that does not exist) keeps the new-session dialog open with the text and
+    // says why in it; Cancel then starts nothing
+    name: "new-session-start-error",
+    modes: ["off"],
+    settings: { copilotCommand: "/nonexistent/copilot-ui-check" },
+    async run(app) {
+      const work = path.join(app.dir, "work");
+      const D = `document.querySelector("#prompt-dialog")`;
+      const shown = await app.ev(`views.size`);
+      await app.ev(`(window.__newSession = newSession(${JSON.stringify(work)}), true)`);
+      await app.check(`${D}.open`, "the prompt dialog");
+      await app.ev(`(() => { const t = ${D}.querySelector(".pe-own"); t.value = "Keep me."; t.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+      await app.ev(`document.querySelector("#prompt-ok").click()`);
+      await app.check(`${D}.querySelector("#prompt-note").textContent.startsWith("Could not start the session:")`, "the start error in the dialog");
+      assert.equal(await app.ev(`${D}.open`), true, "the dialog stays open");
+      assert.equal(await app.ev(`${D}.querySelector(".pe-own").value`), "Keep me.");
+      assert.equal(await app.ev(`document.querySelector("#prompt-ok").disabled`), false, "Start can be pressed again");
+      assert.equal(await app.ev(`${D}.querySelector("#prompt-note").classList.contains("err")`), true);
+      await app.ev(`document.querySelector("#prompt-cancel").click()`);
+      assert.equal(await app.ev(`window.__newSession.then(() => true)`, "newSession to return"), true);
+      assert.equal(await app.ev(`${D}.open`), false);
+      assert.equal(await app.ev(`views.size`), shown, "no view");
+    },
+  },
+  {
+    // the child's approval card carries the prompt editor between the task and the buttons: both Settings parts
+    // folded (the child one is the built-in text while Settings has none), and Approve starts the child with the text
+    // written on it (create_session through a real broker, as in child-prompt); Reject starts nothing
+    name: "child-card-prompt",
+    modes: ["off"],
+    scenario: CHILD_PROMPT_SCENARIO,
+    settings: { relay: true, promptDefault: "D", promptTemplates: [{ id: "t1", name: "Rev", text: "Review only." }] },
+    broker: true,
+    async run(app) {
+      await app.newSession();
+      const file = path.join(app.dir, "work", ".scripted-agent.json");
+      const starts = () => JSON.parse(readFileSync(file, "utf8")).starts ?? [];
+      const card = (i) => `${V}.el.querySelectorAll(".perm.delegation")[${i}]`;
+      await app.check(`(() => { const v = ${V}; return !!v?.relayName && !v.relayChip.hidden && !v.relayChip.classList.contains("off"); })()`, "the parent to connect to the broker");
+      await app.send("create_session kid Do-it");
+      await app.check(`!!${card(0)}?.querySelector(".prompt-editor") && !${card(0)}.querySelector(".opts button.primary").disabled`, "the editor on the card");
+      // task, editor, buttons in this order
+      const order = await app.ev(`[...${card(0)}.children].map((e) => (e.querySelector(".prompt-editor") ? "editor" : e.className))`);
+      assert.ok(order.indexOf("task") >= 0 && order.indexOf("task") < order.indexOf("editor") && order.indexOf("editor") < order.indexOf("opts"), JSON.stringify(order));
+      const folds = await app.ev(`[...${card(0)}.querySelectorAll("details")].map((d) => [d.querySelector("summary").textContent, d.querySelector("pre")?.textContent ?? null])`);
+      assert.deepEqual(folds, [["Default (from Settings)", "D"], ["Working with the parent (from Settings)", CHILD_PART]]);
+      assert.deepEqual(await app.ev(`[...${card(0)}.querySelectorAll(".pe-template option")].map((o) => o.textContent)`), ["— none —", "Rev"]);
+      await app.ev(`(() => { const t = ${card(0)}.querySelector(".pe-own"); t.value = "K1"; t.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+      await app.ev(`${card(0)}.querySelector(".opts button.primary").click()`);
+      await app.check(`${card(0)}.classList.contains("done")`, "the card to be answered");
+      assert.match(await app.ev(`${card(0)}.querySelector(".opts").textContent`), /Approved/);
+      assert.equal(await app.ev(`${card(0)}.querySelector(".pe-own").disabled`), true, "an answered card's text is no longer editable");
+      await app.check(`!!views.get("scripted-work-2")`, "the child's view");
+      // the parent's and the child's processes share the folder's file, the last one to write it wins: the child's
+      // start is checked once it is there
+      const childStart = JSON.stringify([`D\n\n${CHILD_PART}\n\nK1`]);
+      await until(async () => starts().some((st) => JSON.stringify(st.instructions) === childStart), "the child's start with the card's text");
+      await app.idle();
+      // Reject: nothing starts, whatever the card holds
+      await app.send("create_session kid2 Never");
+      await app.check(`!!${card(1)}?.querySelector(".prompt-editor") && !${card(1)}.querySelector(".opts button.primary").disabled`, "the second card's editor");
+      await app.ev(`${card(1)}.querySelector(".pe-own").value = "Never."`);
+      await app.ev(`[...${card(1)}.querySelectorAll(".opts button")].find((b) => b.textContent === "Reject").click()`);
+      await app.check(`${card(1)}.classList.contains("done")`, "the second card to be answered");
+      assert.match(await app.ev(`${card(1)}.querySelector(".opts").textContent`), /Rejected/);
+      await app.idle();
+      await new Promise((r) => setTimeout(r, 500)); // a child would have been created by now
+      assert.equal(await app.ev(`views.has("scripted-work-3")`), false, "no child for the rejected request");
+      assert.ok(!JSON.stringify(starts()).includes("Never."), "nothing started with the rejected card's text");
+    },
+  },
+  {
+    // the header's Prompt button: the dialog holds the stored own part, says that saving restarts Copilot, and "Save
+    // and restart" reopens the session with the new text; the button follows the busy state; a refusal (main's, or a
+    // turn the view started meanwhile) keeps the dialog open with the text. A UUID: main takes only those. Every
+    // prompt of the scenario waits for its permission, so a turn runs until the check answers it.
+    name: "session-prompt-edit",
+    modes: ["off"],
+    scenario: PERMISSION_WAIT_SCENARIO,
+    sessionId: HISTORY_ID,
+    settings: { promptDefault: "D" },
+    async run(app) {
+      const id = JSON.stringify(HISTORY_ID);
+      const V = `views.get(${id})`;
+      const work = path.join(app.dir, "work");
+      const starts = () => JSON.parse(readFileSync(path.join(work, ".scripted-agent.json"), "utf8")).starts ?? [];
+      const D = `document.querySelector("#prompt-dialog")`;
+      const btn = `${V}.el.querySelector(".head .prompt-btn")`;
+      const note = () => app.ev(`(() => { const n = ${D}.querySelector("#prompt-note"); return n.hidden ? null : n.textContent; })()`);
+      const own = () => app.ev(`${D}.querySelector(".pe-own").value`);
+      const setOwn = (text) => app.ev(`(() => { const t = ${D}.querySelector(".pe-own"); t.value = ${JSON.stringify(text)}; t.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+      const openDialog = async () => {
+        await app.ev(`${btn}.click()`);
+        await app.check(`${D}.open && !!${D}.querySelector(".pe-own")`, "the prompt dialog");
+      };
+      const ok = () => app.ev(`document.querySelector("#prompt-ok").click()`);
+      const cancel = async () => {
+        await app.ev(`document.querySelector("#prompt-cancel").click()`);
+        await app.check(`!${D}.open`, "the dialog to close");
+      };
+      const userMessages = () => app.ev(`${V}.log.querySelectorAll(":scope > .msg.user").length`);
+      const WAIT = "Wait until Copilot finishes this turn.";
+
+      await app.newSession({ own: "O1" });
+      await app.send("First.");
+      await app.answerPermission();
+      await app.idle();
+      assert.equal(await app.ev(`${btn}.textContent`), "Prompt");
+      assert.equal(await app.ev(`${btn}.disabled`), false);
+      // 1. the dialog: the stored own part, the restart note, "Save and restart"; a top-level session has no child fold
+      await openDialog();
+      assert.equal(await own(), "O1");
+      assert.equal(await note(), RESTART_NOTE);
+      assert.equal(await app.ev(`document.querySelector("#prompt-ok").textContent`), "Save and restart");
+      assert.deepEqual(await app.ev(`[...${D}.querySelectorAll("details summary")].map((s) => s.textContent)`), ["Default (from Settings)"]);
+      // 2. main refuses (it runs a turn the view did not start: the api is frozen, so main is made to refuse for
+      // real): the dialog stays open with the text and shows why; nothing restarts, the view is idle again
+      const n = starts().length;
+      await app.ev(`(window.__turn = api.prompt(${id}, "Second.", "app"), true)`);
+      await app.check(`!!${V}.el.querySelector(".perm:not(.done)")`, "main's turn to wait for its permission");
+      assert.equal(await app.ev(`${V}.busy`), false, "the view itself is idle");
+      await setOwn("O2");
+      await ok();
+      await app.check(`${D}.querySelector("#prompt-note").textContent === ${JSON.stringify(WAIT)}`, "main's refusal in the dialog");
+      assert.equal(await app.ev(`${D}.open`), true, "the dialog stays open");
+      assert.equal(await own(), "O2", "the text is kept");
+      assert.equal(await app.ev(`${D}.querySelector("#prompt-note").classList.contains("err")`), true);
+      assert.equal(await app.ev(`document.querySelector("#prompt-ok").disabled`), false);
+      assert.equal(await app.ev(`${V}.busy`), false, "the view is idle again");
+      await cancel();
+      await app.answerPermission();
+      await app.ev(`window.__turn`, "main's turn to end");
+      await app.idle();
+      // 3. a turn the view starts while the dialog is open: refused in the page, the text kept
+      await openDialog();
+      assert.equal(await note(), RESTART_NOTE, "a new dialog shows the note again");
+      await setOwn("O2");
+      await app.ev(`(() => { const v = ${V}; v.input.value = "Third."; v.input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); })()`);
+      await app.check(`${V}.busy && !!${V}.el.querySelector(".perm:not(.done)")`, "the view's turn to wait for its permission");
+      await ok();
+      await app.check(`${D}.querySelector("#prompt-note").textContent === ${JSON.stringify(WAIT)}`, "the busy refusal");
+      assert.equal(await app.ev(`${D}.open`), true);
+      assert.equal(await own(), "O2");
+      await cancel();
+      // 4. the button is disabled while the view is busy
+      assert.equal(await app.ev(`${btn}.disabled`), true, "disabled during the turn");
+      await app.answerPermission();
+      await app.idle();
+      assert.equal(await app.ev(`${btn}.disabled`), false, "enabled again after the turn");
+      assert.equal(starts().length, n, "nothing restarted so far");
+      // 5. an unchanged text: the dialog closes, nothing restarts
+      await openDialog();
+      assert.equal(await own(), "O1", "a new dialog shows the stored text");
+      await ok();
+      await app.check(`!${D}.open`, "the dialog to close");
+      assert.equal(await app.ev(`${V}.busy`), false);
+      assert.equal(starts().length, n);
+      // 6. a new text: Save and restart reopens the session with it, the chat replayed
+      await openDialog();
+      await setOwn("O3");
+      await ok();
+      await app.check(`!${D}.open`, "the dialog to close");
+      await until(async () => starts().length === n + 1, "a new start");
+      assert.deepEqual(starts().at(-1).instructions, ["D\n\nO3"]);
+      await app.idle();
+      assert.equal(await app.ev(`${V}.dead`), false);
+      // the three turns, main's one included (live it had no bubble: the view did not send it)
+      assert.equal(await userMessages(), 3, "the reopened chat keeps its turns");
+      assert.equal(await app.ev(`${btn}.disabled`), false);
+      assert.equal(await app.ev(`api.getPrompt(${id}).then((p) => p.own)`), "O3");
+    },
+  },
+  {
+    // the Settings "Prompts" section: the default part, the child part with "Restore default" (the built-in text,
+    // stored as no key), the templates (add, rename, edit, delete); a relaunch with the same folder shows them again
+    name: "settings-prompts",
+    modes: ["off"],
+    async run(app) {
+      const S = `document.querySelector("#settings")`;
+      const file = path.join(app.dir, "config", "copilot-relay-desktop", "settings.json");
+      const onDisk = () => JSON.parse(readFileSync(file, "utf8"));
+      const type = (sel, text) => app.ev(`(() => { const t = document.querySelector(${JSON.stringify(sel)}); t.value = ${JSON.stringify(text)}; t.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+      const rows = `[...document.querySelectorAll("#set-templates .tpl-row")]`;
+      const typeRow = (i, sel, text) => app.ev(`(() => { const t = ${rows}[${i}].querySelector(${JSON.stringify(sel)}); t.value = ${JSON.stringify(text)}; t.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+      const openSettings = async (a = app) => {
+        await a.ev(`document.querySelector("#btn-settings").click()`);
+        await a.check(`${S}.open`, "the Settings dialog");
+      };
+      const save = async () => {
+        await app.ev(`document.querySelector("#set-save").click()`);
+        await app.check(`!${S}.open`, "the Settings dialog to close");
+      };
+
+      await openSettings();
+      assert.ok(await app.ev(`${S}.textContent.includes(${JSON.stringify(SETTINGS_NOTE)})`), "the note under the fields");
+      assert.equal(await app.ev(`document.querySelector("#set-prompt-default").value`), "");
+      assert.equal(await app.ev(`document.querySelector("#set-prompt-child").value`), CHILD_PART);
+      assert.equal(await app.ev(`document.querySelector("#set-prompt-child-restore").disabled`), true, "nothing to restore");
+      await type("#set-prompt-default", "DEF");
+      await type("#set-prompt-child", "CH");
+      assert.equal(await app.ev(`document.querySelector("#set-prompt-child-restore").disabled`), false);
+      await app.ev(`document.querySelector("#set-prompt-child-restore").click()`);
+      assert.equal(await app.ev(`document.querySelector("#set-prompt-child").value`), CHILD_PART);
+      // two templates: the first renamed, the second deleted
+      await app.ev(`document.querySelector("#set-template-add").click()`);
+      await app.ev(`document.querySelector("#set-template-add").click()`);
+      assert.equal(await app.ev(`${rows}.length`), 2);
+      await typeRow(0, ".tpl-name", "First");
+      await typeRow(0, ".tpl-text", "T1");
+      await typeRow(1, ".tpl-name", "Second");
+      await typeRow(1, ".tpl-text", "T2");
+      await typeRow(0, ".tpl-name", "Renamed");
+      await app.ev(`${rows}[1].querySelector(".tpl-delete").click()`);
+      assert.equal(await app.ev(`${rows}.length`), 1);
+      await save();
+      await app.check(`api.getSettings().then((s) => s.promptDefault === "DEF")`, "the Settings to be saved");
+      const s = await app.ev(`api.getSettings()`);
+      assert.equal(s.promptDefault, "DEF");
+      assert.equal(s.promptChild, null);
+      assert.equal("promptChild" in onDisk(), false, "Restore default stores no key");
+      assert.equal(s.promptTemplates.length, 1);
+      assert.deepEqual({ name: s.promptTemplates[0].name, text: s.promptTemplates[0].text }, { name: "Renamed", text: "T1" });
+      assert.match(s.promptTemplates[0].id, /^[0-9a-f-]{36}$/);
+      // an emptied child part is stored as "" (no child part), and a save that changes nothing keeps everything
+      await openSettings();
+      await type("#set-prompt-child", "");
+      await save();
+      await until(async () => onDisk().promptChild === "", "the emptied child part to be saved");
+      await openSettings();
+      assert.equal(await app.ev(`document.querySelector("#set-prompt-child").value`), "");
+      await save();
+      assert.deepEqual(await app.ev(`api.getSettings().then((s) => [s.promptDefault, s.promptChild, s.promptTemplates])`), ["DEF", "", s.promptTemplates]);
+      // a relaunch with the same folder reads them back, in the page and in the form
+      await app.close({ keep: true });
+      const again = await launch({ scenario: PANEL_SCENARIO, dir: app.dir });
+      try {
+        assert.deepEqual(await again.ev(`api.getSettings().then((s) => [s.promptDefault, s.promptChild, s.promptTemplates])`), ["DEF", "", s.promptTemplates]);
+        await openSettings(again);
+        assert.equal(await again.ev(`document.querySelector("#set-prompt-default").value`), "DEF");
+        assert.equal(await again.ev(`document.querySelector("#set-prompt-child").value`), "");
+        assert.deepEqual(await again.ev(`${rows}.map((r) => [r.querySelector(".tpl-name").value, r.querySelector(".tpl-text").value])`), [["Renamed", "T1"]]);
+      } finally {
+        await again.close();
+      }
     },
   },
 ];

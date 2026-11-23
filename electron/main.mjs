@@ -21,7 +21,7 @@ import { listAllPages } from "./session-list.mjs";
 import { beginPrompt, endPrompt } from "./prompt-count.mjs";
 import { normalizePanelMode } from "./activity-panel.mjs";
 import { createTierStore, effectiveTier, normalizeTier, saveAndReopen, switchTier, tierArgs, withContextOption } from "./context-tier.mjs";
-import { CHILD_PART, clearPromptDirs, composePrompt, createPromptStore, effectiveChildPart, instructionsEnv, normalizeTemplates, writePromptDir } from "./session-prompts.mjs";
+import { CHILD_PART, applyPromptSettings, clearPromptDirs, composePrompt, createPromptStore, effectiveChildPart, instructionsEnv, normalizeTemplates, writePromptDir } from "./session-prompts.mjs";
 import { createRestarter, realEffects, reconnectClients } from "./broker-restart.mjs";
 import { runProgram } from "./run-program.mjs";
 import { createGit } from "./repo-git.mjs";
@@ -1255,13 +1255,7 @@ handle("settings:get", async () => ({
 handle("settings:set", async (s) => {
   const next = { ...loadSettings(), copilotCommand: String(s.copilotCommand ?? "").trim(), relay: s.relay !== false, contextTier: normalizeTier(s.contextTier) ?? "default", queueMidTurn: s.queueMidTurn === true, activityPanel: normalizePanelMode(s.activityPanel), brokerRepo: String(s.brokerRepo ?? "").trim() };
   // the prompt parts only when sent (a form without them keeps them); promptChild null: back to the built-in text
-  if ("promptDefault" in s) next.promptDefault = String(s.promptDefault ?? "");
-  if ("promptChild" in s) {
-    if (s.promptChild === null) delete next.promptChild;
-    else next.promptChild = String(s.promptChild);
-  }
-  if ("promptTemplates" in s) next.promptTemplates = normalizeTemplates(s.promptTemplates);
-  saveSettings(next);
+  saveSettings(applyPromptSettings(next, s));
   lister?.kill();
   lister = null;
   return true;
