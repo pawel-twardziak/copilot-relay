@@ -176,10 +176,16 @@ With a shell the start itself no longer fails for a missing program (`ENOENT`); 
   seconds for the whole setup). When it passes, the process group is killed and the start fails with "… did not
   answer within 60 seconds" and the same "where it is set" text. Loading the history (`session/load`) gets no
   deadline: it is long for a long session.
-- **A delegated child that fails to start** has no view and no stored command yet. Its error names a third source:
-  "the command from the child's approval card, which starts as the parent session's command", with the remedy
-  "change it on the next card, or in the parent's Setup". It reaches the parent through
-  `tellParent`, as every failed child start does today.
+- **A delegated child whose Copilot does not start** has no view and no stored command yet. Its error names a
+  third source, "the command from the child's approval card", with the remedy "change it on the card and approve
+  again, or reject the request", and is shown on the card itself, which stays open: its fields and both buttons
+  are usable again, the request stays pending in the main process, and the parent is told nothing (the text holds
+  the command line, which so never travels to the broker or the parent's model). A second Approve tries again;
+  Reject tells the parent of the rejection. A parent that went away meanwhile ends the request. Failures after
+  the child's Copilot started (an agent or model it does not offer, no connection to the broker) end the request
+  as before: the child is discarded, the parent is told, and the card shows "Not created: …". (Changed after
+  v0.25.0, asked by the user: before, every failed start went to the parent through `tellParent` and the card
+  showed "→ Approved".)
 
 ## 5. Where the command is kept and used
 
@@ -237,7 +243,8 @@ New session in /home/you/project
   there is nothing to close; the view reopens with them. This is what makes a broken command repairable. It stays
   off while the session is being deleted, is opening, or has a turn running.
 - The card that approves a delegated child has the same command field in its prompt editor (section 5); it is
-  disabled once the card is answered.
+  disabled once the card is answered. After a start that failed the card is not answered: it shows the reason
+  above its buttons and takes another command (section 4).
 - On Windows the field's hint, and the Settings hint, add: "On Windows only double quotes ("…") group an
   argument." (added after v0.24.0).
 

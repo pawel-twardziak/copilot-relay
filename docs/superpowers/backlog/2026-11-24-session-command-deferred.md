@@ -39,7 +39,9 @@ with unchanged values did nothing, stale preload comments and formatting slips.
    *Proposal:* tell the connection that a stop is meant before `session/close` is sent (a `stopping()` that makes
    the exit handler take the group path), then check with the real Copilot.
 
-4. **A failed child start sends the parent's command line to the broker and to the parent's model**
+4. **Done in `feat/child-card-retry`** (the text of a failed start goes to the child's approval card only, and
+   the parent is told nothing until the card is approved or rejected). It was: **a failed child start sends the
+   parent's command line to the broker and to the parent's model**
    (`electron/main.mjs`, `createChild`'s catch, `tellParent(req, "failed", … friendly(e))`; the text is
    `startFailureText` in `electron/copilot-command.mjs`). The spec asks for the quoted command, and the spec also
    names `FOO=1 copilot` as the way to set a variable, so a token written that way travels in the text. A setup

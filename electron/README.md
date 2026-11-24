@@ -194,7 +194,9 @@ an ordinary session: it appears in the list, you can open it, read what it did, 
   command** field (it starts with the parent's command; see "A command per session"), with **Approve** and **Reject**.
   **Every creation needs your click**: there is no "always allow", and no model or message can answer the card. The
   parent is marked `!` in the list, and an OS notification fires if the window is not focused. The tool returns at
-  once; the outcome arrives later as a message from `relay`, so the parent can keep working.
+  once; the outcome arrives later as a message from `relay`, so the parent can keep working. If the child's Copilot
+  does not start (a mistyped command, say), the card says why and stays open: change the command and **Approve**
+  again, or **Reject**. The parent hears nothing until then.
 - **The child** gets only its task, not the parent's history, so the parent has to put the context it needs in the
   task. If `model` is left out, the child uses the parent's current model. If `agent` is left out, it uses the
   default Copilot agent; the parent's agent is not inherited. A model or agent the session doesn't offer creates no
