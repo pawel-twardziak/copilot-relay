@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import path from "node:path";
+import { shellLine } from "../copilot-command.mjs";
 import {
   PendingRequests,
   answerFields,
@@ -270,4 +271,21 @@ test("createdText names another folder only", () => {
     createdText({ name: "kid", childCwd: "/a/", parentCwd: path.resolve("/a") }),
     'Session "kid" was created and has started on its task. It will send you its result with report_result.',
   );
+});
+
+test("cardStart never looks at a remote folder", () => {
+  const calls = [];
+  for (const folder of ["\\\\host\\share", "//host/share"]) {
+    const s = cardStart(req({ folder }), parentOf(), { isDir: (p) => (calls.push(p), true) });
+    assert.equal(s.cwd, "/work/parent");
+    assert.equal(s.from.cwd, false);
+    assert.equal(s.notes.cwd, `Asked for the folder "${folder}", which is not an existing absolute path.`);
+  }
+  assert.deepEqual(calls, []);
+});
+
+test("a quoted parent command keeps its quotes when arguments are appended", () => {
+  const line = shellLine("C:\\Program Files\\gh\\copilot.exe", [], { platform: "win32", isFile: () => true });
+  const s = cardStart(req({ command: "copilot --foo" }), parentOf({ command: line }), { isDir });
+  assert.equal(s.command, '"C:\\Program Files\\gh\\copilot.exe" --foo');
 });

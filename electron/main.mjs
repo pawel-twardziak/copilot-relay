@@ -10,7 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { AcpConnection } from "./acp.mjs";
-import { isNotFoundExit, normalizeCommand, resolveCommand, startFailureText } from "./copilot-command.mjs";
+import { isNotFoundExit, normalizeCommand, resolveCommand, shellLine, startFailureText } from "./copilot-command.mjs";
 import { countUserMessages, deleteSession, describeCut, forkSession, isSessionId, messageTimes, purgeDeleted, sessionCreatedAt, sessionDir, truncateSession } from "./history.mjs";
 import { createLastActivity } from "./last-activity.mjs";
 import { createUsagePusher } from "./usage.mjs";
@@ -907,7 +907,7 @@ function sessionRequested(parentSessionId, request) {
   const storedCommand = commands.get(parentSessionId) ?? "";
   const start = cardStart(
     req,
-    { cwd: parent.cwd, tier: sessionTier(parentSessionId), storedCommand, command: commandFor(parentSessionId).command, configOptions: parent.configOptions, name: parent.relay?.name },
+    { cwd: parent.cwd, tier: sessionTier(parentSessionId), storedCommand, command: shellLine(commandFor(parentSessionId).command, []), configOptions: parent.configOptions, name: parent.relay?.name },
     { isDir: isDirectory },
   );
   // cwd and command stay for the card that reads them; `start` is what the new card starts with
@@ -993,8 +993,9 @@ async function setConfigOption(sessionId, entry, configId, value) {
 /** Create the approved child and link it to its parent. Never throws; resolves to what the card is told:
  *  { outcome: "created" } or { outcome: "failed", text, retry }. With `retry` the child's Copilot never started, the
  *  parent has been told nothing and the request stays open; every other failure ends as an outcome for the parent.
- *  `command`: what the approval card's command field held ("" for the Settings command); a card without the field
- *  (undefined) gives the parent's stored command, which is also what the field starts with. */
+ *  `command`: what the approval card's command field held ("" for the Settings command); without one (undefined,
+ *  e.g. an older window) the parent's stored command is used. `fields`: { cwd, tier, agent, model } from the card,
+ *  already normalised by `answerFields`; the child starts in that folder and tier and gets that agent and model. */
 async function createChild(req, own = "", command = undefined, fields) {
   const { parentSessionId, name, task } = req;
   const parent = open.get(parentSessionId);

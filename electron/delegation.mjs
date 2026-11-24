@@ -2,6 +2,7 @@
 import path from "node:path";
 import { childCommandArgs } from "./child-command.mjs";
 import { normalizeTier } from "./context-tier.mjs";
+import { isRemote } from "./file-access.mjs";
 
 const isChild = (e) => Boolean(e?.parentSessionId);
 
@@ -63,7 +64,8 @@ export function cardStart(request, parent, { isDir }) {
   let cwd = parent.cwd;
   const folder = str(request.folder);
   if (folder) {
-    if (path.isAbsolute(folder) && isDir(folder)) {
+    // a UNC path is never looked at: Windows would contact that host before the user approved anything
+    if (!isRemote(folder) && path.isAbsolute(folder) && isDir(folder)) {
       cwd = path.resolve(folder);
       from.cwd = true;
     } else {
