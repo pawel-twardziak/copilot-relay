@@ -179,7 +179,8 @@ export class RelayClient {
     const r = await this.#fetch("/api/links");
     if (!r.ok) throw new Error(`broker answered ${r.status}`);
     const body = await r.json();
-    return { links: body.links, held: body.held && typeof body.held === "object" ? body.held : {} };
+    const obj = (v) => (v && typeof v === "object" && !Array.isArray(v) ? v : {});
+    return { links: body.links, held: obj(body.held), heldByKind: obj(body.heldByKind) };
   }
 
   #fetch(p, init) {

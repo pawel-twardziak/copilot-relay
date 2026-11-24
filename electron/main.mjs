@@ -17,7 +17,7 @@ import { createUsagePusher } from "./usage.mjs";
 import { JobScheduler } from "./scheduler.mjs";
 import { scheduleInfo } from "./jobs.mjs";
 import { PendingRequests, childPrompt, findModelOption, isRelayTool, linkCardOf, reloadWarning, resolveConfig, unreportedChildren, withDeadline } from "./delegation.mjs";
-import { createHeldCache, createHoldStore } from "./held-replies.mjs";
+import { createHeldCache, createHoldStore, HELD_KINDS, heldKind } from "./held-replies.mjs";
 import { readLinksCache, writeLinksCache } from "./links-cache.mjs";
 import { listAllPages } from "./session-list.mjs";
 import { beginPrompt, endPrompt } from "./prompt-count.mjs";
@@ -91,6 +91,7 @@ const settingsCommand = () => resolveCommand({ settings: loadSettings().copilotC
 const tiers = createTierStore(path.join(app.getPath("userData"), "context-tiers.json"));
 const holds = createHoldStore(path.join(app.getPath("userData"), "held-replies.json"));
 const heldCache = createHeldCache();
+const HELD_NOTICE = { child: "A sub-session replied", parent: "Your parent session sent a message", other: "Another session sent a message" };
 const sessionTier = (sessionId) => effectiveTier(tiers.get(sessionId), loadSettings().contextTier);
 /** The config options as the window gets them: Copilot's own plus the Context select. */
 const viewConfig = (sessionId, configOptions) => withContextOption(configOptions, tiers.get(sessionId), loadSettings().contextTier);
@@ -173,11 +174,14 @@ function relayStart(sessionId, cwd, { cfg, alias }, { name, parentKey } = {}) {
     // `human` is set by the broker (true only for messages typed by a person in the relay GUI), not by the sender's name
     // human: true/false from this broker, undefined from an older one (the renderer then falls back to the sender name)
     onMessage: (m) => {
-      // fromChild is set by the broker when a direct child sent it; such a message waits for the user's approval
-      const payload = { sessionId, from: m.from, human: m.human, text: m.text, prompt: m.prompt, fromCwd: m.fromCwd, deliveryId: m.deliveryId, wake: m.wake, fromChild: m.fromChild === true, arrivedAt: Date.now() };
+      // fromChild / heldAs are set by the broker: such a message waits for the user's approval
+      const payload = { sessionId, from: m.from, human: m.human, text: m.text, prompt: m.prompt, fromCwd: m.fromCwd, deliveryId: m.deliveryId, wake: m.wake, fromChild: m.fromChild === true, heldAs: m.heldAs, redelivered: m.redelivered === true, arrivedAt: Date.now() };
       send("relay:message", payload);
-      // cached whatever the switch says; the notification is only for a reply that really waits
-      if (payload.fromChild && m.deliveryId && heldCache.add(sessionId, payload) && holds.get(sessionId)) notifyIfUnfocused("A sub-session replied", `${m.from} → ${client.name}`);
+      // cached whatever the switch says; the notification is only for a message that really waits (none for a person's)
+      const kind = heldKind(payload);
+      if (kind && m.deliveryId && heldCache.add(sessionId, payload) && holds.get(sessionId)[kind] && HELD_NOTICE[kind]) {
+        notifyIfUnfocused(HELD_NOTICE[kind], `${m.from} → ${client.name}`);
+      }
     },
     onSessionRequest: (req) => sessionRequested(sessionId, req),
     onReported: () => {
@@ -258,7 +262,8 @@ async function brokerGetLinks(url) {
   const r = await fetch(`${url}/api/links`);
   if (!r.ok) throw new Error(`broker answered ${r.status}`);
   const body = await r.json();
-  return { links: body.links, held: body.held && typeof body.held === "object" ? body.held : {} };
+  const obj = (v) => (v && typeof v === "object" && !Array.isArray(v) ? v : {});
+  return { links: body.links, held: obj(body.held), heldByKind: obj(body.heldByKind) };
 }
 
 /** POST to the broker without an open session (forget / missing take `cli:` keys); throws readable text. */
@@ -557,7 +562,7 @@ async function resumeSession(sessionId, cwd) {
     // after a window reload the view is new: show the reopen and link cards it had again (a live view ignores known ids)
     for (const card of reopenCards.values()) if (card.sessionId === sessionId) send("reopen:request", card);
     for (const card of linkCards.values()) if (card.sessionId === sessionId) send("link:request", card);
-    for (const m of heldCache.list(sessionId)) send("relay:message", m);
+    for (const m of heldCache.list(sessionId)) send("relay:message", { ...m, replayed: true });
     return { sessionId, cwd, configOptions: null, alreadyOpen: true };
   }
   refuseWhileDeleting(sessionId);
@@ -1059,7 +1064,10 @@ const checkedSessionId = (sessionId) => {
   return sessionId;
 };
 handle("held:get", (sessionId) => holds.get(checkedSessionId(sessionId)));
-handle("held:set", (sessionId, on) => holds.set(checkedSessionId(sessionId), on !== false));
+handle("held:set", (sessionId, kind, on) => {
+  if (!HELD_KINDS.includes(kind)) throw new Error(`unknown held kind: ${kind}`);
+  holds.set(checkedSessionId(sessionId), kind, on !== false);
+});
 
 // ---------- history: fork / delete from a message ----------
 

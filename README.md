@@ -222,9 +222,14 @@ session, whether in a terminal (detected by the extension's `onUserPromptSubmitt
 Messages between a delegated session and its parent are charged to a separate pair budget (`maxAgentMessagesPerPair`,
 default 12), refilled by a human prompt in either of the two. `report_result` and relay notices are charged to nothing.
 
-In the desktop app, `report_result` and `send_message` from a delegated session to its parent are marked and kept by the
-broker until the app acknowledges them; the parent's chat holds them for the user's approval (Approve sends them to its
-queue, ✕ discards them; `GET /api/links` also answers `held`, the number of unacknowledged ones per parent). Update the
+In the desktop app, messages to an open app session are marked by the broker and kept (in `delegations.json`) until the
+app acknowledges them: a reply of a delegated session to its parent (`report_result`, `send_message`), an order from
+the parent, a `send_message` from any other session, and a message of the user (`POST /api/send`). The chat holds
+each kind in its own list for the user's approval (the user's own messages only while a turn is running; Approve
+sends it to the queue, ✕ discards it; the first task of a
+new sub-session is never held). `GET /api/links` also answers `held` (replies of children per parent) and
+`heldByKind` (per recipient key `cli:<sessionId>`, the unacknowledged `child`, `parent` and `other` messages; the
+user's own are never counted). Update the
 broker to this version with **Update and restart broker** in the app. See
 [Delegated sessions](electron/README.md#delegated-sessions).
 
@@ -244,8 +249,8 @@ broker to this version with **Update and restart broker** in the app. See
 | `POST /api/peer/send` / `rename` / `human`, `GET /api/peer/list` | extension calls |
 | `POST /api/peer/ack` `{ key, id }` | a stored report or notice has been taken: remove it from disk |
 | `POST /api/peer/delegation-outcome` `{ key, requestId, kind, name, text }` | desktop app: what became of a session request |
-| `GET /api/links` | the sub-session tree: `{ links, held }`, every link with name, task, reported/online/busy state; `held`: unacknowledged replies of children per parent key |
-| `POST /api/links/forget` `{ keys }` | desktop app: drop these `cli:` sessions from the tree (deleted in the app) |
+| `GET /api/links` | the sub-session tree: `{ links, held, heldByKind }`, every link with name, task, reported/online/busy state; `held`: unacknowledged replies of children per parent key; `heldByKind`: per recipient key, the unacknowledged `{ child, parent, other }` messages |
+| `POST /api/links/forget` `{ keys }` | desktop app: drop these `cli:` sessions from the tree and the messages kept for them (deleted in the app) |
 | `POST /api/links/missing` `{ keys }` | desktop app: these `cli:` sessions are gone from disk (logged by the broker) |
 | `POST /api/peer/task` `{ key, task }` | a delegated session's task, set once |
 | `POST /api/peer/state` `{ key, busy }` | whether the session is working |

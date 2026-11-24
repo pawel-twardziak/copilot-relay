@@ -1,10 +1,10 @@
 // The hold switch (per session, default on, only "off" stored) and the cache of held child replies.
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { createHeldCache, createHoldStore } from "../held-replies.mjs";
+import { createHeldCache, createHoldStore, HELD_KINDS, heldKind } from "../held-replies.mjs";
 
 const storeFile = (t) => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "held-replies-"));
@@ -13,29 +13,49 @@ const storeFile = (t) => {
 };
 const stored = (file) => JSON.parse(readFileSync(file, "utf8"));
 
-test("the hold switch is on by default and only off is stored", (t) => {
+test("every switch is on by default and only off is stored", (t) => {
   const file = storeFile(t);
   const s = createHoldStore(file);
-  assert.equal(s.get("a"), true);
-  s.set("a", false);
-  assert.equal(s.get("a"), false);
-  assert.deepEqual(stored(file), { a: false });
-  assert.equal(createHoldStore(file).get("a"), false);
-  s.set("a", true);
-  assert.equal(s.get("a"), true);
+  assert.deepEqual(s.get("a"), { child: true, parent: true, other: true, user: true });
+  s.set("a", "parent", false);
+  assert.deepEqual(s.get("a"), { child: true, parent: false, other: true, user: true });
+  assert.deepEqual(stored(file), { a: { parent: false } });
+  assert.deepEqual(createHoldStore(file).get("a"), { child: true, parent: false, other: true, user: true });
+  s.set("a", "parent", true);
   assert.deepEqual(stored(file), {});
-  assert.equal(createHoldStore(file).get("a"), true);
+  assert.throws(() => s.set("a", "nope", false));
 });
 
-test("the hold switch is copied on a fork and deleted with the session", (t) => {
+test("a file of v0.22 reads as child off, and child-only off is still written that way", (t) => {
+  const file = storeFile(t);
+  writeFileSync(file, JSON.stringify({ a: false }));
+  const s = createHoldStore(file);
+  assert.deepEqual(s.get("a"), { child: false, parent: true, other: true, user: true });
+  s.set("b", "child", false);
+  assert.deepEqual(stored(file), { a: false, b: false });
+  s.set("b", "user", false);
+  assert.deepEqual(stored(file).b, { child: false, user: false });
+});
+
+test("the switches are copied on a fork and deleted with the session", (t) => {
   const s = createHoldStore(storeFile(t));
-  s.set("a", false);
+  s.set("a", "child", false);
+  s.set("a", "other", false);
   s.copy("a", "b");
-  assert.equal(s.get("b"), false);
-  s.copy("c", "d"); // an on switch copies as nothing
-  assert.equal(s.get("d"), true);
+  assert.deepEqual(s.get("b"), { child: false, parent: true, other: false, user: true });
+  s.copy("c", "d"); // all on copies as nothing
+  assert.deepEqual(s.get("d"), { child: true, parent: true, other: true, user: true });
   s.delete("a");
-  assert.equal(s.get("a"), true);
+  assert.deepEqual(s.get("a"), { child: true, parent: true, other: true, user: true });
+});
+
+test("heldKind reads fromChild and heldAs", () => {
+  assert.equal(heldKind({ fromChild: true }), "child");
+  assert.equal(heldKind({ heldAs: "parent" }), "parent");
+  assert.equal(heldKind({ heldAs: "user" }), "user");
+  assert.equal(heldKind({ heldAs: "bogus" }), null);
+  assert.equal(heldKind({}), null);
+  assert.deepEqual(HELD_KINDS, ["child", "parent", "other", "user"]);
 });
 
 test("the held cache keeps marked messages per session in arrival order until acked", () => {

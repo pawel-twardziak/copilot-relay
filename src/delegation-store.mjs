@@ -150,6 +150,13 @@ export class DelegationStore {
     return Object.values(this.data.outbox).filter((i) => i.fromChild === true && !i.awaiting);
   }
 
+  /** Outbox items the app holds for the user: from a child (`fromChild`) or marked `parent` / `other`; not awaiting a reopen. */
+  heldItems() {
+    return Object.values(this.data.outbox).filter(
+      (i) => !i.awaiting && (i.fromChild === true || i.heldAs === "parent" || i.heldAs === "other"),
+    );
+  }
+
   awaitingFor(requestId) {
     return Object.values(this.data.outbox).filter((i) => i.awaiting === requestId);
   }

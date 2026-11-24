@@ -264,9 +264,10 @@ test("link-answer treats anything but approved === true as a rejection", () => {
   assert.equal(store.parentOf("cli:child"), "cli:parent");
 });
 
-test("GET /api/links answers links and held", () => {
-  const routes = linksRoutes({ delegation: { snapshot: () => [], heldCounts: () => ({ "cli:p": 2 }) }, log: () => {} });
+test("GET /api/links answers links, held and heldByKind", () => {
+  const byKind = { "cli:p": { child: 2, parent: 1, other: 0 } };
+  const routes = linksRoutes({ delegation: { snapshot: () => [], heldCounts: () => ({ "cli:p": 2 }), heldByKind: () => byKind }, log: () => {} });
   const r = routes["GET /api/links"]();
   assert.equal(r.status, 200);
-  assert.deepEqual(r.json, { links: [], held: { "cli:p": 2 } });
+  assert.deepEqual(r.json, { links: [], held: { "cli:p": 2 }, heldByKind: byKind });
 });

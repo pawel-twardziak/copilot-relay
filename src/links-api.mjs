@@ -15,7 +15,7 @@ export function linksRoutes({ delegation, log = console.log }) {
   const withKey = (fn) => (body = {}) => (isKey(body.key) ? fn(body) : bad("key required"));
 
   return {
-    "GET /api/links": () => ({ status: 200, json: { links: delegation.snapshot(), held: delegation.heldCounts() } }),
+    "GET /api/links": () => ({ status: 200, json: { links: delegation.snapshot(), held: delegation.heldCounts(), heldByKind: delegation.heldByKind() } }),
     "POST /api/links/forget": forgetKeys(null),
     "POST /api/links/missing": forgetKeys("missing"),
     "POST /api/peer/task": withKey(({ key, task }) =>

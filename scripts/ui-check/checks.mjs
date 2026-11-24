@@ -413,6 +413,142 @@ async function fpSelect(app, rel) {
   await app.check(`${fpRow(rel)}.classList.contains("active") && !!${FP}.querySelector(".fp-diff .dv, .fp-diff .fp-msg")`, `the diff of ${rel}`);
 }
 
+/** held-typed: your own messages typed during a turn wait in the "Your messages" list (the switch on); the same run with
+ *  the queue setting off and on, as Send works during a turn in both. Every prompt of the scenario waits on a permission. */
+function heldTypedCheck(queue) {
+  return {
+    name: queue ? "held-typed-queue" : "held-typed",
+    modes: ["off"],
+    scenario: path.join(FIXTURES, "held-typed-scenario.mjs"),
+    settings: { queueMidTurn: queue },
+    sessionId: HISTORY_ID, // the switch is stored per session id; main accepts only a UUID
+    async run(app) {
+      const V = `views.get(${JSON.stringify(HISTORY_ID)})`;
+      assert.equal(await app.ev(`queueMidTurn`), queue, "the queue setting");
+      const rows = () => app.ev(`${V}.el.querySelectorAll(".held-row").length`);
+      const head = () => app.ev(`${V}.el.querySelector('.held-group[data-kind="user"] .held-head')?.textContent ?? null`);
+      const status = () => app.ev(`${V}.statusEl.textContent`);
+      const users = () => app.ev(`[...${V}.log.querySelectorAll(":scope > .msg.user .body")].map((e) => e.textContent)`);
+      const relays = () => app.ev(`${V}.log.querySelectorAll(":scope > .msg.relay").length`);
+      const queued = () => app.ev(`${V}.queue.map((i) => i.prompt)`);
+      const sendOff = () => app.ev(`${V}.sendBtn.disabled`);
+      const enter = (text) => app.ev(`(() => { const v = ${V}; v.input.value = ${JSON.stringify(text)}; v.input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); })()`);
+      const click = (sel) => app.ev(`${V}.el.querySelector(${JSON.stringify(sel)}).click()`);
+      const turn = async (text) => {
+        await app.send(text); // its permission keeps the turn running
+        await app.check(`${V}.prompting`, "a running turn");
+        // the card sets the status line when it arrives: wait for it, so a later status text is not overwritten
+        await app.check(`!!${V}.el.querySelector(".perm:not(.done) .opts button.primary")`, "the turn's permission card");
+      };
+      // answers permissions until nothing runs (with the queue on, the queued message's turn follows or joins this one)
+      const end = async () => {
+        await app.answerPermission();
+        for (let i = 0; i < 8 && (await app.ev(`${V}.busy`)); i++) {
+          if (await app.ev(`!!${V}.el.querySelector(".perm:not(.done) .opts button.primary")`)) await app.answerPermission();
+          else await new Promise((r) => setTimeout(r, 150));
+        }
+        await app.idle();
+      };
+
+      await app.newSession();
+      // the harness has no relay client (and window.api is frozen): the view's acknowledgement is recorded instead
+      await app.ev(`(() => { window.__acks = []; ${V}.ackDiscarded = (id) => window.__acks.push(id); })()`);
+
+      // 1. during a turn Send is enabled; a typed message is held (not queued), the box is empty
+      await turn("Start.");
+      assert.equal(await sendOff(), false, "Send is enabled during a turn");
+      await enter("check the README");
+      assert.equal(await head(), "Your messages (1)");
+      assert.equal(await app.ev(`${V}.el.querySelector(".held-from").textContent`), "you");
+      assert.deepEqual(await queued(), [], "the queue is empty");
+      assert.equal(await app.ev(`${V}.input.value`), "", "the box is empty");
+      await enter("second typed");
+      assert.equal(await head(), "Your messages (2)");
+      assert.deepEqual(await users(), ["Start."], "nothing was sent");
+      // 2. the turn ends: nothing is released, no new turn
+      await end();
+      assert.equal(await rows(), 2, "the rows stay");
+      assert.deepEqual(await users(), ["Start."], "no new turn started");
+      assert.equal(await status(), "2 messages waiting for approval");
+      assert.equal(await sendOff(), false, "idle: Send is enabled");
+      // 3. approve: a turn starts; its bubble is your own message
+      await click(".held-approve");
+      await app.check(`${V}.log.querySelectorAll(":scope > .msg.user").length === 2`, "the approved message's turn");
+      assert.deepEqual(await users(), ["Start.", "check the README"]);
+      assert.equal(await relays(), 0, "no relay bubble");
+      assert.equal(await rows(), 1);
+      await end();
+      // 4. closing asks about the held message of yours
+      assert.equal(await app.ev(`closeQuestion([${JSON.stringify(HISTORY_ID)}])`), "This session has queued messages of yours that were not sent. Close and discard them?");
+      // 6. ✕: gone, the line says so, nothing is acknowledged or remembered
+      await click(".held-discard");
+      assert.equal(await rows(), 0);
+      assert.equal(await app.ev(`${V}.log.textContent.trim().endsWith("Discarded your message.")`), true);
+      assert.deepEqual(await app.ev(`window.__acks`), [], "no acknowledgement");
+      assert.equal(await app.ev(`${V}.discarded.size`), 0, "nothing in discarded");
+      assert.equal(await app.ev(`closeQuestion([${JSON.stringify(HISTORY_ID)}])`), null, "nothing left to ask about");
+      // 8. what Send refuses during a turn it still refuses
+      await turn("Another.");
+      await enter("/rename x");
+      assert.equal(await status(), "Wait until Copilot finishes this turn.");
+      assert.equal(await rows(), 0);
+      assert.deepEqual(await queued(), []);
+      await app.ev(`${V}.input.value = ""; ${V}.statusEl.textContent = ""`);
+      // 7. the switch off: Send is as before this feature
+      await click('.held-switch[data-kind="user"]');
+      await app.check(`${V}.holdOn.user === false`, "the user switch off");
+      if (queue) {
+        assert.equal(await sendOff(), false);
+        await enter("queued one");
+        assert.deepEqual(await queued(), ["queued one"], "queued, not held");
+        assert.equal(await rows(), 0);
+      } else {
+        assert.equal(await sendOff(), true, "Send is disabled");
+        await enter("ignored");
+        assert.equal(await rows(), 0);
+        assert.deepEqual(await queued(), []);
+      }
+      await click('.held-switch[data-kind="user"]');
+      await app.check(`${V}.holdOn.user === true`, "the user switch on");
+      assert.equal(await sendOff(), false);
+      await enter("last words");
+      assert.equal(await head(), "Your messages (1)");
+      await end();
+      // 5. a view that comes back dead does not keep it: it is counted as discarded
+      assert.equal(await rows(), 1);
+      await app.ev(`api.closeSession(${JSON.stringify(HISTORY_ID)})`); // main opens the session again: session/load fails (scenario)
+      await app.ev(`reopenView(${V})`, "the reopen");
+      await app.check(`${V}.dead && !${V}.resuming`, "the dead view");
+      assert.equal((await app.ev(`${V}.log.textContent`)).includes("Could not resume this session: scripted load failure"), true, "the failure came from the agent's session/load");
+      assert.equal((await app.ev(`${V}.log.textContent`)).includes("1 queued message(s) waiting for this session were discarded."), true);
+      assert.equal(await rows(), 0);
+      assert.equal(await app.ev(`${V}.held.length`), 0);
+    },
+  };
+}
+
+/** held-typed-delete: deleting a session counts the held typed message in the discard text (the view is dropped with it). */
+const heldTypedDeleteCheck = {
+  name: "held-typed-delete",
+  modes: ["off"],
+  scenario: path.join(FIXTURES, "held-typed-scenario.mjs"),
+  sessionId: HISTORY_ID,
+  async run(app) {
+    const V = `views.get(${JSON.stringify(HISTORY_ID)})`;
+    await app.newSession();
+    await app.send("Start."); // its permission keeps the turn running
+    await app.check(`${V}.prompting`, "a running turn");
+    await app.ev(`(() => { const v = ${V}; v.input.value = "keep this"; v.input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); })()`);
+    assert.equal(await app.ev(`${V}.held.length`), 1);
+    await app.answerPermission();
+    await app.idle();
+    assert.equal(await app.ev(`${V}.held.length`), 1, "still held");
+    const res = await app.ev(`deleteOne({ sessionId: ${JSON.stringify(HISTORY_ID)}, cwd: ${V}.cwd, title: "t" })`);
+    assert.equal(res.deleted, true);
+    assert.equal(res.text.includes("1 queued message(s) waiting for it were discarded"), true, res.text);
+  },
+};
+
 export const checks = [
   {
     name: "baseline-live",
@@ -1419,6 +1555,137 @@ export const checks = [
     },
   },
   {
+    // held messages of every kind through a real broker: an order of the parent and a message of an unlinked session
+    // are held in the child's view (no turn) and counted in the broker's heldByKind, approving acknowledges, a reopened
+    // view shows what is still unacknowledged, a message of the user sent from the relay GUI (POST /api/send) starts a
+    // turn when the session is idle and is held during a turn, a discard acknowledges, and deleting an unlinked session
+    // in the app makes the broker forget its outbox items. Parent = the driver's session, child = a second one in
+    // <app.dir>/child, the third one in <app.dir>/<a UUID> is not linked. The scenario's second prompt of a session waits
+    // for a permission (a running turn).
+    name: "held-kinds-e2e",
+    modes: ["off"],
+    scenario: path.join(FIXTURES, "held-kinds-scenario.mjs"),
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      const PARENT = "scripted-work";
+      const CHILD = "scripted-child";
+      const OTHER = "bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee"; // a UUID: deleting a session needs one (the scripted agent takes a UUID folder name as the id)
+      const C = `views.get(${JSON.stringify(CHILD)})`;
+      const O = `views.get(${JSON.stringify(OTHER)})`;
+      await app.newSession();
+      const childDir = path.join(app.dir, "child");
+      const otherDir = path.join(app.dir, OTHER);
+      mkdirSync(childDir);
+      mkdirSync(otherDir);
+      await app.startSession(childDir);
+      await app.startSession(otherDir);
+      await app.ev(`activate(${JSON.stringify(PARENT)})`);
+      const connected = (v) => `(() => { const v = ${v}; return !!v?.relayName && !v.relayChip.hidden && !v.relayChip.classList.contains("off"); })()`;
+      for (const [v, what] of [[V, "the parent"], [C, "the child"], [O, "the other session"]]) await app.check(connected(v), `${what} to connect to the broker`);
+      const childName = await app.ev(`${C}.relayName`);
+      const otherName = await app.ev(`${O}.relayName`);
+      const heldByKind = async () => (await (await fetch(`${app.broker.url}/api/links`)).json()).heldByKind?.[`cli:${CHILD}`] ?? {};
+      // the broker's counts of the child per kind (a kind without an item counts 0); `want` names the non-zero ones
+      const heldIs = (want, what) => until(async () => {
+        const got = await heldByKind();
+        return ["child", "parent", "other"].every((k) => (got[k] ?? 0) === (want[k] ?? 0));
+      }, what);
+      const head = (kind) => app.ev(`${C}.el.querySelector('.held-group[data-kind="${kind}"] .held-head')?.textContent ?? null`);
+      const turnsExpr = (v) => `${v}.log.querySelectorAll(":scope > .msg.user, :scope > .msg.relay").length`;
+      /** Types into another session's message box and presses Enter (the driver's send is for its own session). */
+      const typeIn = async (v, text) => {
+        const before = await app.ev(turnsExpr(v));
+        await app.ev(`(() => { const v = ${v}; v.input.value = ${JSON.stringify(text)}; v.input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); })()`);
+        await app.check(`${turnsExpr(v)} > ${before}`, "the message to be sent");
+      };
+      const answerIn = async (v) => {
+        await app.check(`!!${v}.el.querySelector(".perm:not(.done) .opts button.primary")`, "a permission card");
+        await app.ev(`${v}.el.querySelector(".perm:not(.done) .opts button.primary").click()`);
+        await app.check(`!${v}.el.querySelector(".perm:not(.done)")`, "the permission to be answered");
+      };
+      const post = (text) => fetch(`${app.broker.url}/api/send`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ to: childName, text }) });
+
+      // 1. link the child to the parent
+      await app.send(`adopt_session ${childName}`);
+      await app.check(`!!${V}.el.querySelector(".perm.link:not(.done)")`, "the link card");
+      await app.ev(`${V}.el.querySelector(".perm.link .opts button.primary").click()`);
+      await app.check(`${C}.parentSessionId === ${JSON.stringify(PARENT)}`, "the child's parent");
+      await app.idle();
+      assert.equal(await app.ev(turnsExpr(C)), 0, "the child has had no turn");
+
+      // 2. an order of the parent is held in the child: no turn, counted on the broker
+      await app.send(`send_message ${childName} order one`);
+      await app.check(`${C}.el.querySelectorAll(".held-row").length === 1`, "the held order");
+      assert.equal(await head("parent"), "Orders from parent (1)");
+      await heldIs({ parent: 1 }, "the broker to count the held order");
+      assert.equal(await app.ev(`${C}.busy`), false, "no turn in the child");
+      assert.equal(await app.ev(turnsExpr(C)), 0, "nothing added to the child's log");
+      await answerIn(V); // the parent's own turn waits for a permission
+      await app.idle();
+
+      // 3. a message of the unlinked session: its own list
+      await typeIn(O, `send_message ${childName} hello`);
+      await app.check(`!!${C}.el.querySelector('.held-group[data-kind="other"]')`, "the other session's row");
+      assert.equal(await head("other"), "Other sessions (1)");
+      assert.equal(await app.ev(`${C}.el.querySelector('.held-group[data-kind="other"] .held-text').textContent.trim()`), "hello");
+      await heldIs({ parent: 1, other: 1 }, "the broker to count both");
+      assert.equal(await app.ev(turnsExpr(C)), 0, "still no turn in the child");
+
+      // 4. approve the order: the child's turn starts, then the broker's count of orders is 0
+      await app.ev(`${C}.el.querySelector('.held-group[data-kind="parent"] .held-approve').click()`);
+      await app.check(`${C}.log.querySelectorAll(":scope > .msg.relay").length === 1`, "the approved order's turn");
+      await app.idle();
+      await heldIs({ other: 1 }, "the broker to count only the other message after the approval");
+      assert.equal(await head("parent"), null);
+
+      // 5. the view closed and opened again: the unacknowledged message of the other session is back, in the same list
+      await app.ev(`closeView(${JSON.stringify(CHILD)})`);
+      await app.check(`!views.has(${JSON.stringify(CHILD)})`, "the child's view to close");
+      await app.ev(`openSession({ sessionId: ${JSON.stringify(CHILD)}, cwd: ${JSON.stringify(childDir)} })`, "the child to reopen");
+      await app.check(`!!${C} && !!${C}.el.querySelector('.held-group[data-kind="other"]')`, "the other session's row after the reopen");
+      assert.equal(await head("other"), "Other sessions (1)");
+      assert.equal(await app.ev(`${C}.el.querySelectorAll(".held-row").length`), 1, "that row only");
+      await app.check(`!${C}.busy && !${C}.resuming`, "the reopened child");
+
+      // a message of the child to the third session stays in the broker's outbox unacknowledged (step 8 deletes that
+      // unlinked session); it is the child's second prompt, so the next turn of the child is the one that waits
+      const outboxFor = (key) => Object.values(JSON.parse(readFileSync(path.join(app.dir, "relay-delegations.json"), "utf8")).outbox ?? {}).filter((i) => i.toKey === key);
+      await typeIn(C, `send_message ${otherName} for you`);
+      await app.check(`${O}.el.querySelectorAll(".held-row").length === 1`, "the message held in the other session");
+      await until(async () => outboxFor(`cli:${OTHER}`).length === 1, "the item in the broker's outbox");
+      await app.idle(); // the parent's view: the child's turn ends meanwhile
+      await app.check(`!${C}.busy`, "the child's turn to end");
+
+      // 6. the relay GUI's message: an idle session starts a turn (nothing held); during a turn it is held
+      const before = await app.ev(turnsExpr(C));
+      assert.equal((await post("from the gui")).status, 204);
+      await app.check(`${C}.prompting && ${turnsExpr(C)} > ${before}`, "the GUI message's turn");
+      assert.equal(await head("user"), null, "an idle session holds nothing of the user");
+      assert.equal((await post("second from the gui")).status, 204);
+      await app.check(`!!${C}.el.querySelector('.held-group[data-kind="user"]')`, "the held message during the turn");
+      assert.equal(await head("user"), "Your messages (1)");
+      assert.equal(await app.ev(`${C}.el.querySelector('.held-group[data-kind="user"] .held-text').textContent.trim()`), "second from the gui");
+      assert.equal((await heldByKind()).user, undefined, "the broker never counts the user kind");
+      await answerIn(C);
+      await app.idle();
+      assert.equal(await head("user"), "Your messages (1)", "it waits for Approve after the turn");
+
+      // 7. discard the other session's message: no `other` count on the broker
+      await app.ev(`${C}.el.querySelector('.held-group[data-kind="other"] .held-discard').click()`);
+      await app.check(`!${C}.el.querySelector('.held-group[data-kind="other"]')`, "the other row to go");
+      await heldIs({}, "the broker to have no held count left");
+
+      // 8. deleting the third (unlinked) session in the app, with the child's message still unacknowledged in the
+      // broker's outbox, makes the broker forget the item
+      assert.equal(outboxFor(`cli:${OTHER}`).length, 1, "the item is still in the outbox");
+      // the whole flow of the delete button (its confirmation answered yes): main deletes, then the broker forgets
+      await app.ev(`(() => { window.confirm = () => true; window.__deleted = deleteSessionFlow({ sessionId: ${JSON.stringify(OTHER)}, cwd: ${JSON.stringify(otherDir)}, title: "t" }); })()`);
+      await app.check(`!views.has(${JSON.stringify(OTHER)})`, "the deleted session's view to go");
+      await until(async () => outboxFor(`cli:${OTHER}`).length === 0, "the broker to forget the deleted session's outbox items");
+    },
+  },
+  {
     // a size change alone (nothing appended): a following log, and a following panel with an open entry, keep their
     // bottoms when the window gets narrower (the log's text reflows) and lower
     name: "resize-keeps-bottom",
@@ -2227,7 +2494,7 @@ export const checks = [
       assert.equal(await app.ev(`${V}.el.querySelector(".held-from").textContent`), "docs-9f8e7d");
       assert.equal(await app.ev(`${V}.el.querySelector(".held-text").textContent`), "first");
       assert.equal(await shownEl(".queue-strip"), false, "the queue stays hidden");
-      assert.equal(await status(), "2 replies waiting for approval");
+      assert.equal(await status(), "2 messages waiting for approval");
       assert.equal(await app.ev(`document.querySelector(".item.active .held-mark")?.textContent ?? null`), "⏸ 2");
       assert.equal(await shownEl(".held-switch"), true, "the switch shows with held replies");
       // 2. a redelivery is ignored
@@ -2269,16 +2536,16 @@ export const checks = [
       await app.ev(`${V}.setBusy(true)`);
       await child("h4", "docs-9f8e7d");
       await child("h5", "tests-41ac0b");
-      await app.ev(`${V}.el.querySelector(".held-switch").click()`);
-      await app.check(`${V}.holdReplies === false`, "the switch off");
+      await app.ev(`${V}.el.querySelector('.held-switch[data-kind="child"]').click()`);
+      await app.check(`${V}.holdOn.child === false`, "the switch off");
       await frames(app);
       assert.equal(await shownEl(".held"), false, ".held hidden");
       assert.deepEqual(await queued(), ["P-h4", "P-h5"]);
       await child("h6", "docs-9f8e7d");
       assert.deepEqual(await queued(), ["P-h4", "P-h5", "P-h6"]);
       assert.equal(await rows(), 0);
-      await app.ev(`${V}.el.querySelector(".held-switch").click()`);
-      await app.check(`${V}.holdReplies === true`, "the switch on");
+      await app.ev(`${V}.el.querySelector('.held-switch[data-kind="child"]').click()`);
+      await app.check(`${V}.holdOn.child === true`, "the switch on");
       assert.deepEqual(await queued(), ["P-h4", "P-h5", "P-h6"], "nothing moves back");
       await app.ev(`${V}.queue.length = 0; ${V}.renderQueue(); ${V}.setBusy(false)`);
       // 8. the wait note after a long wait
@@ -2304,6 +2571,107 @@ export const checks = [
       await child("h8", "docs-9f8e7d");
       assert.equal(await rows(), 0, "a redelivered discarded reply is not held again");
       assert.equal(await app.ev(`${V}.discarded.has("h8")`), true, "still unconfirmed");
+    },
+  },
+  {
+    // held messages of every kind (parent order, other session, relay-GUI user, child): one list and one switch each
+    name: "held-kinds",
+    modes: ["off"],
+    sessionId: HISTORY_ID,
+    async run(app) {
+      const V = `views.get(${JSON.stringify(HISTORY_ID)})`;
+      await firstTurn(app);
+      // the harness has no relay client (and window.api is frozen): the view's acknowledgement is recorded instead
+      await app.ev(`(() => { window.__acks = []; ${V}.ackDiscarded = (id) => window.__acks.push(id); })()`);
+      const send = (m) => app.ev(`${V}.incoming(${JSON.stringify({ wake: true, ...m })})`);
+      const held = (kind, id, from, text = "do x") => send({ from, text, prompt: `P-${id}`, deliveryId: id, ...(kind === "child" ? { fromChild: true } : { heldAs: kind }), ...(kind === "user" ? { human: true } : {}) });
+      const shownEl = (sel) => app.ev(`(() => { const e = ${V}.el.querySelector(${JSON.stringify(sel)}); return !!e && !e.hidden && e.offsetParent !== null; })()`);
+      const head = (kind) => app.ev(`${V}.el.querySelector('.held-group[data-kind="${kind}"] .held-head')?.textContent ?? null`);
+      const kinds = () => app.ev(`[...${V}.el.querySelectorAll(".held-group")].map((g) => g.dataset.kind)`);
+      const queued = () => app.ev(`${V}.queue.map((i) => i.prompt)`);
+      const relays = () => app.ev(`${V}.log.querySelectorAll(":scope > .msg.relay").length`);
+      const click = (sel) => app.ev(`${V}.el.querySelector(${JSON.stringify(sel)}).click()`);
+      const switchEl = (kind) => `.held-switch[data-kind="${kind}"]`;
+      const reset = () => app.ev(`${V}.queue.length = 0; ${V}.renderQueue(); ${V}.setBusy(false)`);
+
+      // the switch row before anything is held: the child switch is first in the DOM; user shows, parent does not
+      assert.equal(await app.ev(`${V}.el.querySelector("input.held-switch").dataset.kind`), "child");
+      assert.equal(await shownEl(switchEl("user")), true, "the user switch shows in a session without relatives");
+      assert.equal(await shownEl(switchEl("parent")), false, "no parent, no parent switch");
+      assert.equal(await app.ev(`${V}.holdBar.textContent.trim().startsWith("Approve:")`), true);
+
+      // 1. an order from the parent and a message of another session are held, no turn starts
+      await held("parent", "p1", "lead");
+      await held("other", "o1", "api-77e2");
+      await frames(app);
+      assert.deepEqual(await kinds(), ["parent", "other"]);
+      assert.equal(await head("parent"), "Orders from parent (1)");
+      assert.equal(await head("other"), "Other sessions (1)");
+      assert.equal(await shownEl(".queue-strip"), false, "the queue is empty");
+      assert.equal(await relays(), 0, "no turn started");
+      assert.equal(await app.ev(`${V}.statusEl.textContent`), "2 messages waiting for approval");
+      assert.equal(await app.ev(`document.querySelector(".item.active .held-mark")?.textContent ?? null`), "⏸ 2");
+      assert.equal(await shownEl(switchEl("parent")), true, "the parent switch shows with a held order");
+
+      // 2. the first task of a sub-session has no mark and no delivery id: it is not held, a turn starts (it asks a
+      // permission, so the turn runs on: "a turn is running" for the user message below)
+      await send({ from: "lead", text: "task", prompt: "P-task" });
+      await app.check(`${V}.log.querySelectorAll(":scope > .msg.relay").length === 1 && ${V}.prompting`, "the task's turn");
+      assert.equal((await kinds()).length, 2, "nothing else was held");
+      // a message of the user during that turn is held (as u3 of step 5, it is approved there)
+      await held("user", "u3", "user", "hi");
+      assert.equal(await head("user"), "Your messages (1)");
+      await app.answerPermission();
+      await app.idle();
+
+      // 3. a reply of a child adds a group; the DOM order is parent, other, user, child
+      await held("child", "c1", "docs-9f8e7d");
+      await frames(app);
+      assert.deepEqual(await kinds(), ["parent", "other", "user", "child"]);
+
+      // 4. approve the order: its turn starts, the bubble names the sender, the other lists stay
+      await click('.held-group[data-kind="parent"] .held-approve');
+      await app.check(`${V}.log.querySelectorAll(":scope > .msg.relay").length === 2`, "the approved order's turn");
+      assert.equal(await app.ev(`[...${V}.log.querySelectorAll(":scope > .msg.relay .from")].at(-1).textContent`), "from lead");
+      await app.idle();
+      assert.deepEqual(await kinds(), ["other", "user", "child"]);
+      assert.equal(await head("other"), "Other sessions (1)");
+      assert.equal(await head("child"), "Replies from sub-sessions (1)");
+      assert.equal(await shownEl(switchEl("parent")), false, "the parent switch hides again");
+
+      // 5. messages of the user: without a turn they go to the queue, a replayed one is held, approving keeps `human`
+      await app.ev(`${V}.setBusy(true)`);
+      await held("user", "u1", "user", "hi 1");
+      assert.deepEqual(await queued(), ["P-u1"], "no turn running: not held");
+      await app.ev(`${V}.queue.length = 0; ${V}.renderQueue()`);
+      await send({ from: "user", human: true, heldAs: "user", deliveryId: "u2", replayed: true, prompt: "P-u2", text: "hi 2" });
+      assert.equal(await head("user"), "Your messages (2)", "a replayed message is held");
+      await click('.held-group[data-kind="user"] .held-approve'); // u3, the older one
+      assert.deepEqual(await queued(), ["P-u3"]);
+      assert.equal(await app.ev(`${V}.queue[0].human`), true, "the approved message keeps human");
+      await reset();
+
+      // 6. discard: the row is gone, the line names the sender, the broker is told
+      await click('.held-group[data-kind="other"] .held-discard');
+      assert.equal(await head("other"), null);
+      assert.equal(await app.ev(`${V}.log.textContent.trim().endsWith("Discarded a message from api-77e2.")`), true);
+      assert.deepEqual(await app.ev(`window.__acks`), ["o1"]);
+
+      // 7. a switch off moves only its own kind into the queue; on moves nothing back
+      await app.ev(`${V}.setBusy(true)`);
+      await held("other", "o2", "api-77e2");
+      await click(switchEl("other"));
+      await app.check(`${V}.holdOn.other === false`, "the other switch off");
+      assert.deepEqual(await app.ev(`api.getHoldReplies(${JSON.stringify(HISTORY_ID)})`), { child: true, parent: true, other: false, user: true }, "main stored the switch");
+      assert.deepEqual(await queued(), ["P-o2"]);
+      assert.deepEqual(await kinds(), ["user", "child"], "the child reply is still held");
+      await held("other", "o3", "api-77e2");
+      assert.deepEqual(await queued(), ["P-o2", "P-o3"], "a new message goes to the queue");
+      await click(switchEl("other"));
+      await app.check(`${V}.holdOn.other === true`, "the other switch on");
+      assert.equal((await app.ev(`api.getHoldReplies(${JSON.stringify(HISTORY_ID)})`)).other, true, "main stored it on again");
+      assert.deepEqual(await queued(), ["P-o2", "P-o3"], "nothing moves back");
+      await reset();
     },
   },
   {
@@ -3076,4 +3444,7 @@ export const checks = [
       }
     },
   },
+  heldTypedCheck(false),
+  heldTypedCheck(true),
+  heldTypedDeleteCheck,
 ];
