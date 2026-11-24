@@ -127,8 +127,12 @@ module or import it), do not write a second one.
   the connection and reach the group.
 - **"Exited" on POSIX.** `conn.exited` and the `exit` event are what `lingering`, the removal of the prompt folder
   and the history rewrites wait for, so they must not come before Copilot is gone. Two cases (author's call):
-  - *The shell exited with an exit code.* It waited for its command, so Copilot is gone: `exited` at once, as
-    today. Nothing else in the group is touched; what Copilot left running stays running, as today.
+  - *The shell exited with an exit code, and the app did not kill it.* It waited for its command, so Copilot is
+    gone: `exited` at once, as today. Nothing else in the group is touched; what Copilot left running stays
+    running, as today.
+  - *The app killed it and it ended with an exit code* (a shell that replaced itself with Copilot, and Copilot shut
+    down cleanly on `SIGTERM`): the group is checked as in the next point, so the kill still reaches everything in
+    it (found in the review of the implementation).
   - *The shell was ended by a signal* (the app's kill, or anyone else's). A `SIGTERM` to the group ends the shell at
     once, while Copilot may still be shutting down. The connection checks the group (`process.kill(-pid, 0)` fails
     with `ESRCH` when it is empty) and repeats the check until it is; only then it sets `exited` and emits `exit`,
