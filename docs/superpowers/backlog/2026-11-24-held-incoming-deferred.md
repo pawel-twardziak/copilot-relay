@@ -58,7 +58,7 @@ sentence on a switched-off kind, and the final fix wave (the README passages tha
    `HeldReplies`. A `switchTitle(kind)` next to `switchLabel` keeps it in one module.
 10. **The sender is not told when its held message is discarded** (✕) or dropped by a delete. The spec is silent; a
     child's reply behaves the same since v0.22.
-11. **For the release notes of v0.25.0:** messages typed during a turn now wait for Approve by default, also for users
+11. **For the release notes of v0.26.0:** messages typed during a turn now wait for Approve by default, also for users
     of "Deliver queued messages during a turn"; the switches are per chat and there is no global default; the broker
     must be updated ("Update and restart broker").
 12. **README wording left by the fix wave** (its re-review). `electron/README.md`: two lines of about 168 columns (the

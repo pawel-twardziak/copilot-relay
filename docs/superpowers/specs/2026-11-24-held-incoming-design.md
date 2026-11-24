@@ -243,7 +243,7 @@ limitations.
   Run `npm --prefix electron run copy-relay` before the relay UI checks.
 - The broker changes: after updating the app, users press "Update and restart broker".
 - `electron/README.md`: the section "Replies from sub-sessions wait for you" describes all four kinds.
-- Release: `v0.25.0`.
+- Release: `v0.26.0` (`v0.25.0` went to the child command card, merged to `main` while this was built).
 
 ## Known limitations
 
