@@ -36,7 +36,12 @@ const HOME = os.homedir();
 export function cleanText(text, max = 300) {
   let s = String(text);
   for (const re of SECRET_TEXT) s = s.replace(re, "[redacted]");
-  if (HOME && HOME.length > 3) s = s.split(HOME).join("~");
+  if (HOME && HOME.length > 3) {
+    s = s.split(HOME).join("~");
+    // Windows paths also show up with forward slashes (diffs, URLs)
+    const forward = HOME.replace(/\\/g, "/");
+    if (forward !== HOME) s = s.split(forward).join("~");
+  }
   return s.length > max ? `${s.slice(0, max)}… (+${s.length - max} chars)` : s;
 }
 

@@ -100,7 +100,7 @@ export const freeScenarios = [
       const watched = ["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "COPILOT_HOME", "COPILOT_CLI_PATH", "COPILOT_PATH", "GH_HOST", "GH_TOKEN", "GITHUB_TOKEN", "COPILOT_GITHUB_TOKEN", "COPILOT_CUSTOM_INSTRUCTIONS_DIRS"];
       s.data.envSet = watched.filter((n) => process.env[n]);
       s.data.envUnset = watched.filter((n) => !process.env[n]);
-      if (process.env.COPILOT_CUSTOM_INSTRUCTIONS_DIRS) s.note("COPILOT_CUSTOM_INSTRUCTIONS_DIRS is set: the probe was probably started from inside a Copilot session (for example by an agent in the app). Every probe session inherits that session's instructions, which can change the replies the turn scenarios check. Start the full run from a plain terminal.");
+      if (process.env.COPILOT_CUSTOM_INSTRUCTIONS_DIRS) s.note("COPILOT_CUSTOM_INSTRUCTIONS_DIRS is set: either in the user's environment, or because the probe was started from inside a Copilot session (for example by an agent in the app). Every probe session reads those instructions too, which can change the replies the turn scenarios check.");
       s.data.cwd = cleanText(G.cwd);
       s.data.repo = {
         isGitRepo: fs.existsSync(path.join(G.cwd, ".git")),
