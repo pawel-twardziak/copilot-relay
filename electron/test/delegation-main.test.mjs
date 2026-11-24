@@ -1,8 +1,12 @@
 // Tests for the pure delegation helpers used by the main process.
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import path from "node:path";
 import {
   PendingRequests,
+  answerFields,
+  cardStart,
+  createdText,
   childPrompt,
   REMINDER,
   findModelOption,
@@ -167,4 +171,103 @@ test("withDeadline passes a result through and rejects when the deadline passes"
   assert.equal(await withDeadline(Promise.resolve(7), Date.now() + 1000, "late"), 7);
   await assert.rejects(withDeadline(new Promise(() => {}), Date.now() + 5, "late"), /late/);
   await assert.rejects(withDeadline(Promise.reject(new Error("own")), Date.now() + 1000, "late"), /own/);
+});
+
+// ---- the card's start values ----
+const startOpts = [
+  opt("model", "gpt-a", ["gpt-a", "gpt-b", "gpt-b"]),
+  { ...opt("agent", "", ["", "reviewer"]), options: [{ value: "", name: "Default" }, { value: "reviewer", name: "Reviewer" }, { value: "reviewer", name: "Again" }] },
+];
+const parentOf = (extra = {}) => ({
+  cwd: "/work/parent",
+  tier: "default",
+  storedCommand: "copilot --stored",
+  command: "copilot --resolved",
+  configOptions: startOpts,
+  name: "Boss",
+  ...extra,
+});
+const req = (extra = {}) => ({ requestId: "r", name: "kid", task: "t", agent: "", model: "", folder: "", prompt: "", context: "", command: "", ...extra });
+const isDir = (p) => p === "/work/other";
+const noFrom = { cwd: false, tier: false, agent: false, model: false, own: false, command: false };
+
+test("cardStart takes valid parent values", () => {
+  const s = cardStart(
+    req({ folder: "/work/other", prompt: "be brief", context: "long_context", agent: "reviewer", model: "gpt-b", command: "copilot --foo" }),
+    parentOf(),
+    { isDir },
+  );
+  assert.equal(s.cwd, "/work/other");
+  assert.equal(s.tier, "long_context");
+  assert.equal(s.agent, "reviewer");
+  assert.equal(s.model, "gpt-b");
+  assert.equal(s.own, "be brief");
+  assert.equal(s.command, "copilot --resolved --foo");
+  assert.deepEqual(s.from, { cwd: true, tier: true, agent: true, model: true, own: true, command: true });
+  assert.deepEqual(s.notes, {});
+  assert.equal(s.parentName, "Boss");
+  assert.equal(s.currentModel, "gpt-a");
+});
+
+test("cardStart falls back with a note", () => {
+  const p = parentOf();
+  const rel = cardStart(req({ folder: "rel/dir" }), p, { isDir });
+  assert.equal(rel.cwd, "/work/parent");
+  assert.equal(rel.notes.cwd, 'Asked for the folder "rel/dir", which is not an existing absolute path.');
+  const gone = cardStart(req({ folder: "/nope" }), p, { isDir });
+  assert.equal(gone.cwd, "/work/parent");
+  assert.match(gone.notes.cwd, /"\/nope"/);
+  const tier = cardStart(req({ context: "huge" }), p, { isDir });
+  assert.equal(tier.tier, "default");
+  assert.equal(tier.notes.tier, 'Asked for the context "huge", which is not 200k or 1M.');
+  const agent = cardStart(req({ agent: "ghost" }), p, { isDir });
+  assert.equal(agent.agent, "");
+  assert.equal(agent.notes.agent, 'Asked for the agent "ghost", which is not offered here. Valid agents: "" (default), reviewer.');
+  const none = cardStart(req({ agent: "ghost" }), parentOf({ configOptions: noAgent }), { isDir });
+  assert.equal(none.notes.agent, 'Asked for the agent "ghost", but there are no custom agents available.');
+  const model = cardStart(req({ model: "ghost" }), p, { isDir });
+  assert.equal(model.model, "");
+  assert.equal(model.notes.model, 'Asked for the model "ghost", which is not offered here. Valid models: gpt-a, gpt-b.');
+  const cmd = cardStart(req({ command: "node x" }), p, { isDir });
+  assert.equal(cmd.command, "copilot --stored");
+  assert.equal(cmd.notes.command, 'Asked for a command that was not taken: Only the copilot command is allowed, not "node".');
+  for (const s of [rel, gone, tier, agent, none, model, cmd]) assert.deepEqual(s.from, noFrom);
+});
+
+test("cardStart without proposals keeps today's card", () => {
+  const s = cardStart(req(), parentOf(), { isDir });
+  assert.equal(s.command, "copilot --stored");
+  assert.equal(s.own, "");
+  assert.equal(s.cwd, "/work/parent");
+  assert.equal(s.tier, "default");
+  assert.deepEqual(s.notes, {});
+  assert.deepEqual(s.from, noFrom);
+  assert.equal(cardStart(req(), parentOf({ name: "" }), { isDir }).parentName, "the session");
+  assert.equal(cardStart(req(), parentOf({ configOptions: [] }), { isDir }).currentModel, null);
+});
+
+test("cardStart deduplicates the lists", () => {
+  const s = cardStart(req(), parentOf(), { isDir });
+  assert.deepEqual(s.models, [{ value: "gpt-a", name: "gpt-a" }, { value: "gpt-b", name: "gpt-b" }]);
+  assert.deepEqual(s.agents, [{ value: "", name: "Default" }, { value: "reviewer", name: "Reviewer" }]);
+});
+
+test("answerFields normalises the card's values", () => {
+  const ctx = { parentCwd: "/work/parent", parentTier: "long_context" };
+  assert.deepEqual(answerFields({ cwd: "/a/b/../c", tier: "default", agent: "x", model: "y" }, ctx), { cwd: "/a/c", tier: "default", agent: "x", model: "y" });
+  assert.deepEqual(answerFields({ cwd: "rel", tier: "huge", agent: 1, model: null }, ctx), { cwd: "/work/parent", tier: "long_context", agent: "", model: "" });
+  assert.deepEqual(answerFields({}, ctx), { cwd: "/work/parent", tier: "long_context", agent: "", model: "" });
+  assert.deepEqual(answerFields(undefined, ctx), { cwd: "/work/parent", tier: "long_context", agent: "", model: "" });
+  assert.deepEqual(answerFields("x", ctx).cwd, "/work/parent");
+});
+
+test("createdText names another folder only", () => {
+  assert.equal(
+    createdText({ name: "kid", childCwd: "/a", parentCwd: "/b" }),
+    'Session "kid" was created in the folder "/a" and has started on its task. It will send you its result with report_result.',
+  );
+  assert.equal(
+    createdText({ name: "kid", childCwd: "/a/", parentCwd: path.resolve("/a") }),
+    'Session "kid" was created and has started on its task. It will send you its result with report_result.',
+  );
 });

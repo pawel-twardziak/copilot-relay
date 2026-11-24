@@ -1,4 +1,7 @@
 // Pure decisions for delegated child sessions. No Electron imports.
+import path from "node:path";
+import { childCommandArgs } from "./child-command.mjs";
+import { normalizeTier } from "./context-tier.mjs";
 
 const isChild = (e) => Boolean(e?.parentSessionId);
 
@@ -36,6 +39,127 @@ export function resolveConfig(options, { agent, model, inheritedModel } = {}) {
   }
 
   return { sets };
+}
+
+const optionList = (option) => {
+  const seen = new Set();
+  const out = [];
+  for (const o of option?.options ?? []) {
+    if (seen.has(o.value)) continue;
+    seen.add(o.value);
+    out.push({ value: o.value, name: o.name });
+  }
+  return out;
+};
+
+/** The approval card's start values from the parent's request. `parent`: { cwd, tier, storedCommand, command,
+ *  configOptions, name }; `isDir(path)` is the caller's file system check. A value the parent asked for that cannot
+ *  be taken gets a note and the default; `from` says which values are the parent's. */
+export function cardStart(request, parent, { isDir }) {
+  const notes = {};
+  const from = { cwd: false, tier: false, agent: false, model: false, own: false, command: false };
+  const str = (v) => (typeof v === "string" ? v : "");
+
+  let cwd = parent.cwd;
+  const folder = str(request.folder);
+  if (folder) {
+    if (path.isAbsolute(folder) && isDir(folder)) {
+      cwd = path.resolve(folder);
+      from.cwd = true;
+    } else {
+      notes.cwd = `Asked for the folder "${folder}", which is not an existing absolute path.`;
+    }
+  }
+
+  let tier = parent.tier;
+  const context = str(request.context);
+  if (context) {
+    const asked = normalizeTier(context);
+    if (asked) {
+      tier = asked;
+      from.tier = true;
+    } else {
+      notes.tier = `Asked for the context "${context}", which is not 200k or 1M.`;
+    }
+  }
+
+  const own = str(request.prompt);
+  from.own = own !== "";
+
+  let command = parent.storedCommand;
+  const asked = str(request.command);
+  if (asked) {
+    const parsed = childCommandArgs(asked);
+    if (parsed.refused) {
+      notes.command = `Asked for a command that was not taken: ${parsed.refused}`;
+    } else if (parsed.args.length) {
+      command = `${parent.command} ${parsed.args.join(" ")}`;
+      from.command = true;
+    }
+  }
+
+  const modelOption = findModelOption(parent.configOptions);
+  const agentOption = findAgentOption(parent.configOptions);
+  const agents = optionList(agentOption);
+  const models = optionList(modelOption);
+
+  let agent = "";
+  const askedAgent = str(request.agent);
+  if (askedAgent) {
+    if (agents.some((a) => a.value === askedAgent)) {
+      agent = askedAgent;
+      from.agent = true;
+    } else if (!agentOption) {
+      notes.agent = `Asked for the agent "${askedAgent}", but there are no custom agents available.`;
+    } else {
+      notes.agent = `Asked for the agent "${askedAgent}", which is not offered here. Valid agents: ${list(valuesOf(agentOption))}.`;
+    }
+  }
+
+  let model = "";
+  const askedModel = str(request.model);
+  if (askedModel) {
+    if (models.some((m) => m.value === askedModel)) {
+      model = askedModel;
+      from.model = true;
+    } else {
+      notes.model = `Asked for the model "${askedModel}", which is not offered here. Valid models: ${list(valuesOf(modelOption))}.`;
+    }
+  }
+
+  return {
+    cwd,
+    tier,
+    agent,
+    model,
+    own,
+    command,
+    agents,
+    models,
+    currentModel: modelOption?.currentValue ?? null,
+    parentName: parent.name || "the session",
+    from,
+    notes,
+  };
+}
+
+/** The card's answer as main uses it: an absolute folder, a valid tier, agent and model as text. */
+export function answerFields(fields, { parentCwd, parentTier }) {
+  const f = fields && typeof fields === "object" ? fields : {};
+  return {
+    cwd: typeof f.cwd === "string" && path.isAbsolute(f.cwd) ? path.resolve(f.cwd) : parentCwd,
+    tier: normalizeTier(f.tier) ?? parentTier,
+    agent: typeof f.agent === "string" ? f.agent : "",
+    model: typeof f.model === "string" ? f.model : "",
+  };
+}
+
+/** What the parent is told when the child is up. */
+export function createdText({ name, childCwd, parentCwd }) {
+  const tail = "and has started on its task. It will send you its result with report_result.";
+  return path.resolve(childCwd) !== path.resolve(parentCwd)
+    ? `Session "${name}" was created in the folder "${childCwd}" ${tail}`
+    : `Session "${name}" was created ${tail}`;
 }
 
 /** The last line of the intro of a child's first message, also said in the child part of its prompt. */
