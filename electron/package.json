@@ -48,6 +48,7 @@
       "last-activity.mjs",
       "activity-panel.mjs",
       "context-tier.mjs",
+      "copilot-command.mjs",
       "session-prompts.mjs",
       "jobs.mjs",
       "job-runner.mjs",
