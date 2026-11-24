@@ -2674,6 +2674,29 @@ export const checks = [
     },
   },
   {
+    // plain Enter in the command field must not submit the form (its first submit button is Cancel, which would
+    // close the dialog and lose the text); Ctrl+Enter accepts, as in the text area. Real key events: a synthetic
+    // one does not trigger the browser's implicit submission.
+    name: "session-command-enter",
+    modes: ["off"],
+    sessionId: HISTORY_ID,
+    async run(app) {
+      const work = path.join(app.dir, "work");
+      const D = `document.querySelector("#prompt-dialog")`;
+      await app.ev(`(window.__newSession = newSession(${JSON.stringify(work)}), true)`);
+      await app.check(`${D}.open && !!${D}.querySelector(".pe-command")`, "the prompt dialog");
+      await app.ev(`(() => { for (const [sel, text] of [[".pe-own", "Keep me."], [".pe-command", ${JSON.stringify(`'${SCRIPTED_AGENT}' --tag enter`)}]]) { const t = ${D}.querySelector(sel); t.value = text; t.dispatchEvent(new Event("input", { bubbles: true })); } ${D}.querySelector(".pe-command").focus(); })()`);
+      await app.pressEnter();
+      await app.ev("new Promise((r) => setTimeout(r, 300))");
+      assert.equal(await app.ev(`${D}.open`), true, "plain Enter leaves the dialog open");
+      assert.equal(await app.ev(`${D}.querySelector(".pe-own").value`), "Keep me.");
+      assert.equal(await app.ev(`${D}.querySelector(".pe-command").value`), `'${SCRIPTED_AGENT}' --tag enter`);
+      await app.pressEnter({ ctrl: true });
+      await app.ev(`window.__newSession`, "newSession to return");
+      await app.check(`!${D}.open && views.has(${JSON.stringify(HISTORY_ID)})`, "Ctrl+Enter to start the session");
+    },
+  },
+  {
     // Setup: the command field is empty with the Settings command as placeholder; a new command (and text) restarts
     // Copilot with it, exactly one start; the same values again restart nothing
     name: "session-command-setup",

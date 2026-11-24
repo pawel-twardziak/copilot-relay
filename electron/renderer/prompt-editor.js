@@ -82,7 +82,14 @@
     const commandInput = command
       ? h("input", { class: "pe-command", maxlength: "4000", spellcheck: "false", placeholder: `Settings: ${command.settings}` })
       : null;
-    if (commandInput) commandInput.value = command.value ?? "";
+    if (commandInput) {
+      commandInput.value = command.value ?? "";
+      // a text input lets plain Enter submit the form through its first submit button, which is Cancel: it does
+      // nothing here (Ctrl/Cmd+Enter still reaches the dialog's own handler and accepts, as in the text area)
+      commandInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.ctrlKey && !e.metaKey && !e.isComposing) e.preventDefault();
+      });
+    }
 
     const root = h(
       "div",
