@@ -9,6 +9,7 @@ import {
   createFileWatcher,
   createLocationTable,
   isNetworkLocation,
+  isRemote,
   localRealpath,
   parseLinuxMounts,
   parseMacMounts,
@@ -474,4 +475,9 @@ test("linux table treats FUSE network file systems as network and local ones as 
   const types = ["fuse.gvfsd-fuse", "fuse.glusterfs", "fuse.something", "fuse.portal", "fuse.gocryptfs", "fuseblk", "fuse", "fuse.Foo.AppImage", "fuse.appimage"];
   const t = types.map((x, i) => row(x, i + 1)).join("");
   assert.deepEqual(parseLinuxMounts(t), ["/m/fuse.gvfsd-fuse", "/m/fuse.glusterfs", "/m/fuse.something"]);
+});
+
+test("isRemote sees every leading pair of separators, mixed ones too", () => {
+  for (const p of ["\\\\host\\share", "//host/share", "/\\host\\share", "\\/host/share"]) assert.equal(isRemote(p), true, p);
+  for (const p of ["/home/x", "C:\\x", "\\x", "rel//x"]) assert.equal(isRemote(p), false, p);
 });

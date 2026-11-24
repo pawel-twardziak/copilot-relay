@@ -275,7 +275,7 @@ test("createdText names another folder only", () => {
 
 test("cardStart never looks at a remote folder", () => {
   const calls = [];
-  for (const folder of ["\\\\host\\share", "//host/share"]) {
+  for (const folder of ["\\\\host\\share", "//host/share", "/\\host\\share", "\\/host/share"]) {
     const s = cardStart(req({ folder }), parentOf(), { isDir: (p) => (calls.push(p), true) });
     assert.equal(s.cwd, "/work/parent");
     assert.equal(s.from.cwd, false);

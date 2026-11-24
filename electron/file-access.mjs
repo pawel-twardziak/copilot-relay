@@ -115,7 +115,7 @@ export function createLocationTable({ platform, readFile, exec, powershell = "po
 
 /** UNC paths and file://host URLs would make Windows contact a remote SMB server (and send the user's NTLM hash). */
 export function isRemote(p) {
-  return /^(\\\\|\/\/)/.test(p);
+  return /^[\\/]{2}/.test(p); // any two leading separators, of either kind (Windows reads "/\\host" as UNC too)
 }
 
 /** "~/x" and "~\\x" mean the home folder, as in a shell. */
