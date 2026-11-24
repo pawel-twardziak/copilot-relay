@@ -255,6 +255,9 @@ dialog label { display: flex; flex-direction: column; gap: 6px; }
 #prompt-dialog { width: 640px; max-width: calc(100vw - 32px); }
 #prompt-dialog h2 { overflow-wrap: anywhere; }
 .prompt-editor { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+.folder-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.folder-path { flex: 1; min-width: 0; overflow-wrap: anywhere; user-select: text; font-family: var(--mono, monospace); font-size: 12.5px; }
+.folder-change { flex: none; }
 .pe-fold > summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
 .pe-fold > pre, .pe-fold > .hint { margin: 6px 0 0; }
 .pe-fold > pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); user-select: text; }

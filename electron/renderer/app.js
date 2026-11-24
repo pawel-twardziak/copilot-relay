@@ -2928,18 +2928,23 @@ async function newSession(cwd) {
     if (!cwd) return;
     const s = await api.getSettings();
     const editor = PromptEditor.createPromptEditor({ defaultPart: s.promptDefault ?? "", childPart: null, templates: s.promptTemplates ?? [], own: "", command: { value: "", settings: s.effective, platform: s.platform }, h });
+    const row = FolderRow.createFolderRow({ value: cwd, pick: (cur) => api.pickDir("Folder for the new session", cur), h });
     let res = null;
     const onOk = async (own, command) => {
-      setStatus(`Starting Copilot in ${cwd}…`);
+      setStatus(`Starting Copilot in ${row.value()}…`);
+      row.setDisabled(true);
       try {
-        res = await api.newSession(cwd, own, command);
+        res = await api.newSession(row.value(), own, command);
       } catch (e) {
+        row.setDisabled(false);
         return `Could not start the session: ${e.message}`;
       } finally {
         setStatus("");
       }
     };
-    if ((await PromptEditor.openPromptDialog({ title: `New session in ${cwd}`, okLabel: "Start", editor, onOk })) == null) return;
+    const wrapper = h("div", {}, row.el, editor.el);
+    if ((await PromptEditor.openPromptDialog({ title: "New session", okLabel: "Start", editor: { ...editor, el: wrapper }, onOk })) == null) return;
+    cwd = row.value();
     const v = new SessionView({ sessionId: res.sessionId, cwd, title: "" });
     views.set(res.sessionId, v);
     flushEarly(v);

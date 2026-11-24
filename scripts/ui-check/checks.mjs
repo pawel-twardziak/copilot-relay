@@ -2790,7 +2790,8 @@ export const checks = [
 
       await app.ev(`(window.__newSession = newSession(${JSON.stringify(work)}), true)`);
       await opened();
-      assert.equal(await app.ev(`${D}.querySelector("h2").textContent`), `New session in ${work}`);
+      assert.equal(await app.ev(`${D}.querySelector("h2").textContent`), "New session");
+      assert.equal(await app.ev(`${D}.querySelector(".folder-path").textContent`), work);
       assert.equal(await app.ev(`document.querySelector("#prompt-ok").textContent`), "Start");
       // the folds: the default part, read-only; no child part for a new session
       const folds = await app.ev(`[...${D}.querySelectorAll("details")].map((d) => [d.querySelector("summary").textContent, d.querySelector("pre")?.textContent ?? null, d.open])`);
@@ -2825,6 +2826,47 @@ export const checks = [
       assert.equal(await app.ev(`${D}.open`), false);
       await new Promise((r) => setTimeout(r, 500)); // a start would have written its entry by now
       assert.equal(starts().length, n, "no Copilot started");
+      assert.equal(await app.ev(`views.size`), shown, "no view");
+    },
+  },
+  {
+    // the new-session dialog shows its folder with a Change… button; the folder it holds at Start is the session's
+    name: "new-session-folder",
+    modes: ["off"],
+    async run(app) {
+      const work = path.join(app.dir, "work");
+      const other = path.join(app.dir, "other");
+      const gone = path.join(app.dir, "gone");
+      mkdirSync(other, { recursive: true });
+      mkdirSync(gone, { recursive: true });
+      const D = `document.querySelector("#prompt-dialog")`;
+      const opened = () => app.check(`${D}.open`, "the prompt dialog");
+      await app.ev(`(window.__newSession = newSession(${JSON.stringify(work)}), true)`);
+      await opened();
+      assert.equal(await app.ev(`document.querySelector("#prompt-title").textContent`), "New session");
+      assert.equal(await app.ev(`${D}.querySelector(".folder-path").textContent`), work);
+      assert.equal(await app.ev(`${D}.querySelector(".folder-change").textContent`), "Change…");
+      assert.equal(await app.ev(`${D}.querySelector(".folder-change").disabled`), false);
+      await app.ev(`${D}.querySelector(".folder-row")._row.set(${JSON.stringify(other)})`);
+      assert.equal(await app.ev(`${D}.querySelector(".folder-path").textContent`), other);
+      await app.ev(`document.querySelector("#prompt-ok").click()`);
+      await app.ev(`window.__newSession`, "newSession to return");
+      assert.equal(await app.ev(`${D}.open`), false);
+      assert.equal(await app.ev(`[...views.values()].at(-1).cwd`), other, "the session runs in the changed folder");
+      // a folder removed before Start: the dialog stays open, says why, and Start can be pressed again
+      const shown = await app.ev(`views.size`);
+      await app.ev(`(window.__newSession = newSession(${JSON.stringify(work)}), true)`);
+      await opened();
+      await app.ev(`${D}.querySelector(".folder-row")._row.set(${JSON.stringify(gone)})`);
+      rmSync(gone, { recursive: true });
+      await app.ev(`document.querySelector("#prompt-ok").click()`);
+      await app.check(`${D}.querySelector("#prompt-note").textContent.startsWith("Could not start the session:")`, "the start error in the dialog");
+      assert.equal(await app.ev(`${D}.querySelector("#prompt-note").textContent`), `Could not start the session: Folder does not exist: ${gone}`);
+      assert.equal(await app.ev(`${D}.open`), true, "the dialog stays open");
+      assert.equal(await app.ev(`${D}.querySelector(".folder-change").disabled`), false, "Change… can be used again");
+      assert.equal(await app.ev(`document.querySelector("#prompt-ok").disabled`), false);
+      await app.ev(`document.querySelector("#prompt-cancel").click()`);
+      await app.ev(`window.__newSession`, "newSession to return");
       assert.equal(await app.ev(`views.size`), shown, "no view");
     },
   },
