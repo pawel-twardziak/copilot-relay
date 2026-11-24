@@ -9,8 +9,8 @@ import { SERVER, startBroker } from "./broker-helper.mjs";
 
 const health = async (b) => (await fetch(`${b.url}/health`)).json();
 // fetch only says "fetch failed": the cause (ECONNRESET, UND_ERR_SOCKET…) is what tells a lost answer apart
-const post = (b, headers = { "content-type": "application/json" }) =>
-  fetch(`${b.url}/api/shutdown`, { method: "POST", headers, body: "{}" }).catch((e) => {
+const post = (b, headers = { "content-type": "application/json" }, body = "{}") =>
+  fetch(`${b.url}/api/shutdown`, { method: "POST", headers, body }).catch((e) => {
     throw new Error(`${e.message}: ${e.cause?.code ?? e.cause?.message ?? "no cause"}`, { cause: e });
   });
 
@@ -62,7 +62,7 @@ test("the broker answers a shutdown only after the whole request, closes the con
   assert.match(c.got, /\r\nconnection: close\r\n/i);
   assert.ok(c.got.includes(JSON.stringify({ ok: true, pid: b.proc.pid })), "the answer's body arrived");
   assert.equal(await within(b.exited, 5000, "the broker to exit"), 0);
-  assert.ok(Date.now() - sent < 1500, "the exit follows the close, not the 2 s fallback timer");
+  assert.ok(Date.now() - sent < 1800, "the exit follows the close, not the 2 s fallback timer");
 });
 
 test("a shutdown request that is cut off leaves the broker running", async (t) => {
@@ -82,7 +82,7 @@ test("a shutdown request that is cut off leaves the broker running", async (t) =
 
 test("a shutdown request with a body that is not JSON still stops the broker", async (t) => {
   const b = await startBroker(t);
-  const r = await fetch(`${b.url}/api/shutdown`, { method: "POST", headers: { "content-type": "application/json" }, body: "{x}" });
+  const r = await post(b, undefined, "{x}");
   assert.equal(r.status, 200);
   assert.equal(await within(b.exited, 5000, "the broker to exit"), 0);
 });

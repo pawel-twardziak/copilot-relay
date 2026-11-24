@@ -19,9 +19,10 @@ the test's name and the comment on the fallback timer said more than was true.
    under the answer, with the request body unread); whether that was the way is open.
    *Proposal:* the test's `post` helper now puts the cause into the error (`fetch failed: <code>`). At the next
    failure read it: `ECONNRESET` or `UND_ERR_SOCKET` means the answer is still lost at exit (then let the exit wait
-   for the caller's own close instead of the broker's); `ECONNREFUSED` means nothing listened on the port, which points
-   at `freePort` in `electron/test/broker-helper.mjs` (a port found free and taken by another test file's broker before
-   this one listens) rather than at the shutdown.
+   for the caller's own close instead of the broker's); `ECONNREFUSED` means the broker that had printed its listen line
+   was gone, or no longer accepted, before the request arrived (`startBroker` in `electron/test/broker-helper.mjs`
+   resolves only after that line, and a broker that finds its port taken exits with code 3 before any POST), so the
+   question is then what stopped it.
 2. **A second test fails now and then on Windows:** "timeout kills the whole tree"
    (`electron/test/job-runner.test.mjs`, the test at line 29; `Missing expected exception` at line 36), seen on
    2026-11-24 in run 45449603251 on a commit that did not touch the job runner. Not analysed.
@@ -40,15 +41,20 @@ Nothing open.
    before the change; `stop` in `electron/broker-restart.mjs` treats a dropped answer as normal.
 5. **`res.socket` being null** in the handler could not be produced; the handler uses `res.socket?.once` and the
    fallback timer (`SHUTDOWN_GRACE_MS`) covers a close that never fires.
+6. **The handler's `catch` accepts any integer `e.code` as the HTTP status** (`Number.isInteger(e.code)` in
+   `server.mjs`). An error carrying an integer that is not a status (a JSON-RPC code such as -32603) would still throw
+   in `writeHead`. No path does that today. A range check (400 to 599) closes it.
+7. **Every request cut off mid-body is now logged with a stack** (`console.error(e)` in the same `catch`, since it is
+   not an `HttpError`). Noise on stderr only.
 
 ## D. Tests and housekeeping
 
-6. **The order "the connection is closed, then the process exits" is not proved by a test**: it cannot be seen from
-   outside the process. The test bounds the time from the body to the exit (under 1.5 s), so a broker that only exits
+8. **The order "the connection is closed, then the process exits" is not proved by a test**: it cannot be seen from
+   outside the process. The test bounds the time from the body to the exit (under 1.8 s), so a broker that only exits
    on the 2 s timer fails; a broker that reads the body, sends `Connection: close` and exits in the write callback
    would still pass.
-7. **The fallback timer has no test** (nothing produces a close that never fires).
-8. **Fixed waits** in `broker-shutdown.test.mjs`: 300 ms and 100 ms sleeps before assertions that nothing happened.
+9. **The fallback timer has no test** (nothing produces a close that never fires).
+10. **Fixed waits** in `broker-shutdown.test.mjs`: 300 ms and 100 ms sleeps before assertions that nothing happened.
    A cost, not a source of flakes.
 
 ## Known limitations and open manual checks
