@@ -65,7 +65,7 @@ survives broker restarts and `copilot --resume`. To change it:
 
 Terminal sessions (extension) get `relay_list_sessions`, `relay_send_message(to, text)` and `relay_set_name(name, role?)`.
 MCP clients get `list_sessions`, `send_message`, `set_name`, `read_inbox` and `wait_for_message(timeout_seconds)`.
-Desktop-app sessions also get `create_session(name, task, agent?, model?)`, `report_result(text)`,
+Desktop-app sessions also get `create_session(name, task, agent?, model?, folder?, prompt?, context?, command?)`, `report_result(text)`,
 `adopt_session(name)` and `release_session(name)`, see
 [Delegated sessions](electron/README.md#delegated-sessions).
 
@@ -85,8 +85,9 @@ existing Copilot CLI session, or starts a new one in a chosen folder, over ACP. 
 ACP mode, so the app connects its sessions to the broker itself, with the same names and the same tools.
 
 In the app, a session can also ask for a *delegated* session for one task (`create_session`), optionally with its own
-agent and model. Every creation needs a click on **Approve** in the app. The child is an ordinary session in the
-**same folder and branch as its parent, with no isolation**, and sends its result back with `report_result`. A child
+agent, model, folder, context size, prompt part and `copilot` arguments. Every creation needs a click on **Approve**
+in the app, where each value can be changed. The child is an ordinary session in the
+**same folder and branch as its parent by default, with no isolation**, and sends its result back with `report_result`. A child
 can create children of its own, to any depth, with no limit on their number. The app shows them as a tree, in the
 session list and in a relation bar in each session. Session names are unique and permanent (`<base>-<6 hex>`).
 See [Delegated sessions](electron/README.md#delegated-sessions).

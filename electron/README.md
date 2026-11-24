@@ -192,9 +192,16 @@ A click opens a full-screen preview instead of the system app: the changes brows
 A session can ask for a new session dedicated to one task, a *delegated* (child) session. Unlike a subagent, a child is
 an ordinary session: it appears in the list, you can open it, read what it did, keep talking to it, and resume it later.
 
-- **`create_session(name, task, agent?, model?)`** is called by the parent. A card appears in the parent's view with
-  the name, the full task, the agent, the model (or "inherited") and the folder, a prompt editor and a **Copilot
-  command** field (it starts with the parent's command; see "A command per session"), with **Approve** and **Reject**.
+- **`create_session(name, task, agent?, model?, folder?, prompt?, context?, command?)`** is called by the parent.
+  `folder` is an absolute path (default: the parent's folder), `prompt` is the child's own prompt part, `context` is
+  `default` (200k) or `long_context` (1M), and `command` may only be `copilot` with plain arguments, which are added
+  after the command the parent itself runs; anything else is refused with "Not sent: …". A card appears in the
+  parent's view with the name and the full task (read-only) and every other value editable: the folder with a
+  **Change…** button (the system folder picker), **Context**, **Agent** and **Model** (the parent's lists), the own
+  prompt part and the **Copilot command** (see "A command per session"), with **Approve** and **Reject**. A value the
+  parent filled is marked "from <parent>", and a command it wrote says it runs when you approve. A value that could
+  not be taken (a missing or network folder, a bad command, an unknown agent or model) falls back to the default,
+  with a note under its field. When the child runs in another folder, the parent is told so.
   **Every creation needs your click**: there is no "always allow", and no model or message can answer the card. The
   parent is marked `!` in the list, and an OS notification fires if the window is not focused. The tool returns at
   once; the outcome arrives later as a message from `relay`, so the parent can keep working. If the child's Copilot
@@ -475,7 +482,8 @@ the shell is `cmd`, where only double quotes group an argument: write `--allow-t
 
 The `COPILOT_PATH` environment variable works too, and is such a line as well.
 
-**A command per session.** In the dialog of a new session, or later in the session's **Setup**, a session can have its
+**A command per session.** In the dialog of a new session (which also has the folder row with **Change…**; the folder of an existing session
+cannot be changed), or later in the session's **Setup**, a session can have its
 own Copilot command. It replaces the Settings command for that session; empty means the Settings command. The card
 that approves a delegated child has the same field: it starts with the parent's command, and what it holds when you
 approve becomes the child's command (cleared: the Settings command). If a session's command is broken, repair it
