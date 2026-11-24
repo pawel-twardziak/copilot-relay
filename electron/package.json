@@ -49,6 +49,7 @@
       "activity-panel.mjs",
       "context-tier.mjs",
       "copilot-command.mjs",
+      "child-command.mjs",
       "session-prompts.mjs",
       "session-setup.mjs",
       "jobs.mjs",
