@@ -1,5 +1,6 @@
-# TEMPORARY (branch fix/broker-shutdown-flush only): runs the POST /api/shutdown test many times on Windows to
-# measure how often the answer is lost. Removed before the branch is merged.
+# TEMPORARY (branch fix/broker-shutdown-flush only): runs the POST /api/shutdown test many times on Windows, under
+# load (12 at a time, as in the full suite where the test files run in parallel), with main's server.mjs (baseline)
+# and with the fixed one. Removed before the branch is merged.
 name: Shutdown stress
 
 on:
@@ -11,6 +12,10 @@ permissions:
 
 jobs:
   stress:
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [baseline, fix]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,15 +28,30 @@ jobs:
             electron/package-lock.json
       - run: npm ci
       - run: npm ci --prefix electron --omit=dev
-      - name: POST /api/shutdown, 200 runs
+      - name: main's server.mjs
+        if: matrix.variant == 'baseline'
         shell: bash
         run: |
-          fail=0
-          for i in $(seq 1 200); do
-            if ! node --test --test-name-pattern="POST /api/shutdown answers" electron/test/broker-shutdown.test.mjs > out.txt 2>&1; then
-              fail=$((fail+1))
-              if [ "$fail" -le 3 ]; then grep -E "error:|code:|cause|ECONN|UND_ERR" out.txt | head -8; fi
-            fi
-          done
-          echo "runs=200 failed=$fail"
-          test "$fail" -eq 0
+          git fetch --depth=1 origin main
+          git checkout FETCH_HEAD -- server.mjs
+          grep -c "SHUTDOWN_GRACE_MS" server.mjs || true
+      - name: POST /api/shutdown, 12 workers x 60 runs (${{ matrix.variant }})
+        shell: bash
+        run: |
+          worker() {
+            local fail=0
+            for i in $(seq 1 60); do
+              if ! node --test --test-name-pattern="POST /api/shutdown answers" electron/test/broker-shutdown.test.mjs > "out-$1.txt" 2>&1; then
+                fail=$((fail+1))
+                grep -E "error:|cause|ECONN|UND_ERR" "out-$1.txt" | head -4 >> "errors-$1.txt"
+              fi
+            done
+            echo "$fail" > "fail-$1.txt"
+          }
+          for w in $(seq 1 12); do worker "$w" & done
+          wait
+          total=0
+          for w in $(seq 1 12); do total=$((total + $(cat "fail-$w.txt"))); done
+          cat errors-*.txt 2>/dev/null | sort | uniq -c | head -10
+          echo "variant=${{ matrix.variant }} runs=720 failed=$total"
+          if [ "${{ matrix.variant }}" = "fix" ]; then test "$total" -eq 0; fi
