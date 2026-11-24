@@ -49,7 +49,7 @@ contextBridge.exposeInMainWorld("api", {
   answerPermission: (sessionId, reqId, optionId) => call("permission:answer", sessionId, reqId, optionId),
   // a delivered report or notice has started its prompt: the broker may forget it
   relayAck: (sessionId, id) => call("relay:ack", sessionId, id),
-  answerDelegation: (requestId, approved, own) => call("delegation:answer", requestId, approved, own),
+  answerDelegation: (requestId, approved, own, command) => call("delegation:answer", requestId, approved, own, command),
   // the broker's sub-session links ({ key: "cli:<id>", parent, name, task, createdAt, reported, parentDeleted, online,
   // busy }): the cached snapshot at once, the fresh one follows through onLinks
   getLinks: () => call("links:get"),

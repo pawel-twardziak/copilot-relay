@@ -6,6 +6,15 @@
 (function () {
   "use strict";
 
+  // cmd.exe does not treat ' as a quote: a line written for a POSIX shell reaches Copilot with the quotes in it
+  const WINDOWS_QUOTES = 'On Windows only double quotes ("…") group an argument.';
+
+  /** The hint under a command field; on Windows (platform "win32") it also names the quoting rule. */
+  function commandHint(platform) {
+    const hint = "Empty: the command from Settings. May carry arguments; the app adds --acp --stdio at the end.";
+    return platform === "win32" ? `${hint} ${WINDOWS_QUOTES}` : hint;
+  }
+
   /** What picking `template` does to the own part: its text at once when the text area is empty (blanks only) or
    *  holds the untouched text of the last picked template; else { ask: true }, so typed text is never lost unasked. */
   function pickTemplate(state, template) {
@@ -20,9 +29,9 @@
   /**
    * The editor. defaultPart / childPart: the Settings parts (childPart null: not a child, that fold is not shown);
    * templates: [{ id, name, text }]; own: the text the area starts with; h: the app's DOM helper (app.js). The session
-   * stores the text, never which template it came from. command ({ value, settings }, optional) adds the session's
-   * Copilot command field under the text area: empty means the Settings command, shown as the placeholder. Without
-   * it there is no field.
+   * stores the text, never which template it came from. command ({ value, settings, platform }, optional) adds the
+   * session's Copilot command field under the text area: empty means the Settings command, shown as the placeholder;
+   * platform (the app's process.platform) picks the hint (commandHint). Without it there is no field.
    * @returns {{ el: HTMLElement, value(): string, command(): string, focus(): void }}
    */
   function createPromptEditor({ defaultPart, childPart, templates, own, command, h }) {
@@ -105,7 +114,7 @@
           { class: "pe-command-row" },
           h("span", {}, "Copilot command"),
           commandInput,
-          h("span", { class: "hint" }, "Empty: the command from Settings. May carry arguments; the app adds --acp --stdio at the end."),
+          h("span", { class: "hint" }, commandHint(command.platform)),
         ),
     );
     return { el: root, value: () => area.value, command: () => commandInput?.value ?? "", focus: () => area.focus() };
@@ -215,7 +224,7 @@
     });
   }
 
-  const PromptEditor = { pickTemplate, createPromptEditor, openPromptDialog };
+  const PromptEditor = { pickTemplate, createPromptEditor, openPromptDialog, commandHint, WINDOWS_QUOTES };
   globalThis.PromptEditor = PromptEditor;
   if (typeof module !== "undefined") module.exports = PromptEditor;
 })();

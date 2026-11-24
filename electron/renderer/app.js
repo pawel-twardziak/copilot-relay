@@ -2090,9 +2090,11 @@ class SessionView {
   }
 
   /** This session asks for a new session. Everything on the card is model-written: plain text only, never Markdown.
-   *  The prompt editor between the task and the buttons takes the child's own part (Approve sends it, Reject not);
-   *  Approve waits until the editor has its Settings parts. */
-  delegationCard({ requestId, name, task, agent, model, cwd }) {
+   *  The prompt editor between the task and the buttons takes the child's own part and its Copilot command (Approve
+   *  sends them, Reject not); Approve waits until the editor has its Settings parts. `command` is this session's own
+   *  command, from main's store (not model-written): the field starts with it, so a card left alone gives the child
+   *  what its parent has. */
+  delegationCard({ requestId, name, task, agent, model, cwd, command = "" }) {
     this.flush();
     const field = (label, value) => [h("dt", {}, label), h("dd", {}, value)];
     let editor = null;
@@ -2100,11 +2102,13 @@ class SessionView {
     const answer = async (approved) => {
       this.closeCard(card);
       const own = approved ? (editor?.value() ?? "") : "";
-      for (const c of promptSlot.querySelectorAll("textarea, select, button")) c.disabled = true; // answered: nothing to edit
+      // without the editor (Settings could not be read) the child takes the parent's command, as the field would show
+      const childCommand = editor ? editor.command() : command;
+      for (const c of promptSlot.querySelectorAll("textarea, select, button, input")) c.disabled = true; // answered: nothing to edit
       opts.replaceChildren(h("span", {}, approved ? "Creating the session…" : "Rejecting…"));
       let result;
       try {
-        const stillOpen = await api.answerDelegation(requestId, approved, own);
+        const stillOpen = await api.answerDelegation(requestId, approved, own, childCommand);
         result = !stillOpen ? "This request is no longer open." : approved ? "→ Approved" : "→ Rejected";
       } catch (e) {
         result = `Could not answer: ${e.message}`;
@@ -2126,10 +2130,17 @@ class SessionView {
     api
       .getSettings()
       .then((s) => {
-        editor = PromptEditor.createPromptEditor({ defaultPart: s.promptDefault ?? "", childPart: s.promptChild ?? s.childPartDefault ?? "", templates: s.promptTemplates ?? [], own: "", h });
+        editor = PromptEditor.createPromptEditor({
+          defaultPart: s.promptDefault ?? "",
+          childPart: s.promptChild ?? s.childPartDefault ?? "",
+          templates: s.promptTemplates ?? [],
+          own: "",
+          command: { value: command, settings: s.effective, platform: s.platform },
+          h,
+        });
         promptSlot.replaceChildren(editor.el);
       })
-      .catch((e) => promptSlot.replaceChildren(h("p", { class: "hint" }, `Could not read the prompt parts (${e.message}). Approve starts the session without an own part.`)))
+      .catch((e) => promptSlot.replaceChildren(h("p", { class: "hint" }, `Could not read the prompt parts (${e.message}). Approve starts the session without an own part, with this session's Copilot command.`)))
       .finally(() => (approveBtn.disabled = false));
     this.append(card);
     this.openCard(card);
@@ -2348,7 +2359,7 @@ class SessionView {
       childPart: p.isChild ? p.childPart : null,
       templates: s.promptTemplates ?? [],
       own: p.own,
-      command: { value: p.command, settings: p.settingsCommand },
+      command: { value: p.command, settings: p.settingsCommand, platform: s.platform },
       h,
     });
     let restart = false;
@@ -2829,7 +2840,7 @@ async function newSession(cwd) {
     cwd ??= await api.pickDir();
     if (!cwd) return;
     const s = await api.getSettings();
-    const editor = PromptEditor.createPromptEditor({ defaultPart: s.promptDefault ?? "", childPart: null, templates: s.promptTemplates ?? [], own: "", command: { value: "", settings: s.effective }, h });
+    const editor = PromptEditor.createPromptEditor({ defaultPart: s.promptDefault ?? "", childPart: null, templates: s.promptTemplates ?? [], own: "", command: { value: "", settings: s.effective, platform: s.platform }, h });
     let res = null;
     const onOk = async (own, command) => {
       setStatus(`Starting Copilot in ${cwd}…`);
@@ -3520,6 +3531,7 @@ async function openSettings() {
     `Leave empty to use "copilot" from PATH (or $COPILOT_PATH). Currently used: ${s.effective}\n` +
     `May carry arguments; the system shell runs it and the app adds --acp --stdio at the end.\n` +
     `Quote a path with spaces, or give the path alone, e.g. ${example}\n` +
+    (s.platform === "win32" ? `${PromptEditor.WINDOWS_QUOTES}\n` : "") +
     `A session can have its own command in its Setup. Find Copilot with: ${s.platform === "win32" ? "where copilot" : "which copilot"}`;
   renderStorage();
   $("#set-relay").checked = s.relay;

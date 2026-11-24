@@ -369,6 +369,7 @@ async function connect(cwd, { deadline, args = [], prompt = "", command = settin
         source: command.source,
         detail: String(e?.message ?? e),
         notFound: isNotFoundExit(e),
+        stopped: typeof e?.exitCode === "number", // it ended by itself and said why (see startFailureText)
         login: needsLogin(e),
         loginHint: LOGIN_HINT,
         generalHint: "If GitHub Copilot CLI is installed, check that you are signed in (`copilot login` in a terminal). Otherwise install it.",
@@ -889,7 +890,8 @@ function sessionRequested(parentSessionId, { requestId, name, task, agent, model
   const req = { requestId, parentSessionId, name, task, agent, model };
   pendingRequests.add(req);
   notifyIfUnfocused("A session asks to start a new session", name);
-  send("delegation:request", { ...req, cwd: parent.cwd });
+  // the parent's own command, for the card's command field: from the store, never from the request
+  send("delegation:request", { ...req, cwd: parent.cwd, command: commands.get(parentSessionId) });
 }
 
 /** The broker asks the user (through the sender's view) to reopen a closed relative that a message is waiting for. */
@@ -968,8 +970,10 @@ async function setConfigOption(sessionId, entry, configId, value) {
   return res?.configOptions ?? null;
 }
 
-/** Create the approved child and link it to its parent. Never throws: every failure ends as an outcome for the parent. */
-async function createChild(req, own = "") {
+/** Create the approved child and link it to its parent. Never throws: every failure ends as an outcome for the parent.
+ *  `command`: what the approval card's command field held ("" for the Settings command); a card without the field
+ *  (undefined) gives the parent's stored command, which is also what the field starts with. */
+async function createChild(req, own = "", command = undefined) {
   const { parentSessionId, name, task, agent, model } = req;
   const parent = open.get(parentSessionId);
   if (!parent) return;
@@ -985,7 +989,7 @@ async function createChild(req, own = "") {
   };
   try {
     const tier = sessionTier(parentSessionId); // the child works on the parent's context window
-    child = await createSession(parent.cwd, { name, parentKey: `cli:${parentSessionId}` }, deadline, tier, own, commands.get(parentSessionId), "parent");
+    child = await createSession(parent.cwd, { name, parentKey: `cli:${parentSessionId}` }, deadline, tier, own, command ?? commands.get(parentSessionId), "parent");
     const { sessionId, entry } = child;
     tiers.set(sessionId, tier); // as an override, so a later reopen keeps it
     if (!entry.relay) throw new Error("The relay is switched off in this app, so the new session cannot be linked to its parent.");
@@ -1021,10 +1025,11 @@ async function createChild(req, own = "") {
 }
 
 // reachable only from the window (preload): nothing the broker or a session sends can answer a request
-handle("delegation:answer", async (requestId, approved, own) => {
+// (so the child's command is the user's typing on the card, or the parent's stored one)
+handle("delegation:answer", async (requestId, approved, own, command) => {
   const req = pendingRequests.take(requestId);
   if (!req) return false;
-  if (approved === true) await createChild(req, String(own ?? ""));
+  if (approved === true) await createChild(req, String(own ?? ""), typeof command === "string" ? command : undefined);
   else tellParent(req, "rejected", `The user rejected the request to create session "${req.name}".`);
   return true;
 });

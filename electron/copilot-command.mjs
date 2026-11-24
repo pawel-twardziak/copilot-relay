@@ -12,8 +12,14 @@ const NOT_FOUND = "The program was not found, or cannot be run.";
 const WHERE = {
   session: "This is this session's own command. Change it in the session's Setup.",
   settings: "This is the command from Settings. Change it there, or give the session its own Copilot command.",
-  parent: "This is the parent session's command. Change it in the parent's Setup.",
+  parent: "This is the command from the child's approval card, which starts as the parent session's command. Change it on the card, or in the parent's Setup.",
 };
+// the command ran and ended with a message of its own (an argument it does not take, a shell error): the remedy is
+// the command. cmd.exe does not treat ' as a quote, so a line written for a POSIX shell fails this way on Windows.
+const stoppedHint = (platform) =>
+  "The command stopped with the message above. Check the program and its arguments" +
+  (platform === "win32" ? ' (on Windows only double quotes "…" group an argument)' : "") +
+  "; if they are right, check that you are signed in (`copilot login` in a terminal).";
 
 /** The trimmed command (an empty one means "none"), or why it is refused. */
 export function normalizeCommand(value) {
@@ -57,9 +63,11 @@ export function shellLine(command, args, { platform = process.platform, isFile =
   return [head, ...args].join(" ");
 }
 
-/** The text of a failed start: the command, the detail, then what to do about it. */
-export function startFailureText({ command, source, detail, notFound, login, loginHint, generalHint }) {
-  const tail = login ? loginHint : notFound ? `${NOT_FOUND} ${WHERE[source]}` : `${generalHint} ${WHERE[source]}`;
+/** The text of a failed start: the command, the detail, then what to do about it. `stopped`: the process ended by
+ *  itself with an exit code (it said why in `detail`); without it (a deadline, a signal) the general hint is given. */
+export function startFailureText({ command, source, detail, notFound, login, loginHint, generalHint, stopped = false, platform = process.platform }) {
+  const hint = notFound ? NOT_FOUND : stopped ? stoppedHint(platform) : generalHint;
+  const tail = login ? loginHint : `${hint} ${WHERE[source]}`;
   return `Could not start "${command}": ${detail}\n\n${tail}`;
 }
 
