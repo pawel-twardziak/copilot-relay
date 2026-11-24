@@ -439,8 +439,8 @@ The app runs `copilot` from `PATH`. On macOS and Linux it reads `PATH` from your
 global and `~/.local/bin` installs are found even when the app is started from the Dock or a desktop launcher.
 If Copilot still isn't found, open **⚙ Settings** and enter its command. The command is a line that may carry
 arguments; the system shell runs it, and the app adds `--acp --stdio` at its end, so it must be one command that
-takes them. A path with spaces is quoted (`"C:\Program Files\...\copilot.exe"`) or given alone (a path that is an
-existing file works unquoted). A wrapper script must pass its arguments on (`exec copilot "$@"`). Typical paths:
+takes them. A path with spaces is quoted (`"C:\Program Files\...\copilot.exe"`) or given alone (an absolute path
+to an existing file works unquoted). A wrapper script must pass its arguments on (`exec copilot "$@"`). Typical paths:
 
 | OS | find it with | typical path |
 |---|---|---|
