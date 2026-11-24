@@ -57,6 +57,7 @@ const SPLIT_SCENARIO = path.join(FIXTURES, "tool-split-scenario.mjs");
 const CHANGES_SCENARIO = path.join(FIXTURES, "changes-scenario.mjs");
 const LINK_SCENARIO = path.join(FIXTURES, "link-scenario.mjs");
 const CHILD_PROMPT_SCENARIO = path.join(FIXTURES, "child-prompt-scenario.mjs");
+const CHILD_PARAMS_SCENARIO = path.join(FIXTURES, "child-params-scenario.mjs");
 const PERMISSION_WAIT_SCENARIO = path.join(FIXTURES, "permission-wait-scenario.mjs");
 const PANEL_MODES = ["subagents", "all"];
 const savedMode = (app) => app.ev(`api.getSettings().then((s) => s.activityPanel)`);
@@ -1295,10 +1296,13 @@ export const checks = [
       // a delegation card ("New session requested") closes it too (as main would send one: no session is created)
       await headerClick(app);
       assert.equal(await shown(app, `${V}.panel`), true, "the drawer open again");
-      await app.ev(`${V}.delegationCard({ requestId: "ui-check", name: "child", task: "A task.", agent: "", model: "", cwd: ${V}.cwd })`);
+      const start = `{ cwd: ${V}.cwd, tier: "default", agent: "", model: "", own: "", command: "", agents: [], models: [], currentModel: null, parentName: "the session", from: {}, notes: {} }`;
+      await app.ev(`${V}.delegationCard({ requestId: "ui-check", name: "child", task: "A task.", start: ${start} })`);
       await frames(app);
       assert.equal(await shown(app, `${V}.panel`), false, "the delegation card closed the drawer");
       assert.equal(await shown(app, `${V}.el.querySelector(".perm.delegation")`), true, "the delegation card shows");
+      // a parent without custom agents: the Agent select holds only the default and cannot be changed
+      assert.deepEqual(await app.ev(`(() => { const s = ${V}.el.querySelector(".perm.delegation select.dc-agent"); return [s.disabled, [...s.options].map((o) => o.textContent)]; })()`), [true, ["default"]]);
     },
   },
   {
@@ -3161,6 +3165,170 @@ export const checks = [
       assert.ok(!(await notices()).some((t) => t.includes("copilot-ui-check")), "the command does not travel to the parent");
       assert.equal(await app.ev(`views.has("scripted-work-2")`), false, "no child");
       await app.idle();
+    },
+  },
+  {
+    // every parameter the parent asks for is on the card, editable, and the child starts with what the card shows:
+    // the folder row, the Context, Agent and Model selects, the own part, the parent's command with the added
+    // arguments and the warning, a "from" mark per value the parent set; a value that cannot be taken gets a note;
+    // a folder removed before Approve leaves the card answerable; a bad command never makes a card (the tool says no)
+    name: "child-card-params",
+    modes: ["off"],
+    scenario: CHILD_PARAMS_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      const argvFile = path.join(app.dir, "argv.jsonl");
+      const command = `SCRIPTED_ARGV_FILE='${argvFile}' '${SCRIPTED_AGENT}' --tag parent`;
+      const lines = () => (existsSync(argvFile) ? readFileSync(argvFile, "utf8").split("\n").filter(Boolean) : []);
+      const D = `document.querySelector("#prompt-dialog")`;
+      const card = (i) => `${V}.el.querySelectorAll(".perm.delegation")[${i}]`;
+      const work = path.join(app.dir, "work");
+      const other = path.join(app.dir, "other");
+      mkdirSync(other);
+      await app.ev(`(window.__newSession = newSession(${JSON.stringify(work)}), true)`);
+      await app.check(`${D}.open && !!${D}.querySelector(".pe-command")`, "the prompt dialog with the command field");
+      await app.ev(`(() => { const t = ${D}.querySelector(".pe-command"); t.value = ${JSON.stringify(command)}; t.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+      await app.ev(`document.querySelector("#prompt-ok").click()`);
+      await app.ev(`window.__newSession`, "newSession to return");
+      await app.check(`!!${V} && !${V}.busy`, "the parent's view");
+      await app.check(`!!${V}.relayName && !${V}.relayChip.hidden && !${V}.relayChip.classList.contains("off")`, "the parent to connect to the broker");
+      const parentName = await app.ev(`${V}.relayName`);
+      // the driver's send needs the session newSession() of the driver made: this one was started by its dialog
+      const ask = (fields) => app.ev(`(() => { const v = ${V}; v.input.value = ${JSON.stringify(`create_session_json ${JSON.stringify(fields)}`)}; v.input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); })()`);
+      const ready = (i) => app.check(`!!${card(i)}?.querySelector(".prompt-editor") && !${card(i)}.querySelector(".opts button.primary").disabled`, `card ${i}`);
+      const shownOn = (i) =>
+        app.ev(`(() => { const c = ${card(i)}; const sel = (s) => c.querySelector(s); return {
+          folder: sel(".folder-row .folder-path").textContent,
+          context: sel("select.dc-context").value,
+          agent: sel("select.dc-agent").value,
+          model: sel("select.dc-model").value,
+          firstModel: [sel("select.dc-model").options[0].value, sel("select.dc-model").options[0].textContent],
+          own: sel(".pe-own").value,
+          command: sel(".pe-command").value,
+          warning: [...c.querySelectorAll(".dc-warning")].map((e) => e.textContent),
+          from: [...c.querySelectorAll(".dc-from")].map((e) => e.textContent),
+          notes: [...c.querySelectorAll(".dc-note")].map((e) => e.textContent),
+        }; })()`);
+      // the card's controls that are not the buttons: off while an answer runs
+      const controls = (i) => `[${card(i)}.querySelector(".folder-row .folder-change"), ...${card(i)}.querySelectorAll("select.dc-context, select.dc-agent, select.dc-model, .pe-own, .pe-command")]`;
+      const messages = () => app.ev(`[...${V}.log.querySelectorAll(":scope > .msg")].map((e) => e.textContent)`);
+
+      // 1. every field the parent set
+      await ask({ name: "kid", task: "T", folder: other, prompt: "P1", context: "long_context", agent: "rev", model: "m-b", command: "copilot --foo bar" });
+      await ready(0);
+      const from = `from ${parentName}`;
+      assert.deepEqual(await shownOn(0), {
+        folder: other,
+        context: "long_context",
+        agent: "rev",
+        model: "m-b",
+        firstModel: ["", "inherited (m-a)"],
+        own: "P1",
+        command: `${command} --foo bar`,
+        warning: ["Written by the session that asked. It runs when you approve."],
+        from: [from, from, from, from, from, from],
+        notes: [],
+      });
+      // Approve: while the start runs nothing on the card can be changed (read in the click's own task)
+      const during = await app.ev(`(() => { ${card(0)}.querySelector(".opts button.primary").click(); return ${controls(0)}.map((c) => c.className + ":" + c.disabled); })()`);
+      assert.ok(during.length === 6 && during.every((d) => d.endsWith(":true")), JSON.stringify(during));
+      const C = `views.get("scripted-other")`;
+      await app.check(`!!${C}`, "the child's view");
+      await app.check(`${card(0)}.classList.contains("done")`, "the card to be answered");
+      assert.match(await app.ev(`${card(0)}.querySelector(".opts").textContent`), /Approved/);
+      assert.equal(await app.ev(`${C}.cwd`), other, "the child works in the card's folder");
+      // set on the child's Copilot (session/set_config_option), as its header shows
+      assert.deepEqual(await app.ev(`[${C}.agentOption?.currentValue, [...${C}.selects.querySelectorAll("select")].find((s) => [...s.options].some((o) => o.value === "m-a"))?.value]`), ["rev", "m-b"], "the child's agent and model");
+      await until(async () => lines().length === 2, "the child's start");
+      const argv = JSON.parse(lines()[1]).join(" ");
+      for (const part of ["--tag parent", "--foo bar", "--context long_context"]) assert.ok(argv.includes(part), `${part} in ${argv}`);
+      await app.check(`!!${C}.relayName`, "the child to connect to the broker");
+      const childName = await app.ev(`${C}.relayName`);
+      const created = `Session "${childName}" was created in the folder "${other}" and has started on its task. It will send you its result with report_result.`;
+      await until(async () => (await messages()).some((t) => t.includes(created)), "the parent to be told where the child works");
+      await app.check(`!${V}.busy && !${C}.busy`, "both sessions idle");
+
+      // 2. a folder that is not there: the parent's folder and a note; a folder removed before Approve: the card stays
+      await ask({ name: "kid2", task: "T2", folder: "/nope" });
+      await ready(1);
+      const second = await shownOn(1);
+      assert.equal(second.folder, work, "the parent's folder");
+      assert.deepEqual(second.notes, ['Asked for the folder "/nope", which is not an existing absolute path.']);
+      const gone = path.join(app.dir, "gone");
+      mkdirSync(gone);
+      await app.ev(`${card(1)}.querySelector(".folder-row")._row.set(${JSON.stringify(gone)})`);
+      rmSync(gone, { recursive: true });
+      await app.ev(`${card(1)}.querySelector(".opts button.primary").click()`);
+      await app.check(`!${card(1)}.querySelector(".delegation-error").hidden`, "the start error on the card");
+      assert.equal(await app.ev(`${card(1)}.querySelector(".delegation-error").textContent`), `Folder does not exist: ${gone}`);
+      assert.equal(await app.ev(`${card(1)}.classList.contains("done")`), false, "the card takes another answer");
+      assert.deepEqual(await app.ev(`${controls(1)}.filter((c) => c.disabled).map((c) => c.className)`), [], "its controls are usable again");
+      assert.deepEqual(await app.ev(`[...${card(1)}.querySelectorAll(".opts button")].map((b) => b.textContent)`), ["Approve", "Reject"]);
+
+      // 3. another program as the command: the tool refuses it, nothing reaches the window
+      const before = (await messages()).length;
+      await ask({ name: "kid3", task: "T3", command: "node x" });
+      const refused = 'Not sent: Only the copilot command is allowed, not "node".';
+      await until(async () => (await messages()).slice(before).some((t) => t.includes(refused)), "the tool's refusal in the parent's chat");
+      await app.check(`!${V}.busy`, "the parent to be idle");
+      await new Promise((r) => setTimeout(r, 500)); // a card would have come by now
+      assert.equal(await app.ev(`${V}.el.querySelectorAll(".perm.delegation").length`), 2, "no card for the refused command");
+    },
+  },
+  {
+    // the child's own lists can differ from the parent's: a model the parent offers but the child's folder does not is
+    // refused after the child's start; the card stays open with the reason, the parent is told nothing, and another
+    // model on the card and a second Approve create the child (with the changed value). A parent closed while its
+    // card is open takes its request with it: an answer then finds nothing open and starts nothing.
+    name: "child-config-retry",
+    modes: ["off"],
+    scenario: CHILD_PARAMS_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      const card = (i) => `${V}.el.querySelectorAll(".perm.delegation")[${i}]`;
+      const otherB = path.join(app.dir, "other-b");
+      const workFile = path.join(app.dir, "work", ".scripted-agent.json");
+      const starts = (file) => (existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")).starts ?? []) : []);
+      mkdirSync(otherB);
+      await app.newSession();
+      await app.check(`!!${V}.relayName && !${V}.relayChip.hidden && !${V}.relayChip.classList.contains("off")`, "the parent to connect to the broker");
+      const inOtherB = `[...views.values()].find((v) => v.cwd === ${JSON.stringify(otherB)})`;
+      const messages = () => app.ev(`[...${V}.log.querySelectorAll(":scope > .msg")].map((e) => e.textContent)`);
+      await app.send(`create_session_json ${JSON.stringify({ name: "kid", task: "T", folder: otherB, model: "m-b" })}`);
+      await app.check(`!!${card(0)}?.querySelector(".prompt-editor") && !${card(0)}.querySelector(".opts button.primary").disabled`, "the card");
+      assert.equal(await app.ev(`${card(0)}.querySelector("select.dc-model").value`), "m-b");
+      await app.ev(`${card(0)}.querySelector(".opts button.primary").click()`);
+      await app.check(`!${card(0)}.querySelector(".delegation-error").hidden`, "the refusal on the card");
+      assert.equal(await app.ev(`${card(0)}.querySelector(".delegation-error").textContent`), 'Unknown model "m-b". Valid models: m-a.');
+      assert.equal(await app.ev(`${card(0)}.classList.contains("done")`), false, "the card takes another answer");
+      assert.equal(await app.ev(`!!${inOtherB}`), false, "no view for the discarded child");
+      assert.equal(starts(path.join(otherB, ".scripted-agent.json")).length, 1, "the child did start in other-b before it was refused");
+      // the inherited model, and a second Approve
+      await app.ev(`(() => { const s = ${card(0)}.querySelector("select.dc-model"); s.value = ""; s.dispatchEvent(new Event("change", { bubbles: true })); })()`);
+      await app.ev(`${card(0)}.querySelector(".opts button.primary").click()`);
+      await app.check(`!!${inOtherB}`, "the child's view in other-b");
+      await app.check(`${card(0)}.classList.contains("done")`, "the card to be answered");
+      assert.match(await app.ev(`${card(0)}.querySelector(".opts").textContent`), /Approved/);
+      await until(async () => (await messages()).some((t) => t.includes("was created")), "the parent to be told of the creation");
+      assert.ok(!(await messages()).some((t) => t.includes("was not created") || t.includes("Unknown model")), "no outcome for the refused start");
+      await app.idle();
+      await app.check(`!${inOtherB}.busy`, "the child to be idle");
+
+      // the parent closes while its second card is open
+      await app.ev(`api.onDelegationRequest((r) => { window.__request = r.requestId; })`);
+      await app.send(`create_session_json ${JSON.stringify({ name: "kid2", task: "T2" })}`);
+      await app.check(`!!window.__request && !!${card(1)}?.querySelector(".prompt-editor")`, "the second card");
+      await app.idle();
+      const workStarts = starts(workFile).length;
+      const viewsBefore = await app.ev(`views.size`);
+      await app.ev(`[...${V}.el.querySelectorAll(".head button")].find((b) => b.textContent === "Close").click()`);
+      await app.check(`!views.has("scripted-work")`, "the parent's view to close");
+      assert.equal(await app.ev(`api.answerDelegation(window.__request, true, "", "", {})`), false, "the request is no longer open");
+      await new Promise((r) => setTimeout(r, 500)); // a child would have been created by now
+      assert.equal(starts(workFile).length, workStarts, "no child started");
+      assert.ok((await app.ev(`views.size`)) < viewsBefore, "no view came");
     },
   },
   {

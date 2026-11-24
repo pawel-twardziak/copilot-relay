@@ -910,8 +910,8 @@ function sessionRequested(parentSessionId, request) {
     { cwd: parent.cwd, tier: sessionTier(parentSessionId), storedCommand, command: shellLine(commandFor(parentSessionId).command, []), configOptions: parent.configOptions, name: parent.relay?.name },
     { isDir: isDirectory },
   );
-  // cwd and command stay for the card that reads them; `start` is what the new card starts with
-  send("delegation:request", { ...req, cwd: start.cwd, command: start.command, start });
+  // the card reads only `start` for the child's values: the request's own fields (model-written) are not sent raw
+  send("delegation:request", { requestId: req.requestId, parentSessionId, name: req.name, task: req.task, start });
 }
 
 /** The broker asks the user (through the sender's view) to reopen a closed relative that a message is waiting for. */

@@ -2151,32 +2151,67 @@ class SessionView {
   }
 
   /** This session asks for a new session. Everything on the card is model-written: plain text only, never Markdown.
-   *  The prompt editor between the task and the buttons takes the child's own part and its Copilot command (Approve
-   *  sends them, Reject not); Approve waits until the editor has its Settings parts. `command` is this session's own
-   *  command, from main's store (not model-written): the field starts with it, so a card left alone gives the child
-   *  what its parent has. A child whose Copilot does not start leaves the card open with the reason, for another
-   *  command and a second Approve, or a Reject: main keeps the request and has told the parent nothing. */
-  delegationCard({ requestId, name, task, agent, model, cwd, command = "" }) {
+   *  `start` is what main made of the request (delegation.mjs cardStart): the folder, context, agent and model the
+   *  card starts with, their lists, the own part and the Copilot command, which values came from the parent (`from`)
+   *  and why a value it asked for was not taken (`notes`). Every one of them can be changed on the card; Approve
+   *  sends what the card shows, Reject nothing. Approve waits until the prompt editor has its Settings parts. A child
+   *  whose start fails (its command, its folder, or an agent or model its folder does not offer) leaves the card open
+   *  with the reason, for another value and a second Approve, or a Reject: main keeps the request and has told the
+   *  parent nothing. */
+  delegationCard({ requestId, name, task, start = {} }) {
     this.flush();
-    const field = (label, value) => [h("dt", {}, label), h("dd", {}, value)];
+    const from = start.from ?? {};
+    const notes = start.notes ?? {};
+    const command = start.command ?? "";
+    const fromMark = (key) => (from[key] ? h("span", { class: "dc-from" }, `from ${start.parentName || "the session"}`) : null);
+    const note = (key) => (notes[key] ? h("p", { class: "hint dc-note" }, notes[key]) : null);
+    const select = (cls, entries, value) => {
+      const sel = h("select", { class: cls }, entries.map(([v, label]) => h("option", { value: v }, label)));
+      sel.value = value ?? "";
+      if (sel.selectedIndex < 0) sel.selectedIndex = 0;
+      return sel;
+    };
+    // "" is the default agent and the inherited model: the first entry stands for it
+    const listed = (list) => (list ?? []).filter((o) => o.value !== "").map((o) => [o.value, o.name || o.value]);
+    const row = FolderRow.createFolderRow({ value: start.cwd ?? "", pick: (cur) => api.pickDir("Folder for the new session", cur), h });
+    const contextSel = select("dc-context", [["default", "200k"], ["long_context", "1M"]], start.tier);
+    const agentSel = select("dc-agent", [["", "default"], ...listed(start.agents)], start.agent);
+    if (agentSel.options.length < 2) agentSel.disabled = true; // no custom agents: only the default
+    const modelSel = select("dc-model", [["", start.currentModel ? `inherited (${start.currentModel})` : "inherited"], ...listed(start.models)], start.model);
+    const field = (label, value, key) => [h("dt", {}, label), h("dd", {}, key ? [h("div", { class: "dc-value" }, value, fromMark(key)), note(key)] : value)];
+    const fieldsEl = h(
+      "dl",
+      { class: "fields" },
+      field("Name", name),
+      field("Folder", row.el, "cwd"),
+      field("Context", contextSel, "tier"),
+      field("Agent", agentSel, "agent"),
+      field("Model", modelSel, "model"),
+    );
+    // the command field's marks: whose it is, the warning for a parent-written one, why the parent's was not taken
+    const commandMarks = () => [
+      from.command ? h("div", { class: "dc-marks" }, fromMark("command"), h("span", { class: "dc-warning" }, "Written by the session that asked. It runs when you approve.")) : null,
+      note("command"),
+    ];
     let editor = null;
     const promptSlot = h("div", { class: "delegation-prompt" }, h("p", { class: "hint" }, "Loading the prompt parts…"));
     const errorEl = h("p", { class: "hint delegation-error", hidden: true });
     const answer = async (approved) => {
       this.closeCard(card);
       const own = approved ? (editor?.value() ?? "") : "";
-      // without the editor (Settings could not be read) the child takes the parent's command, as the field would show
+      // without the editor (Settings could not be read) the child takes the command main gave, which the hint shows
       const childCommand = editor ? editor.command() : command;
+      const fields = approved ? { cwd: row.value(), tier: contextSel.value, agent: agentSel.value, model: modelSel.value } : undefined;
       // while it is answered nothing is edited; only what was usable is given back if the card takes another answer
-      const frozen = [...promptSlot.querySelectorAll("textarea, select, button, input")].filter((c) => !c.disabled);
+      const frozen = [fieldsEl, promptSlot].flatMap((el) => [...el.querySelectorAll("textarea, select, button, input")]).filter((c) => !c.disabled);
       for (const c of frozen) c.disabled = true;
       errorEl.hidden = true;
       opts.replaceChildren(h("span", {}, approved ? "Creating the session…" : "Rejecting…"));
       let result;
       try {
-        const res = await api.answerDelegation(requestId, approved, own, childCommand);
+        const res = await api.answerDelegation(requestId, approved, own, childCommand, fields);
         if (res?.outcome === "failed" && res.retry) {
-          // the child's Copilot did not start: the request is still open in main, and so is the card
+          // the child did not start: the request is still open in main, and so is the card
           for (const c of frozen) c.disabled = false;
           // without the editor there is no command field to change: say so, as the text points at the card
           errorEl.textContent = editor ? res.text : `${res.text}\n\nThis card could not load its command field. Reject it and let the session ask again.`;
@@ -2201,7 +2236,7 @@ class SessionView {
       "div",
       { class: "perm delegation" },
       h("div", { class: "q" }, h("b", {}, "New session requested")),
-      h("dl", { class: "fields" }, field("Name", name), field("Agent", agent || "default"), field("Model", model || "inherited"), field("Folder", cwd)),
+      fieldsEl,
       h("div", { class: "task" }, task),
       promptSlot,
       errorEl,
@@ -2214,13 +2249,18 @@ class SessionView {
           defaultPart: s.promptDefault ?? "",
           childPart: s.promptChild ?? s.childPartDefault ?? "",
           templates: s.promptTemplates ?? [],
-          own: "",
+          own: start.own ?? "",
           command: { value: command, settings: s.effective, platform: s.platform },
           h,
         });
+        if (from.own) editor.el.querySelector(".pe-own")?.after(h("div", { class: "dc-marks" }, fromMark("own")));
+        editor.el.querySelector(".pe-command-row")?.after(...commandMarks().filter(Boolean));
         promptSlot.replaceChildren(editor.el);
       })
-      .catch((e) => promptSlot.replaceChildren(h("p", { class: "hint" }, `Could not read the prompt parts (${e.message}). Approve starts the session without an own part, with this session's Copilot command.`)))
+      .catch((e) => {
+        const using = command ? `the Copilot command "${command}"` : "this session's Copilot command";
+        promptSlot.replaceChildren(h("p", { class: "hint" }, `Could not read the prompt parts (${e.message}). Approve starts the session without an own part, with ${using}.`), ...commandMarks().filter(Boolean));
+      })
       .finally(() => (approveBtn.disabled = false));
     this.append(card);
     this.openCard(card);
