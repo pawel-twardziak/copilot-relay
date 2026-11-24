@@ -115,8 +115,8 @@
    * Shows `editor` in #prompt-dialog with the title, the OK button's label and an optional note under the editor.
    * Resolves to the editor's text on OK (or Ctrl+Enter), null on Cancel or Esc; null at once while the dialog is
    * already open for another editor.
-   * onOk(text, command) (optional) runs on OK while the dialog stays open, OK and Cancel disabled and Esc ignored meanwhile: a
-   * returned non-empty string is shown as the note (an error) and the dialog stays open with the text; anything
+   * onOk(text, command) (optional) runs on OK while the dialog stays open, OK and Cancel disabled and Esc ignored
+   * meanwhile: a returned non-empty string is shown as the note (an error) and the dialog stays open with the text; anything
    * else (or nothing) closes it and resolves to the text. A throw counts as its message. Should the dialog close
    * while onOk runs anyway, the promise waits for onOk and resolves to the text only if onOk accepted it.
    */

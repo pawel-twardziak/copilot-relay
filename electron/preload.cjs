@@ -16,7 +16,8 @@ contextBridge.exposeInMainWorld("api", {
   listSessions: () => call("sessions:list"),
   // { sessions, complete }: complete is false when Copilot had more pages than main fetches
   listSessionsChecked: () => call("sessions:listChecked"),
-  // own: the session's own part of its system prompt (see electron/session-prompts.mjs)
+  // own: the session's own part of its system prompt (see electron/session-prompts.mjs); command: its own Copilot
+  // command, "" for the Settings command
   newSession: (cwd, own = "", command = "") => call("sessions:new", cwd, own, command),
   openSession: (sessionId, cwd, replayId) => call("sessions:open", sessionId, cwd, replayId),
   // source: "app" (typed here), "human" (relay web GUI) or "relay" (another session) – see sessions:prompt
@@ -39,9 +40,11 @@ contextBridge.exposeInMainWorld("api", {
   setConfig: (sessionId, configId, value) => call("sessions:setConfig", sessionId, configId, value),
   // closes the session for a restart with the new context window; the caller reopens it
   setContextTier: (sessionId, value) => call("sessions:setContextTier", sessionId, value),
-  // { own, defaultPart, childPart, isChild }: the parts of the session's prompt
+  // { own, defaultPart, childPart, isChild, command, settingsCommand }: the parts of the session's prompt, its own
+  // Copilot command and the one from Settings
   getPrompt: (sessionId) => call("sessions:getPrompt", sessionId),
-  // a new own part: { refused } | { unchanged: true } | { reopen: true } (closed for the restart; the caller reopens it)
+  // a new own part and Copilot command ("" = the Settings command):
+  // { refused } | { unchanged: true } | { reopen: true } (closed for the restart; the caller reopens it)
   setPrompt: (sessionId, own, command = "") => call("sessions:setPrompt", sessionId, own, command),
   answerPermission: (sessionId, reqId, optionId) => call("permission:answer", sessionId, reqId, optionId),
   // a delivered report or notice has started its prompt: the broker may forget it

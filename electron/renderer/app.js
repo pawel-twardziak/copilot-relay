@@ -2332,7 +2332,8 @@ class SessionView {
   /** The header's Setup button: the session's own prompt part and Copilot command in the prompt dialog; "Save and
    *  restart" restarts Copilot with them (main closes the session, the reopen replays it). It also works on a dead
    *  view (a broken command is repaired here): nothing is closed, the reopen starts it again. A refusal keeps the
-   *  dialog open with the text; unchanged values close it and restart nothing. */
+   *  dialog open with the text; unchanged values close it and restart nothing
+   *  (on a dead view they reopen it: the cause may have been fixed elsewhere, in Settings). */
   async editPrompt() {
     if (this.busy || this.deleting || $("#prompt-dialog").open) return;
     let p, s;
@@ -2362,7 +2363,7 @@ class SessionView {
       }
       try {
         const res = await api.setPrompt(this.sessionId, own, command);
-        if (res?.reopen) return void (restart = true);
+        if (res?.reopen || (res?.unchanged && dead)) return void (restart = true); // a dead view reopens even unchanged
         if (!dead) this.setBusy(false); // refused or unchanged: nothing was closed
         return res?.refused || undefined;
       } catch (e) {

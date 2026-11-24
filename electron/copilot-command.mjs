@@ -11,7 +11,7 @@ const REFUSED_TYPE = "The command must be text.";
 const NOT_FOUND = "The program was not found, or cannot be run.";
 const WHERE = {
   session: "This is this session's own command. Change it in the session's Setup.",
-  settings: "This is the command from Settings. Change it there, or give this session its own in Setup.",
+  settings: "This is the command from Settings. Change it there, or give the session its own Copilot command.",
   parent: "This is the parent session's command. Change it in the parent's Setup.",
 };
 

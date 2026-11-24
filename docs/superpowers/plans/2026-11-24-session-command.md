@@ -49,7 +49,7 @@ scripted ACP agent).
 | `REFUSED_LONG` | `The command is longer than 4000 characters.` |
 | `REFUSED_TYPE` | `The command must be text.` |
 | `WHERE.session` | `This is this session's own command. Change it in the session's Setup.` |
-| `WHERE.settings` | `This is the command from Settings. Change it there, or give this session its own in Setup.` |
+| `WHERE.settings` | `This is the command from Settings. Change it there, or give the session its own Copilot command.` |
 | `WHERE.parent` | `This is the parent session's command. Change it in the parent's Setup.` |
 | `NOT_FOUND` | `The program was not found, or cannot be run.` |
 | button | text `Setup`, title `This session's prompt and Copilot command (saving restarts its Copilot)` |

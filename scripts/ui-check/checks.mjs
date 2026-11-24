@@ -16,8 +16,8 @@ import { launch, until } from "./driver.mjs";
 
 // the notes of the prompt editor in a running session and of Settings (global constraints: RESTART_NOTE, SETTINGS_NOTE)
 const RESTART_NOTE = "Saving restarts this session's Copilot. The history stays.";
-const SETUP_TITLE ="This session's prompt and Copilot command (saving restarts its Copilot)";
-const SETTINGS_NOTE ="Changes here reach a running session the next time its Copilot starts.";
+const SETUP_TITLE = "This session's prompt and Copilot command (saving restarts its Copilot)";
+const SETTINGS_NOTE = "Changes here reach a running session the next time its Copilot starts.";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const FIXTURES = path.join(ROOT, "electron", "test", "fixtures", "acp");
@@ -2833,6 +2833,33 @@ export const checks = [
       await setup("");
       await app.check(`${V} && !${V}.dead && !${V}.resuming`, "the view to be alive again");
       assert.equal(HISTORY_ID in stored(), false, "no stored command");
+    },
+  },
+  {
+    // a dead view whose cause was fixed elsewhere (the command works now, nothing in the dialog changes): "Save and
+    // restart" with unchanged values reopens the view
+    name: "session-command-repair-unchanged",
+    modes: ["off"],
+    sessionId: HISTORY_ID,
+    async run(app) {
+      const id = JSON.stringify(HISTORY_ID);
+      const V = `views.get(${id})`;
+      const D = `document.querySelector("#prompt-dialog")`;
+      const flag = path.join(app.dir, "agent-ok");
+      // starts the scripted agent only while the flag file exists; otherwise it exits at once
+      const command = `sh -c 'test -f "$0" || exit 1; exec "$@"' '${flag}' '${SCRIPTED_AGENT}'`;
+      await app.newSession();
+      await app.ev(`${V}.el.querySelector(".head .prompt-btn").click()`);
+      await app.check(`${D}.open && !!${D}.querySelector(".pe-command")`, "the Setup dialog");
+      await app.ev(`(() => { const t = ${D}.querySelector(".pe-command"); t.value = ${JSON.stringify(command)}; t.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+      await app.ev(`document.querySelector("#prompt-ok").click()`);
+      await app.check(`!${D}.open && ${V} && ${V}.dead`, "the view to be dead");
+      writeFileSync(flag, "");
+      await app.ev(`${V}.el.querySelector(".head .prompt-btn").click()`);
+      await app.check(`${D}.open && !!${D}.querySelector(".pe-command")`, "the Setup dialog again");
+      await app.ev(`document.querySelector("#prompt-ok").click()`);
+      await app.check(`!${D}.open`, "the dialog to close");
+      await app.check(`${V} && !${V}.dead && !${V}.resuming`, "the view to be alive again");
     },
   },
   {
