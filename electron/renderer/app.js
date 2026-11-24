@@ -249,7 +249,14 @@ function ago(iso) {
 let sessions = []; // from session/list: { sessionId, cwd, title, updatedAt } plus lastActivityAt (main)
 let links = []; // the broker's sub-session links (api.getLinks / api.onLinks), keys "cli:<sessionId>"
 let tree = SessionTree.index(links); // parent/child index over `links` (bare session ids)
-let heldByKey = {}; // the broker's count of held child replies per key "cli:<sessionId>" (for sessions not open here)
+let heldByKey = {}; // the broker's count of held messages per key "cli:<sessionId>" (for sessions not open here)
+let heldByKindKey = {}; // the same by kind: { "cli:<sessionId>": { child, parent, other } }
+const HOLD_TITLES = {
+  child: "Replies from your sub-sessions wait here until you approve them",
+  parent: "Orders from the parent session wait here until you approve them",
+  other: "Messages from other sessions wait here until you approve them",
+  user: "Your messages from the relay GUI that arrive during a turn wait here until you approve them",
+};
 const views = new Map(); // sessionId -> SessionView
 let activeId = null;
 let queueMidTurn = false; // setting: deliver queued messages while a turn runs
@@ -315,8 +322,9 @@ class SessionView {
     this.groupEls = new Map(); // Activity groupId -> its subagent group element
     this.renderQueued = false;
     this.queue = []; // MessageQueue items (relay messages, your prompts sent while busy) waiting for delivery
-    this.held = held ?? []; // replies from sub-sessions waiting for your approval (not the queue): { id, from, text, prompt, fromCwd, deliveryId, arrivedAt }
-    this.holdReplies = true; // the per-session switch (stored only when off); on until api.getHoldReplies answers
+    this.held = held ?? []; // messages waiting for your approval (not the queue), of every kind (child, parent, other, user): { id, kind, from, text, prompt, fromCwd, human, deliveryId, arrivedAt }
+    this.holdOn = { child: true, parent: true, other: true, user: true }; // the per-session switches by kind (stored only when off); on until api.getHoldReplies answers
+    this.holdTouched = {}; // kinds whose switch you used: the stored answer does not overwrite them
     this.paused = false; // Stop with items queued: nothing is delivered automatically until resumed
     // prompts of this view pending: a mid-turn delivery overlaps the running one, one turn for the app (its tools,
     // switch point, interrupted prompts and your Stop: MessageQueue.createChain)
@@ -406,8 +414,14 @@ class SessionView {
     this.editText = h("span");
     this.queueEl = h("div", { class: "queue-strip", hidden: true });
     this.heldEl = h("div", { class: "held", hidden: true });
-    this.holdSwitch = h("input", { type: "checkbox", class: "held-switch", checked: true, onchange: () => this.setHoldReplies(this.holdSwitch.checked) });
-    this.holdLabel = h("label", { class: "held-switch-label", hidden: true, title: "Replies from your sub-sessions wait here until you approve them" }, this.holdSwitch, " Approve replies from sub-sessions");
+    // one switch per kind of held message, in the status bar after "Approve:"
+    this.holdSwitches = {};
+    this.holdLabels = {};
+    for (const kind of HeldReplies.SWITCH_KINDS) {
+      this.holdSwitches[kind] = h("input", { type: "checkbox", class: "held-switch", "data-kind": kind, checked: true, onchange: () => this.setHold(kind, this.holdSwitches[kind].checked) });
+      this.holdLabels[kind] = h("label", { class: "held-switch-label", hidden: true, title: HOLD_TITLES[kind] }, this.holdSwitches[kind], ` ${HeldReplies.switchLabel(kind)}`);
+    }
+    this.holdBar = h("span", { class: "held-switches", hidden: true }, "Approve:", ...HeldReplies.SWITCH_KINDS.map((kind) => this.holdLabels[kind]));
     this.editBar = h("div", { class: "edit-bar", hidden: true }, this.editText, h("button", { onclick: () => this.cancelEdit() }, "Cancel"));
 
     this.el = h(
@@ -434,7 +448,7 @@ class SessionView {
       this.heldEl,
       this.queueEl,
       h("div", { class: "composer" }, this.cmdPopup, this.input, this.agentPicker, h("div", { class: "btns" }, this.sendBtn, this.stopBtn)),
-      h("div", { class: "status-bar" }, this.statusEl, this.holdLabel, this.bgEl), // the running line sits beside the status: no shift
+      h("div", { class: "status-bar" }, this.statusEl, this.holdBar, this.bgEl), // the running line sits beside the status: no shift
     );
     this.renderHeld(); // replies handed over from the view this one replaces
     this.loadHoldSwitch();
@@ -1154,53 +1168,65 @@ class SessionView {
     this.statusEl.textContent = MessageQueue.statusText({ busy, dead, deleting, queued: this.queue.length, paused, held: this.held.length });
   }
 
-  /** Draws the list of replies from sub-sessions above the queue; called after every change of `held`. */
+  /** Draws the lists of held messages (parent, other, user, child) above the queue; called after every change of `held`. */
   renderHeld() {
-    const list = this.held;
-    this.heldEl.hidden = list.length === 0;
+    this.heldEl.hidden = this.held.length === 0;
     this.heldEl.replaceChildren();
-    if (list.length) {
-      this.heldEl.append(h("div", { class: "held-head" }, h("span", {}, HeldReplies.listTitle("child", list.length))));
-      for (const item of list) {
+    for (const kind of HeldReplies.KINDS) {
+      const list = this.held.filter((item) => item.kind === kind);
+      if (!list.length) continue;
+      const rows = list.map((item) => {
         const first = item.text.split("\n")[0];
         const heldText = h("span", { class: "held-text", title: item.text }, first);
         heldText.onclick = () => {
           const open = heldText.classList.toggle("expanded"); // the full text, as plain text
           heldText.textContent = open ? item.text : first;
         };
-        this.heldEl.append(
-          h(
-            "div",
-            { class: "held-row" },
-            h("span", { class: "held-from" }, item.from),
-            h("span", { class: "held-time", title: MessageTimes.full(item.arrivedAt) }, MessageTimes.clock(item.arrivedAt)),
-            heldText,
-            h("button", { class: "held-approve", title: "Send this reply to Copilot", disabled: this.dead || this.deleting, onclick: () => this.approveHeld(item) }, "Approve"),
-            h("button", { class: "held-discard", title: "Discard this reply", onclick: () => this.discardHeld(item) }, "✕"),
-          ),
+        return h(
+          "div",
+          { class: "held-row" },
+          h("span", { class: "held-from" }, item.from),
+          h("span", { class: "held-time", title: MessageTimes.full(item.arrivedAt) }, MessageTimes.clock(item.arrivedAt)),
+          heldText,
+          h("button", { class: "held-approve", title: "Send this message to Copilot", disabled: this.dead || this.deleting, onclick: () => this.approveHeld(item) }, "Approve"),
+          h("button", { class: "held-discard", title: "Discard this message", onclick: () => this.discardHeld(item) }, "✕"),
         );
-      }
+      });
+      this.heldEl.append(h("div", { class: "held-group", "data-kind": kind }, h("div", { class: "held-head" }, h("span", {}, HeldReplies.listTitle(kind, list.length))), ...rows));
     }
-    this.holdLabel.hidden = !HeldReplies.showSwitch({ kind: "child", hasChildren: (tree.childrenOf.get(this.sessionId) ?? []).length > 0, held: list.length });
-    this.holdSwitch.checked = this.holdReplies;
-    this.holdSwitch.disabled = this.dead || this.deleting;
+    this.renderHoldSwitches();
     this.showQueueStatus();
   }
 
-  /** A reply from a direct sub-session: it waits in the list until you approve it. */
-  hold(m) {
+  /** The switches after "Approve:" in the status bar: those whose kind can occur here or has held items (the one place for renderHeld and renderRelations). */
+  renderHoldSwitches() {
+    const rel = SessionTree.relation(tree, this.sessionId);
+    const hasParent = !!rel.parent && rel.parent !== this.sessionId;
+    let any = false;
+    for (const kind of HeldReplies.SWITCH_KINDS) {
+      const show = HeldReplies.showSwitch({ kind, hasChildren: rel.children.length > 0, hasParent, onRelay: !!this.relayName, held: this.held.filter((item) => item.kind === kind).length });
+      this.holdLabels[kind].hidden = !show;
+      this.holdSwitches[kind].checked = this.holdOn[kind];
+      this.holdSwitches[kind].disabled = this.dead || this.deleting;
+      any ||= show;
+    }
+    this.holdBar.hidden = !any;
+  }
+
+  /** A message of `kind` (child, parent, other, user): it waits in its list until you approve it. */
+  hold(m, kind) {
     // main stamps arrivedAt once, so a reload or a replay keeps the time and the order (oldest on top)
-    HeldReplies.insertByArrival(this.held, { id: ++queueItemSeq, from: m.from, text: m.text, prompt: m.prompt, fromCwd: m.fromCwd ?? null, deliveryId: m.deliveryId, arrivedAt: m.arrivedAt ?? Date.now() });
+    HeldReplies.insertByArrival(this.held, { id: ++queueItemSeq, kind, from: m.from, text: m.text, prompt: m.prompt, fromCwd: m.fromCwd ?? null, human: m.human === true, deliveryId: m.deliveryId, arrivedAt: m.arrivedAt ?? Date.now() });
     this.renderHeld();
     renderList();
   }
 
-  /** Approving puts the reply in the queue (the one path to a prompt; its acknowledgement happens when it starts). */
+  /** Approving puts the message in the queue (the one path to a prompt; its acknowledgement happens when it starts). */
   approveHeld(item) {
     const i = this.held.indexOf(item);
     if (i < 0) return;
     this.held.splice(i, 1);
-    this.enqueue({ kind: "relay", text: item.text, prompt: HeldReplies.approvedPrompt(item.prompt, item.arrivedAt, Date.now()), from: item.from, human: false, fromCwd: item.fromCwd, deliveryId: item.deliveryId, command: false });
+    this.enqueue({ kind: "relay", text: item.text, prompt: HeldReplies.approvedPrompt(item.prompt, item.arrivedAt, Date.now(), item.kind), from: item.from, human: item.human === true, fromCwd: item.fromCwd, deliveryId: item.deliveryId, command: false });
     this.renderHeld();
     renderList();
   }
@@ -1211,12 +1237,12 @@ class SessionView {
     this.held.splice(i, 1);
     this.discarded.add(item.deliveryId);
     this.ackDiscarded(item.deliveryId); // the broker must not deliver it again
-    this.system(`Discarded a reply from ${item.from}.`);
+    this.system(HeldReplies.discardLine(item.kind, item.from));
     this.renderHeld();
     renderList();
   }
 
-  /** Acknowledges a discarded reply; only a confirmed ack (not false, not an error) lets the id go. */
+  /** Acknowledges a discarded message; only a confirmed ack (not false, not an error) lets the id go. */
   ackDiscarded(id) {
     api
       .relayAck(this.sessionId, id)
@@ -1224,18 +1250,18 @@ class SessionView {
       .catch(() => {});
   }
 
-  /** The switch: off sends every held reply to the queue (oldest first); on moves nothing back. */
-  async setHoldReplies(on) {
+  /** The switch of one kind: off sends every held message of that kind to the queue (oldest first); on moves nothing back. */
+  async setHold(kind, on) {
     try {
-      await api.setHoldReplies(this.sessionId, "child", on);
+      await api.setHoldReplies(this.sessionId, kind, on);
     } catch (e) {
       this.error(`Could not save the setting: ${e.message}`);
-      this.holdSwitch.checked = this.holdReplies; // the file was not written: the switch stays as it was
+      this.holdSwitches[kind].checked = this.holdOn[kind]; // the file was not written: the switch stays as it was
       return;
     }
-    this.holdReplies = on;
-    this.holdTouched = true;
-    if (!on) for (const item of [...this.held]) this.approveHeld(item);
+    this.holdOn[kind] = on;
+    this.holdTouched[kind] = true;
+    if (!on) for (const item of this.held.filter((i) => i.kind === kind)) this.approveHeld(item);
     this.renderHeld();
   }
 
@@ -1356,7 +1382,10 @@ class SessionView {
 
   // --- copilot-relay
   relayStatus({ name, connected, note, parentSessionId, parentChanged }) {
-    if (name) this.relayName = name;
+    if (name && name !== this.relayName) {
+      this.relayName = name;
+      this.renderHoldSwitches(); // the switch of other sessions' messages shows once the session has a relay name
+    }
     if (parentChanged) {
       // the user linked or unlinked this session (adopt_session, release_session): null is a release
       if ((parentSessionId ?? null) !== this.parentSessionId) {
@@ -1414,7 +1443,8 @@ class SessionView {
       this.pendingNotes.push(m.prompt);
       return;
     }
-    if (m.fromChild && m.deliveryId && this.holdReplies) return this.hold(m);
+    const kind = HeldReplies.kindOf(m);
+    if (HeldReplies.shouldHold({ kind, on: kind && this.holdOn[kind], deliveryId: m.deliveryId, prompting: this.prompting, cameBack: m.redelivered === true || m.replayed === true })) return this.hold(m, kind);
     // set by the broker for messages typed by a person in the relay GUI; a broker older than this app doesn't send it,
     // then the reserved-for-people name decides. It only re-opens the relay budget: relay text never attaches files.
     const human = m.human ?? m.from === "user";
@@ -2266,7 +2296,7 @@ class SessionView {
     this.relationsEl.replaceChildren(...parts);
     this.relationsEl.hidden = !parts.length;
     this.closeChildrenBtn.hidden = !openDescendants(this.sessionId).length;
-    this.holdLabel.hidden = !HeldReplies.showSwitch({ kind: "child", hasChildren: rel.children.length > 0, held: this.held.length });
+    this.renderHoldSwitches();
   }
 
   get needsAttention() {
@@ -2686,20 +2716,23 @@ class SessionView {
     api
       .getHoldReplies(this.sessionId)
       .then((hold) => {
-        if (this.holdTouched || hold?.child !== false) return;
-        this.holdReplies = false;
-        for (const item of [...this.held]) this.approveHeld(item); // held while the answer was on its way
+        for (const kind of HeldReplies.SWITCH_KINDS) {
+          if (this.holdTouched[kind] || hold?.[kind] !== false) continue;
+          this.holdOn[kind] = false;
+          for (const item of this.held.filter((i) => i.kind === kind)) this.approveHeld(item); // held while the answer was on its way
+        }
         this.renderHeld();
       })
       .catch(() => {}); // unreadable: the default (on) stays
   }
 
-  /** A view that is dead after the open does not keep the replies handed to it: the broker delivers them again. */
+  /** A view that is dead after the open does not keep the broker messages handed to it: the broker delivers them again. Items without a delivery id stay. */
   heldComeBack() {
-    if (!this.held.length) return;
-    for (const item of this.held) this.seenDeliveries.delete(item.deliveryId); // the broker delivers them again
-    this.system(HeldReplies.comeBackLine(this.held.length));
-    this.held = [];
+    const back = this.held.filter((item) => item.deliveryId);
+    if (!back.length) return;
+    for (const item of back) this.seenDeliveries.delete(item.deliveryId); // the broker delivers them again
+    this.system(HeldReplies.comeBackLine(back.length));
+    this.held = this.held.filter((item) => !item.deliveryId);
     this.renderHeld();
   }
 
@@ -3023,7 +3056,7 @@ function openRelative(id) {
 /** showProject: the session is listed outside its project (pinned), so its folder goes into the meta line.
  *  depth: its level under a parent shown in the same group (0 = top level, with "child of X" when it has a parent). */
 function item(s, v, { showProject = false, depth = 0 } = {}) {
-  const heldCount = HeldReplies.sidebarCount({ view: v, brokerHeld: heldByKey, sessionId: s.sessionId });
+  const heldCount = HeldReplies.sidebarCount({ view: v, brokerHeld: heldByKey, brokerByKind: heldByKindKey, sessionId: s.sessionId });
   const pinned = ui.pinned.has(s.sessionId);
   const parent = tree.parentOf.get(s.sessionId);
   const relation = depth > 0 ? null : parent && parent !== s.sessionId ? `child of ${parentLabel(parent)}` : tree.link.get(s.sessionId)?.parentDeleted ? "parent deleted" : null;
@@ -3198,16 +3231,19 @@ async function deleteOne(s) {
   }
 }
 
-/** The broker forgets deleted sessions that are in the tree (a child, or a parent: its kept children become
- *  "parent deleted"). The sessions are already gone, so a failure is only a warning; returns its text or null. */
+/** The broker forgets deleted sessions (their links: a child, or a parent whose kept children become "parent deleted";
+ *  and their held messages). The sessions are already gone, so a failure is only a warning; returns the text of one that
+ *  concerns the tree, else null. */
 async function forgetDeleted(idx, ids) {
-  const keys = ids.filter((id) => idx.link.has(id) || idx.childrenOf.has(id)).map((id) => `cli:${id}`);
-  if (!keys.length) return null;
+  if (!ids.length) return null;
+  const inTree = ids.some((id) => idx.link.has(id) || idx.childrenOf.has(id));
   try {
-    await api.forgetLinks(keys);
+    await api.forgetLinks(ids.map((id) => `cli:${id}`)); // every deleted id: the broker also drops the held messages of an unlinked session
     return null;
   } catch (e) {
-    return `the sub-session tree could not be updated: ${e.message}`;
+    if (inTree) return `the sub-session tree could not be updated: ${e.message}`;
+    console.warn(`forget links: ${e.message}`); // no link, no tree to update; the broker may be off
+    return null;
   }
 }
 
@@ -3711,6 +3747,7 @@ function setLinks(next) {
   const list = Array.isArray(next) ? next : next?.links;
   links = Array.isArray(list) ? list : [];
   heldByKey = (!Array.isArray(next) && next?.held) || {};
+  heldByKindKey = (!Array.isArray(next) && next?.heldByKind) || {};
   tree = SessionTree.index(links);
   renderList(); // redraws the relation bars too
 }

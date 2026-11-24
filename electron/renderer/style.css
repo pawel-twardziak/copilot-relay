@@ -597,7 +597,10 @@ body.schedules-open #session-list .item.active { background: none; border-color:
 .held-from { flex: none; color: var(--text); }
 .held-time { flex: none; }
 .held-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
-.held-switch-label { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); }
+.held-group + .held-group { margin-top: 6px; }
+.held-switches { margin-left: auto; display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 4px 12px; font-size: 12px; color: var(--muted); }
+.held-switches[hidden] { display: none; }
+.held-switch-label { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); }
 .held-switch-label[hidden] { display: none; }
 .held-mark { margin-left: 6px; font-size: 11px; color: var(--warn); }
 .held-text { cursor: pointer; }

@@ -2233,16 +2233,16 @@ export const checks = [
       await app.ev(`${V}.setBusy(true)`);
       await child("h4", "docs-9f8e7d");
       await child("h5", "tests-41ac0b");
-      await app.ev(`${V}.el.querySelector(".held-switch").click()`);
-      await app.check(`${V}.holdReplies === false`, "the switch off");
+      await app.ev(`${V}.el.querySelector('.held-switch[data-kind="child"]').click()`);
+      await app.check(`${V}.holdOn.child === false`, "the switch off");
       await frames(app);
       assert.equal(await shownEl(".held"), false, ".held hidden");
       assert.deepEqual(await queued(), ["P-h4", "P-h5"]);
       await child("h6", "docs-9f8e7d");
       assert.deepEqual(await queued(), ["P-h4", "P-h5", "P-h6"]);
       assert.equal(await rows(), 0);
-      await app.ev(`${V}.el.querySelector(".held-switch").click()`);
-      await app.check(`${V}.holdReplies === true`, "the switch on");
+      await app.ev(`${V}.el.querySelector('.held-switch[data-kind="child"]').click()`);
+      await app.check(`${V}.holdOn.child === true`, "the switch on");
       assert.deepEqual(await queued(), ["P-h4", "P-h5", "P-h6"], "nothing moves back");
       await app.ev(`${V}.queue.length = 0; ${V}.renderQueue(); ${V}.setBusy(false)`);
       // 8. the wait note after a long wait
@@ -2268,6 +2268,107 @@ export const checks = [
       await child("h8", "docs-9f8e7d");
       assert.equal(await rows(), 0, "a redelivered discarded reply is not held again");
       assert.equal(await app.ev(`${V}.discarded.has("h8")`), true, "still unconfirmed");
+    },
+  },
+  {
+    // held messages of every kind (parent order, other session, relay-GUI user, child): one list and one switch each
+    name: "held-kinds",
+    modes: ["off"],
+    sessionId: HISTORY_ID,
+    async run(app) {
+      const V = `views.get(${JSON.stringify(HISTORY_ID)})`;
+      await firstTurn(app);
+      // the harness has no relay client (and window.api is frozen): the view's acknowledgement is recorded instead
+      await app.ev(`(() => { window.__acks = []; ${V}.ackDiscarded = (id) => window.__acks.push(id); })()`);
+      const send = (m) => app.ev(`${V}.incoming(${JSON.stringify({ wake: true, ...m })})`);
+      const held = (kind, id, from, text = "do x") => send({ from, text, prompt: `P-${id}`, deliveryId: id, ...(kind === "child" ? { fromChild: true } : { heldAs: kind }), ...(kind === "user" ? { human: true } : {}) });
+      const shownEl = (sel) => app.ev(`(() => { const e = ${V}.el.querySelector(${JSON.stringify(sel)}); return !!e && !e.hidden && e.offsetParent !== null; })()`);
+      const head = (kind) => app.ev(`${V}.el.querySelector('.held-group[data-kind="${kind}"] .held-head')?.textContent ?? null`);
+      const kinds = () => app.ev(`[...${V}.el.querySelectorAll(".held-group")].map((g) => g.dataset.kind)`);
+      const queued = () => app.ev(`${V}.queue.map((i) => i.prompt)`);
+      const relays = () => app.ev(`${V}.log.querySelectorAll(":scope > .msg.relay").length`);
+      const click = (sel) => app.ev(`${V}.el.querySelector(${JSON.stringify(sel)}).click()`);
+      const switchEl = (kind) => `.held-switch[data-kind="${kind}"]`;
+      const reset = () => app.ev(`${V}.queue.length = 0; ${V}.renderQueue(); ${V}.setBusy(false)`);
+
+      // the switch row before anything is held: the child switch is first in the DOM; user shows, parent does not
+      assert.equal(await app.ev(`${V}.el.querySelector("input.held-switch").dataset.kind`), "child");
+      assert.equal(await shownEl(switchEl("user")), true, "the user switch shows in a session without relatives");
+      assert.equal(await shownEl(switchEl("parent")), false, "no parent, no parent switch");
+      assert.equal(await app.ev(`${V}.holdBar.textContent.trim().startsWith("Approve:")`), true);
+
+      // 1. an order from the parent and a message of another session are held, no turn starts
+      await held("parent", "p1", "lead");
+      await held("other", "o1", "api-77e2");
+      await frames(app);
+      assert.deepEqual(await kinds(), ["parent", "other"]);
+      assert.equal(await head("parent"), "Orders from parent (1)");
+      assert.equal(await head("other"), "Other sessions (1)");
+      assert.equal(await shownEl(".queue-strip"), false, "the queue is empty");
+      assert.equal(await relays(), 0, "no turn started");
+      assert.equal(await app.ev(`${V}.statusEl.textContent`), "2 messages waiting for approval");
+      assert.equal(await app.ev(`document.querySelector(".item.active .held-mark")?.textContent ?? null`), "⏸ 2");
+      assert.equal(await shownEl(switchEl("parent")), true, "the parent switch shows with a held order");
+
+      // 2. the first task of a sub-session has no mark and no delivery id: it is not held, a turn starts (it asks a
+      // permission, so the turn runs on: "a turn is running" for the user message below)
+      await send({ from: "lead", text: "task", prompt: "P-task" });
+      await app.check(`${V}.log.querySelectorAll(":scope > .msg.relay").length === 1 && ${V}.prompting`, "the task's turn");
+      assert.equal((await kinds()).length, 2, "nothing else was held");
+      // a message of the user during that turn is held (as u3 of step 5, it is approved there)
+      await held("user", "u3", "user", "hi");
+      assert.equal(await head("user"), "Your messages (1)");
+      await app.answerPermission();
+      await app.idle();
+
+      // 3. a reply of a child adds a group; the DOM order is parent, other, user, child
+      await held("child", "c1", "docs-9f8e7d");
+      await frames(app);
+      assert.deepEqual(await kinds(), ["parent", "other", "user", "child"]);
+
+      // 4. approve the order: its turn starts, the bubble names the sender, the other lists stay
+      await click('.held-group[data-kind="parent"] .held-approve');
+      await app.check(`${V}.log.querySelectorAll(":scope > .msg.relay").length === 2`, "the approved order's turn");
+      assert.equal(await app.ev(`[...${V}.log.querySelectorAll(":scope > .msg.relay .from")].at(-1).textContent`), "from lead");
+      await app.idle();
+      assert.deepEqual(await kinds(), ["other", "user", "child"]);
+      assert.equal(await head("other"), "Other sessions (1)");
+      assert.equal(await head("child"), "Replies from sub-sessions (1)");
+      assert.equal(await shownEl(switchEl("parent")), false, "the parent switch hides again");
+
+      // 5. messages of the user: without a turn they go to the queue, a replayed one is held, approving keeps `human`
+      await app.ev(`${V}.setBusy(true)`);
+      await held("user", "u1", "user", "hi 1");
+      assert.deepEqual(await queued(), ["P-u1"], "no turn running: not held");
+      await app.ev(`${V}.queue.length = 0; ${V}.renderQueue()`);
+      await send({ from: "user", human: true, heldAs: "user", deliveryId: "u2", replayed: true, prompt: "P-u2", text: "hi 2" });
+      assert.equal(await head("user"), "Your messages (2)", "a replayed message is held");
+      await click('.held-group[data-kind="user"] .held-approve'); // u3, the older one
+      assert.deepEqual(await queued(), ["P-u3"]);
+      assert.equal(await app.ev(`${V}.queue[0].human`), true, "the approved message keeps human");
+      await reset();
+
+      // 6. discard: the row is gone, the line names the sender, the broker is told
+      await click('.held-group[data-kind="other"] .held-discard');
+      assert.equal(await head("other"), null);
+      assert.equal(await app.ev(`${V}.log.textContent.trim().endsWith("Discarded a message from api-77e2.")`), true);
+      assert.deepEqual(await app.ev(`window.__acks`), ["o1"]);
+
+      // 7. a switch off moves only its own kind into the queue; on moves nothing back
+      await app.ev(`${V}.setBusy(true)`);
+      await held("other", "o2", "api-77e2");
+      await click(switchEl("other"));
+      await app.check(`${V}.holdOn.other === false`, "the other switch off");
+      assert.deepEqual(await app.ev(`api.getHoldReplies(${JSON.stringify(HISTORY_ID)})`), { child: true, parent: true, other: false, user: true }, "main stored the switch");
+      assert.deepEqual(await queued(), ["P-o2"]);
+      assert.deepEqual(await kinds(), ["user", "child"], "the child reply is still held");
+      await held("other", "o3", "api-77e2");
+      assert.deepEqual(await queued(), ["P-o2", "P-o3"], "a new message goes to the queue");
+      await click(switchEl("other"));
+      await app.check(`${V}.holdOn.other === true`, "the other switch on");
+      assert.equal((await app.ev(`api.getHoldReplies(${JSON.stringify(HISTORY_ID)})`)).other, true, "main stored it on again");
+      assert.deepEqual(await queued(), ["P-o2", "P-o3"], "nothing moves back");
+      await reset();
     },
   },
   {
