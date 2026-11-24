@@ -2188,9 +2188,12 @@ class SessionView {
       field("Agent", agentSel, "agent"),
       field("Model", modelSel, "model"),
     );
-    // the command field's marks: whose it is, the warning for a parent-written one, why the parent's was not taken
+    // the command field's marks: whose it is, the warning for a parent-written one, the arguments it added in full
+    // (the one-line field can hide its end), why the parent's was not taken
+    const addedArgs = from.command ? (start.addedArgs ?? []) : [];
     const commandMarks = () => [
       from.command ? h("div", { class: "dc-marks" }, fromMark("command"), h("span", { class: "dc-warning" }, "Written by the session that asked. It runs when you approve.")) : null,
+      addedArgs.length ? h("p", { class: "hint dc-args" }, `Arguments added by ${start.parentName || "the session"}: ${addedArgs.join(" ")}`) : null,
       note("command"),
     ];
     let editor = null;

@@ -316,6 +316,16 @@ test("cardStart says a network folder is not checked", () => {
   for (const folder of UNC) assert.equal(cardStart(req({ folder }), parentOf(), atDir).notes.cwd, remoteNote(folder));
 });
 
+test("cardStart lists the arguments the parent added", () => {
+  const long = `--x=${"a".repeat(300)}`;
+  const s = cardStart(req({ command: `copilot ${long}  --danger` }), parentOf(), missing);
+  assert.deepEqual(s.addedArgs, [long, "--danger"]);
+  assert.equal(s.command, `copilot --resolved ${long} --danger`);
+  assert.deepEqual(cardStart(req(), parentOf(), missing).addedArgs, []);
+  assert.deepEqual(cardStart(req({ command: "copilot" }), parentOf(), missing).addedArgs, []);
+  assert.deepEqual(cardStart(req({ command: "node x" }), parentOf(), missing).addedArgs, []);
+});
+
 test("a quoted parent command keeps its quotes when arguments are appended", () => {
   const line = shellLine("C:\\Program Files\\gh\\copilot.exe", [], { platform: "win32", isFile: () => true });
   const s = cardStart(req({ command: "copilot --foo" }), parentOf({ command: line }), missing);

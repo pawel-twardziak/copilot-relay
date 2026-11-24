@@ -3171,7 +3171,8 @@ export const checks = [
     // every parameter the parent asks for is on the card, editable, and the child starts with what the card shows:
     // the folder row, the Context, Agent and Model selects, the own part, the parent's command with the added
     // arguments and the warning, a "from" mark per value the parent set; a value that cannot be taken gets a note;
-    // a folder removed before Approve leaves the card answerable; a bad command never makes a card (the tool says no)
+    // a folder removed before Approve leaves the card answerable; a bad command never makes a card (the tool says no);
+    // the added arguments are shown in full, wrapped, however long the first one is
     name: "child-card-params",
     modes: ["off"],
     scenario: CHILD_PARAMS_SCENARIO,
@@ -3207,6 +3208,7 @@ export const checks = [
           own: sel(".pe-own").value,
           command: sel(".pe-command").value,
           warning: [...c.querySelectorAll(".dc-warning")].map((e) => e.textContent),
+          args: [...c.querySelectorAll(".dc-args")].map((e) => e.textContent),
           from: [...c.querySelectorAll(".dc-from")].map((e) => e.textContent),
           notes: [...c.querySelectorAll(".dc-note")].map((e) => e.textContent),
         }; })()`);
@@ -3227,6 +3229,7 @@ export const checks = [
         own: "P1",
         command: `${command} --foo bar`,
         warning: ["Written by the session that asked. It runs when you approve."],
+        args: [`Arguments added by ${parentName}: --foo bar`],
         from: [from, from, from, from, from, from],
         notes: [],
       });
@@ -3274,6 +3277,22 @@ export const checks = [
       await app.check(`!${V}.busy`, "the parent to be idle");
       await new Promise((r) => setTimeout(r, 500)); // a card would have come by now
       assert.equal(await app.ev(`${V}.el.querySelectorAll(".perm.delegation").length`), 2, "no card for the refused command");
+
+      // 4. a long first argument cannot push a later one out of sight: the added arguments wrap, in full, under the field
+      const long = `--x=${"a".repeat(300)}`;
+      await ask({ name: "kid4", task: "T4", command: `copilot ${long} --danger` });
+      await ready(2);
+      assert.equal((await shownOn(2)).command, `${command} ${long} --danger`);
+      const shown = await app.ev(`(() => {
+        const c = ${card(2)}, e = c.querySelector(".dc-args"), text = e.firstChild;
+        const range = document.createRange();
+        range.setStart(text, text.length - "--danger".length);
+        range.setEnd(text, text.length);
+        const inside = (r, o) => r.width > 0 && r.left >= o.left - 0.5 && r.right <= o.right + 0.5 && r.top >= o.top - 0.5 && r.bottom <= o.bottom + 0.5;
+        const word = range.getBoundingClientRect(), box = e.getBoundingClientRect();
+        return { text: e.textContent, children: e.childNodes.length, wraps: box.height > word.height * 1.5, clipped: e.scrollWidth > e.clientWidth, inBox: inside(word, box), inCard: inside(word, c.getBoundingClientRect()) };
+      })()`);
+      assert.deepEqual(shown, { text: `Arguments added by ${parentName}: ${long} --danger`, children: 1, wraps: true, clipped: false, inBox: true, inCard: true });
     },
   },
   {

@@ -72,7 +72,7 @@ export async function folderState(folder, { allow, isDir }) {
 /** The approval card's start values from the parent's request. `parent`: { cwd, tier, storedCommand, command,
  *  configOptions, name }; `folderState` is main's verdict on the asked folder (see folderState): cardStart itself never
  *  touches the disk. A value the parent asked for that cannot be taken gets a note and the default; `from` says which
- *  values are the parent's. */
+ *  values are the parent's, `addedArgs` the arguments it appended to the parent's command line. */
 export function cardStart(request, parent, { folderState = "missing" } = {}) {
   const notes = {};
   const from = { cwd: false, tier: false, agent: false, model: false, own: false, command: false };
@@ -108,13 +108,15 @@ export function cardStart(request, parent, { folderState = "missing" } = {}) {
   from.own = own !== "";
 
   let command = parent.storedCommand;
+  let addedArgs = [];
   const asked = str(request.command);
   if (asked) {
     const parsed = childCommandArgs(asked);
     if (parsed.refused) {
       notes.command = `Asked for a command that was not taken: ${parsed.refused}`;
     } else if (parsed.args.length) {
-      command = `${parent.command} ${parsed.args.join(" ")}`;
+      addedArgs = parsed.args;
+      command = `${parent.command} ${addedArgs.join(" ")}`;
       from.command = true;
     }
   }
@@ -155,6 +157,7 @@ export function cardStart(request, parent, { folderState = "missing" } = {}) {
     model,
     own,
     command,
+    addedArgs,
     agents,
     models,
     currentModel: modelOption?.currentValue ?? null,
