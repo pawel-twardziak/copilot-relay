@@ -137,3 +137,9 @@ test("instructionsEnv appends to the user's directories", () => {
 test("instructionsEnv refuses a directory with a comma", () => {
   assert.throws(() => instructionsEnv({}, "/a,b"), /contains a comma/);
 });
+
+test("a stored value that is not text reads as empty", (t) => {
+  const file = path.join(tmp(t), "p.json");
+  fs.writeFileSync(file, JSON.stringify({ s: 7 }));
+  assert.equal(createPromptStore(file).get("s"), "");
+});

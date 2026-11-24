@@ -17,7 +17,7 @@ contextBridge.exposeInMainWorld("api", {
   // { sessions, complete }: complete is false when Copilot had more pages than main fetches
   listSessionsChecked: () => call("sessions:listChecked"),
   // own: the session's own part of its system prompt (see electron/session-prompts.mjs)
-  newSession: (cwd, own = "") => call("sessions:new", cwd, own),
+  newSession: (cwd, own = "", command = "") => call("sessions:new", cwd, own, command),
   openSession: (sessionId, cwd, replayId) => call("sessions:open", sessionId, cwd, replayId),
   // source: "app" (typed here), "human" (relay web GUI) or "relay" (another session) – see sessions:prompt
   prompt: (sessionId, text, source = "relay") => call("sessions:prompt", sessionId, text, source),
@@ -42,7 +42,7 @@ contextBridge.exposeInMainWorld("api", {
   // { own, defaultPart, childPart, isChild }: the parts of the session's prompt
   getPrompt: (sessionId) => call("sessions:getPrompt", sessionId),
   // a new own part: { refused } | { unchanged: true } | { reopen: true } (closed for the restart; the caller reopens it)
-  setPrompt: (sessionId, own) => call("sessions:setPrompt", sessionId, own),
+  setPrompt: (sessionId, own, command = "") => call("sessions:setPrompt", sessionId, own, command),
   answerPermission: (sessionId, reqId, optionId) => call("permission:answer", sessionId, reqId, optionId),
   // a delivered report or notice has started its prompt: the broker may forget it
   relayAck: (sessionId, id) => call("relay:ack", sessionId, id),

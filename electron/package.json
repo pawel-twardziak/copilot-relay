@@ -50,6 +50,7 @@
       "context-tier.mjs",
       "copilot-command.mjs",
       "session-prompts.mjs",
+      "session-setup.mjs",
       "jobs.mjs",
       "job-runner.mjs",
       "scheduler.mjs",

@@ -50,7 +50,7 @@ export function applyPromptSettings(next, payload) {
 /** Per-session own parts in a small JSON file ({ [sessionId]: string }); "" removes the entry.
  *  `set` throws when the file can't be written; `copy` and `delete` are bookkeeping after a fork / delete that
  *  already succeeded, so a failed write there is only logged. */
-export function createPromptStore(file) {
+export function createPromptStore(file, label = "session-prompts") {
   const read = () => {
     try {
       const data = JSON.parse(readFileSync(file, "utf8"));
@@ -75,7 +75,7 @@ export function createPromptStore(file) {
     try {
       fn();
     } catch (e) {
-      console.warn(`[session-prompts] could not write ${file}: ${e.message}`);
+      console.warn(`[${label}] could not write ${file}: ${e.message}`);
     }
   };
   return {
