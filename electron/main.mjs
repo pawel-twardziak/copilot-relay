@@ -1783,18 +1783,6 @@ if (!app.requestSingleInstanceLock()) {
     e.preventDefault();
     Promise.all(live.map((c) => exited(c, 3500))).then(() => app.quit());
   });
-  // Copilot leads its own process group, so a signal to the app's group (Ctrl+C in the terminal that runs it, a
-  // kill of the app) does not reach it: the app stops every Copilot it started, then exits, without the question
-  // of the quit path. (A start still in flight is not in `open` yet and is not reached.)
-  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
-    if (process.platform === "win32" && signal === "SIGHUP") continue;
-    process.on(signal, () => {
-      leavingConfirmed = true;
-      killAll();
-      scheduler?.abortAllSync();
-      app.quit();
-    });
-  }
   app.on("before-quit", (e) => {
     if (confirmLeavingChildren()) {
       killAll();

@@ -2470,10 +2470,10 @@ export const checks = [
   },
   {
     // a signal sent to the app's main process (Ctrl+C in a terminal, a kill) leaves no Copilot of the launch behind:
-    // each leads its own process group, so the signal does not reach it. (Electron's own SIGTERM handling also quits
-    // the app through the quit path, so this guards the outcome; it cannot tell the handler from that path.) The agent alone would end by itself when the
-    // app dies (its stdin closes), so the command leaves a `sleep` behind it in the same group: only a kill of the
-    // group removes it.
+    // each Copilot leads its own process group, so the signal does not reach it, but Electron's own handling of the
+    // signal quits the app through before-quit, which kills every Copilot; this guards that path. The agent alone
+    // would end by itself when the app dies (its stdin closes), so the command leaves a `sleep` behind it in the
+    // same group: only a kill of the group removes it.
     name: "signal-kills-copilots",
     modes: ["off"],
     settings: { copilotCommand: `sh -c '"$0" "$@"; sleep 60' ${path.join(ROOT, "electron", "test", "fixtures", "acp", "scripted-agent.mjs")}` },
