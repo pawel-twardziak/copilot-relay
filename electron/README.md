@@ -200,9 +200,12 @@ an ordinary session: it appears in the list, you can open it, read what it did, 
   parent's view with the name and the full task (read-only) and every other value editable: the folder with a
   **Change…** button (the system folder picker), **Context**, **Agent** and **Model** (the parent's lists), the own
   prompt part and the **Copilot command** (see "A command per session"), with **Approve** and **Reject**. A value the
-  parent filled is marked "from <parent>", and a command it wrote says it runs when you approve. A value that could
-  not be taken (a missing or network folder, a bad command, an unknown agent or model) falls back to the default,
-  with a note under its field. When the child runs in another folder, the parent is told so.
+  parent filled is marked "from <parent>", and a command it wrote says it runs when you approve and lists, in full,
+  the arguments it added (the command field is one line and can hide its end). A value that could not be taken (a
+  missing or network folder, a bad command, an unknown agent or model) falls back to the default, with a note under
+  its field. A folder on a network location (a UNC path, a mapped drive, a network mount) is never looked at before
+  you approve, as anywhere else in the app: it gets its own note. When the child runs in another folder, the parent
+  is told so.
   **Every creation needs your click**: there is no "always allow", and no model or message can answer the card. The
   parent is marked `!` in the list, and an OS notification fires if the window is not focused. The tool returns at
   once; the outcome arrives later as a message from `relay`, so the parent can keep working. If the child's Copilot
@@ -212,7 +215,11 @@ an ordinary session: it appears in the list, you can open it, read what it did, 
   other agents, which shows only after **Approve**.
   A parent can propose any `copilot` flag, including ones that widen what the child may do without asking: the
   card's warning and your **Approve** are the guard. An argument already in the parent's command line reaches
-  Copilot twice, and which one wins is Copilot's rule.
+  Copilot twice, and which one wins is Copilot's rule. The arguments are appended to the parent's whole command line
+  as text, so a line that ends in a pipe or a comment sends them to the last program or into the comment instead of
+  Copilot; the card shows the whole line.
+  `folder`, `prompt`, `context` and `command` need the broker of this version: use **Update and restart broker** in
+  Settings. With an older broker the tool has none of them (only `name`, `task`, `agent` and `model`).
 - **The child** gets only its task, not the parent's history, so the parent has to put the context it needs in the
   task. If `model` is left out, the child uses the parent's current model. If `agent` is left out, it uses the
   default Copilot agent; the parent's agent is not inherited. An agent or model the parent's session does not offer

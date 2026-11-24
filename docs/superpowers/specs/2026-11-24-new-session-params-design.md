@@ -105,7 +105,7 @@ them in the `session_request` payload; the relay client passes payloads through 
 (`extension/copilot-relay/relay-client.mjs`, `onSessionRequest`), so it needs no change.
 
 Length caps (Claude's call): `folder` 4096, `prompt` the cap the own part has in the prompt editor (or 20 000 if it has
-none), `command` `COMMAND_MAX`. A longer value is refused by the tool with the reason.
+none), `command` `COMMAND_MAX`, `agent` and `model` 200. A longer value is refused by the tool with the reason.
 
 ### 2. Main (`electron/main.mjs`)
 
@@ -215,7 +215,9 @@ with single spaces after the parent's command line. The reason of a failure name
   including ones that widen what the child may do without asking. The card's warning and the user's Approve are the
   guard for that.
 - The arguments are added to the parent's whole command line. If that line already holds the same flag, Copilot gets
-  it twice; which one wins is Copilot's rule, not the app's. The card shows the whole line, so the user sees it.
+  it twice; which one wins is Copilot's rule, not the app's. A line that ends in a pipe or a comment sends them to
+  the last program or into the comment. The card shows the whole line and the added arguments in full, so the user
+  sees it.
 - The agent and model lists are the parent's. A child in another folder may offer other agents; that shows only after
   Approve, as the retry text of section 2.
 
