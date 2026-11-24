@@ -1160,7 +1160,7 @@ class SessionView {
     this.heldEl.hidden = list.length === 0;
     this.heldEl.replaceChildren();
     if (list.length) {
-      this.heldEl.append(h("div", { class: "held-head" }, h("span", {}, HeldReplies.listTitle(list.length))));
+      this.heldEl.append(h("div", { class: "held-head" }, h("span", {}, HeldReplies.listTitle("child", list.length))));
       for (const item of list) {
         const first = item.text.split("\n")[0];
         const heldText = h("span", { class: "held-text", title: item.text }, first);
@@ -1181,7 +1181,7 @@ class SessionView {
         );
       }
     }
-    this.holdLabel.hidden = !HeldReplies.showSwitch({ hasChildren: (tree.childrenOf.get(this.sessionId) ?? []).length > 0, held: list.length });
+    this.holdLabel.hidden = !HeldReplies.showSwitch({ kind: "child", hasChildren: (tree.childrenOf.get(this.sessionId) ?? []).length > 0, held: list.length });
     this.holdSwitch.checked = this.holdReplies;
     this.holdSwitch.disabled = this.dead || this.deleting;
     this.showQueueStatus();
@@ -2266,7 +2266,7 @@ class SessionView {
     this.relationsEl.replaceChildren(...parts);
     this.relationsEl.hidden = !parts.length;
     this.closeChildrenBtn.hidden = !openDescendants(this.sessionId).length;
-    this.holdLabel.hidden = !HeldReplies.showSwitch({ hasChildren: rel.children.length > 0, held: this.held.length });
+    this.holdLabel.hidden = !HeldReplies.showSwitch({ kind: "child", hasChildren: rel.children.length > 0, held: this.held.length });
   }
 
   get needsAttention() {

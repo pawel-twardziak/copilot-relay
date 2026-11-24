@@ -227,7 +227,7 @@ function statusText({ busy, dead, deleting, queued = 0, paused, held = 0 }) {
   if (busy) return `Working…${queued > 0 ? ` (${queued} queued)` : ""}${paused ? " (queue paused)" : ""}`;
   if (dead) return "Copilot process ended";
   if (queued > 0) return paused ? `Queue paused (${queued})` : `${queued} message(s) waiting`;
-  if (held > 0) return held === 1 ? "1 reply waiting for approval" : `${held} replies waiting for approval`;
+  if (held > 0) return held === 1 ? "1 message waiting for approval" : `${held} messages waiting for approval`;
   return "";
 }
 

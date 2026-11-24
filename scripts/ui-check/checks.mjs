@@ -2191,7 +2191,7 @@ export const checks = [
       assert.equal(await app.ev(`${V}.el.querySelector(".held-from").textContent`), "docs-9f8e7d");
       assert.equal(await app.ev(`${V}.el.querySelector(".held-text").textContent`), "first");
       assert.equal(await shownEl(".queue-strip"), false, "the queue stays hidden");
-      assert.equal(await status(), "2 replies waiting for approval");
+      assert.equal(await status(), "2 messages waiting for approval");
       assert.equal(await app.ev(`document.querySelector(".item.active .held-mark")?.textContent ?? null`), "⏸ 2");
       assert.equal(await shownEl(".held-switch"), true, "the switch shows with held replies");
       // 2. a redelivery is ignored

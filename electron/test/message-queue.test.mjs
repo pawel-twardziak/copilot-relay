@@ -119,8 +119,8 @@ test("statusText", () => {
 });
 
 test("statusText shows held replies only when idle with an empty queue", () => {
-  assert.equal(statusText({ held: 1 }), "1 reply waiting for approval");
-  assert.equal(statusText({ held: 2 }), "2 replies waiting for approval");
+  assert.equal(statusText({ held: 1 }), "1 message waiting for approval");
+  assert.equal(statusText({ held: 2 }), "2 messages waiting for approval");
   assert.equal(statusText({ held: 2, queued: 1 }), "1 message(s) waiting");
   assert.equal(statusText({ held: 2, busy: true }), "Working…");
 });
