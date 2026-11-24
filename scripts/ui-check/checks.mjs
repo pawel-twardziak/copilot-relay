@@ -377,6 +377,117 @@ async function fpSelect(app, rel) {
   await app.check(`${fpRow(rel)}.classList.contains("active") && !!${FP}.querySelector(".fp-diff .dv, .fp-diff .fp-msg")`, `the diff of ${rel}`);
 }
 
+/** held-typed: your own messages typed during a turn wait in the "Your messages" list (the switch on); the same run with
+ *  the queue setting off and on, as Send works during a turn in both. Every prompt of the scenario waits on a permission. */
+function heldTypedCheck(queue) {
+  return {
+    name: queue ? "held-typed-queue" : "held-typed",
+    modes: ["off"],
+    scenario: path.join(FIXTURES, "held-typed-scenario.mjs"),
+    settings: { queueMidTurn: queue },
+    sessionId: HISTORY_ID, // the switch is stored per session id; main accepts only a UUID
+    async run(app) {
+      const V = `views.get(${JSON.stringify(HISTORY_ID)})`;
+      assert.equal(await app.ev(`queueMidTurn`), queue, "the queue setting");
+      const rows = () => app.ev(`${V}.el.querySelectorAll(".held-row").length`);
+      const head = () => app.ev(`${V}.el.querySelector('.held-group[data-kind="user"] .held-head')?.textContent ?? null`);
+      const status = () => app.ev(`${V}.statusEl.textContent`);
+      const users = () => app.ev(`[...${V}.log.querySelectorAll(":scope > .msg.user .body")].map((e) => e.textContent)`);
+      const relays = () => app.ev(`${V}.log.querySelectorAll(":scope > .msg.relay").length`);
+      const queued = () => app.ev(`${V}.queue.map((i) => i.prompt)`);
+      const sendOff = () => app.ev(`${V}.sendBtn.disabled`);
+      const enter = (text) => app.ev(`(() => { const v = ${V}; v.input.value = ${JSON.stringify(text)}; v.input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); })()`);
+      const click = (sel) => app.ev(`${V}.el.querySelector(${JSON.stringify(sel)}).click()`);
+      const turn = async (text) => {
+        await app.send(text); // its permission keeps the turn running
+        await app.check(`${V}.prompting`, "a running turn");
+      };
+      // answers permissions until nothing runs (with the queue on, the queued message's turn follows or joins this one)
+      const end = async () => {
+        await app.answerPermission();
+        for (let i = 0; i < 8 && (await app.ev(`${V}.busy`)); i++) {
+          if (await app.ev(`!!${V}.el.querySelector(".perm:not(.done) .opts button.primary")`)) await app.answerPermission();
+          else await new Promise((r) => setTimeout(r, 150));
+        }
+        await app.idle();
+      };
+
+      await app.newSession();
+      // the harness has no relay client (and window.api is frozen): the view's acknowledgement is recorded instead
+      await app.ev(`(() => { window.__acks = []; ${V}.ackDiscarded = (id) => window.__acks.push(id); })()`);
+
+      // 1. during a turn Send is enabled; a typed message is held (not queued), the box is empty
+      await turn("Start.");
+      assert.equal(await sendOff(), false, "Send is enabled during a turn");
+      await enter("check the README");
+      assert.equal(await head(), "Your messages (1)");
+      assert.equal(await app.ev(`${V}.el.querySelector(".held-from").textContent`), "you");
+      assert.deepEqual(await queued(), [], "the queue is empty");
+      assert.equal(await app.ev(`${V}.input.value`), "", "the box is empty");
+      await enter("second typed");
+      assert.equal(await head(), "Your messages (2)");
+      assert.deepEqual(await users(), ["Start."], "nothing was sent");
+      // 2. the turn ends: nothing is released, no new turn
+      await end();
+      assert.equal(await rows(), 2, "the rows stay");
+      assert.deepEqual(await users(), ["Start."], "no new turn started");
+      assert.equal(await status(), "2 messages waiting for approval");
+      assert.equal(await sendOff(), false, "idle: Send is enabled");
+      // 3. approve: a turn starts; its bubble is your own message
+      await click(".held-approve");
+      await app.check(`${V}.log.querySelectorAll(":scope > .msg.user").length === 2`, "the approved message's turn");
+      assert.deepEqual(await users(), ["Start.", "check the README"]);
+      assert.equal(await relays(), 0, "no relay bubble");
+      assert.equal(await rows(), 1);
+      await end();
+      // 4. closing asks about the held message of yours
+      assert.equal(await app.ev(`closeQuestion([${JSON.stringify(HISTORY_ID)}])`), "This session has queued messages of yours that were not sent. Close and discard them?");
+      // 6. ✕: gone, the line says so, nothing is acknowledged or remembered
+      await click(".held-discard");
+      assert.equal(await rows(), 0);
+      assert.equal(await app.ev(`${V}.log.textContent.trim().endsWith("Discarded your message.")`), true);
+      assert.deepEqual(await app.ev(`window.__acks`), [], "no acknowledgement");
+      assert.equal(await app.ev(`${V}.discarded.size`), 0, "nothing in discarded");
+      assert.equal(await app.ev(`closeQuestion([${JSON.stringify(HISTORY_ID)}])`), null, "nothing left to ask about");
+      // 8. what Send refuses during a turn it still refuses
+      await turn("Another.");
+      await enter("/rename x");
+      assert.equal(await status(), "Wait until Copilot finishes this turn.");
+      assert.equal(await rows(), 0);
+      assert.deepEqual(await queued(), []);
+      await app.ev(`${V}.input.value = ""; ${V}.statusEl.textContent = ""`);
+      // 7. the switch off: Send is as before this feature
+      await click('.held-switch[data-kind="user"]');
+      await app.check(`${V}.holdOn.user === false`, "the user switch off");
+      if (queue) {
+        assert.equal(await sendOff(), false);
+        await enter("queued one");
+        assert.deepEqual(await queued(), ["queued one"], "queued, not held");
+        assert.equal(await rows(), 0);
+      } else {
+        assert.equal(await sendOff(), true, "Send is disabled");
+        await enter("ignored");
+        assert.equal(await rows(), 0);
+        assert.deepEqual(await queued(), []);
+      }
+      await click('.held-switch[data-kind="user"]');
+      await app.check(`${V}.holdOn.user === true`, "the user switch on");
+      assert.equal(await sendOff(), false);
+      await enter("last words");
+      assert.equal(await head(), "Your messages (1)");
+      await end();
+      // 5. a view that comes back dead does not keep it: it is counted as discarded
+      assert.equal(await rows(), 1);
+      await app.ev(`api.closeSession(${JSON.stringify(HISTORY_ID)})`); // main opens the session again: session/load fails (scenario)
+      await app.ev(`reopenView(${V})`, "the reopen");
+      await app.check(`${V}.dead && !${V}.resuming`, "the dead view");
+      assert.equal((await app.ev(`${V}.log.textContent`)).includes("1 queued message(s) waiting for this session were discarded."), true);
+      assert.equal(await rows(), 0);
+      assert.equal(await app.ev(`${V}.held.length`), 0);
+    },
+  };
+}
+
 export const checks = [
   {
     name: "baseline-live",
@@ -3093,4 +3204,6 @@ export const checks = [
       }
     },
   },
+  heldTypedCheck(false),
+  heldTypedCheck(true),
 ];

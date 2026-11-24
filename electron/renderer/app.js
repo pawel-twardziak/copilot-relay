@@ -1152,7 +1152,7 @@ class SessionView {
     this.busy = b;
     const off = b || this.dead || this.deleting; // this.deleting: the whole session is being deleted
     this.el.classList.toggle("busy", off); // disables the fork/delete actions
-    this.sendBtn.disabled = this.dead || this.deleting || (b && !queueMidTurn); // with the queue on, Send queues while busy
+    this.updateSendBtn();
     this.stopBtn.disabled = !b || this.dead || this.deleting;
     this.input.disabled = this.dead || this.deleting;
     this.agentPicker.disabled = off;
@@ -1161,6 +1161,21 @@ class SessionView {
     this.showQueueStatus();
     renderList();
     if (!b) queueMicrotask(() => this.pump());
+  }
+
+  /** Send is off while busy, except where it queues (queue setting on) or holds your message (a turn runs, "user" switch on). */
+  updateSendBtn() {
+    this.sendBtn.disabled = this.dead || this.deleting || (this.busy && !this.sendsWhileBusy());
+  }
+
+  /** What Send does with a message while the view is busy: queue it or hold it (the queue setting, or a running turn with the "user" switch on). */
+  sendsWhileBusy() {
+    return queueMidTurn || this.holdsTyped();
+  }
+
+  /** Your own message typed during a turn waits in the "user" list (switch on). */
+  holdsTyped() {
+    return this.prompting && this.holdOn.user;
   }
 
   showQueueStatus() {
@@ -1221,12 +1236,20 @@ class SessionView {
     renderList();
   }
 
+  /** A message you typed while a turn runs (switch "user" on): it waits in the "Your messages" list until you approve it. */
+  holdTyped(text, command) {
+    HeldReplies.insertByArrival(this.held, { id: ++queueItemSeq, kind: "user", typed: true, from: "you", text, prompt: text, command, arrivedAt: Date.now() });
+    this.renderHeld();
+    renderList();
+  }
+
   /** Approving puts the message in the queue (the one path to a prompt; its acknowledgement happens when it starts). */
   approveHeld(item) {
     const i = this.held.indexOf(item);
     if (i < 0) return;
     this.held.splice(i, 1);
-    this.enqueue({ kind: "relay", text: item.text, prompt: HeldReplies.approvedPrompt(item.prompt, item.arrivedAt, Date.now(), item.kind), from: item.from, human: item.human === true, fromCwd: item.fromCwd, deliveryId: item.deliveryId, command: false });
+    if (item.typed) this.enqueue({ kind: "app", text: item.text, prompt: item.prompt, command: item.command });
+    else this.enqueue({ kind: "relay", text: item.text, prompt: HeldReplies.approvedPrompt(item.prompt, item.arrivedAt, Date.now(), item.kind), from: item.from, human: item.human === true, fromCwd: item.fromCwd, deliveryId: item.deliveryId, command: false });
     this.renderHeld();
     renderList();
   }
@@ -1235,8 +1258,10 @@ class SessionView {
     const i = this.held.indexOf(item);
     if (i < 0) return;
     this.held.splice(i, 1);
-    this.discarded.add(item.deliveryId);
-    this.ackDiscarded(item.deliveryId); // the broker must not deliver it again
+    if (!item.typed) {
+      this.discarded.add(item.deliveryId);
+      this.ackDiscarded(item.deliveryId); // the broker must not deliver it again
+    }
     this.system(HeldReplies.discardLine(item.kind, item.from));
     this.renderHeld();
     renderList();
@@ -1261,6 +1286,7 @@ class SessionView {
     }
     this.holdOn[kind] = on;
     this.holdTouched[kind] = true;
+    this.updateSendBtn();
     if (!on) for (const item of this.held.filter((i) => i.kind === kind)) this.approveHeld(item);
     this.renderHeld();
   }
@@ -2501,17 +2527,20 @@ class SessionView {
     const cmd = this.agentAvailable() ? SlashCommands.parseAgentCommand(text) : null;
     const rename = SlashCommands.parseRenameCommand(text);
     if (this.busy) {
-      // agent changes, /rename and an edit are not queued; with the queue setting off nothing is
-      if (cmd || rename || this.edit || this.historyOp || !queueMidTurn) {
+      // agent changes, /rename and an edit are not queued or held; with the queue setting off and no held typed messages nothing is
+      const holdIt = this.holdsTyped();
+      if (cmd || rename || this.edit || this.historyOp || !(queueMidTurn || holdIt)) {
         if (cmd || rename) this.statusEl.textContent = "Wait until Copilot finishes this turn.";
-        // Send stays enabled with the queue on: say why nothing happened (a delete or replace rebuilds the view)
-        else if (this.historyOp && queueMidTurn) {
+        // Send stays enabled with the queue on (or while a turn holds your messages): say why nothing happened (a delete or replace rebuilds the view)
+        else if (this.historyOp && (queueMidTurn || holdIt)) {
           this.statusEl.textContent = this.historyOp.description === "edit" ? "Wait until the message has been replaced." : "Wait until the fork or delete of a message has finished.";
         }
         return;
       }
       this.takeInput();
-      this.enqueue({ kind: "app", text, prompt: text, command: SlashCommands.isCommandPrompt(text) });
+      const command = SlashCommands.isCommandPrompt(text);
+      if (holdIt) this.holdTyped(text, command);
+      else this.enqueue({ kind: "app", text, prompt: text, command });
       return;
     }
     if (this.edit) return this.sendEdit(text);
@@ -2719,6 +2748,7 @@ class SessionView {
         for (const kind of HeldReplies.SWITCH_KINDS) {
           if (this.holdTouched[kind] || hold?.[kind] !== false) continue;
           this.holdOn[kind] = false;
+          this.updateSendBtn();
           for (const item of this.held.filter((i) => i.kind === kind)) this.approveHeld(item); // held while the answer was on its way
         }
         this.renderHeld();
@@ -2913,7 +2943,12 @@ async function reopenView(old, error, { holdInbox = false, typed, keepFollowUp =
   const v = views.get(sessionId);
   if (!v) return;
   if (error) v.error(error);
-  if (v.dead && queue.length) v.error(`${queue.length} queued message(s) waiting for this session were discarded.`);
+  const lostTyped = v.dead ? v.held.filter((item) => item.typed) : []; // your typed messages go with the queue's
+  if (lostTyped.length) {
+    v.held = v.held.filter((item) => !item.typed);
+    v.renderHeld();
+  }
+  if (v.dead && queue.length + lostTyped.length) v.error(`${queue.length + lostTyped.length} queued message(s) waiting for this session were discarded.`);
   if (typed && !v.input.value) {
     v.input.value = typed;
     v.autosize();
@@ -2938,7 +2973,7 @@ function closeQuestion(ids, question) {
   const list = ids.map((id) => views.get(id)).filter(Boolean);
   const isBusy = (v) => v.busy && !v.dead;
   const busy = list.filter(isBusy).length;
-  const queued = list.filter((v) => !isBusy(v) && v.queue.some((item) => item.kind === "app")).length;
+  const queued = list.filter((v) => !isBusy(v) && (v.queue.some((item) => item.kind === "app") || v.held.some((item) => item.typed))).length;
   if (!busy && !queued) return null;
   if (!queued) return question ?? (busy === 1 ? "1 session is still working. Stop it and close?" : `${busy} sessions are still working. Stop them and close?`);
   if (busy) return `${busy} session(s) are still working and ${queued} more have queued messages of yours that were not sent. Stop and close them?`;
