@@ -326,6 +326,21 @@ async function childFromCard(app, tag) {
     assert.equal(stored()["scripted-work-2"], typed, "the child's own command is the card's");
   }
 }
+/** A parent whose stored command was replaced by one that cannot be run asks for a child: resolves when the card is
+ *  there (its command field holds the broken command). notices(): the relay notices in the parent's chat. */
+async function brokenChildCard(app) {
+  await app.newSession();
+  const file = path.join(app.dir, "config", "copilot-relay-desktop", "session-commands.json");
+  const card = `${V}.el.querySelectorAll(".perm.delegation")[0]`;
+  await app.check(`!!${V}.relayName && !${V}.relayChip.hidden && !${V}.relayChip.classList.contains("off")`, "the parent to connect to the broker");
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify({ "scripted-work": "/nonexistent/copilot-ui-check" }));
+  await app.send("create_session kid Do-it");
+  await app.check(`!!${card}?.querySelector(".pe-command") && !${card}.querySelector(".opts button.primary").disabled`, "the card");
+  assert.equal(await app.ev(`${card}.querySelector(".pe-command").value`), "/nonexistent/copilot-ui-check");
+  const notices = () => app.ev(`[...${V}.log.querySelectorAll(".msg.relay")].map((e) => e.textContent)`);
+  return { card, notices };
+}
 /** Every group's mark: in the chat, and in its entry when its body is in the panel (else null). */
 const groupMarks = (app) => app.ev(`[...${V}.log.querySelectorAll(":scope > .group")].map((g) => ({
   kind: g._info.kind,
@@ -3038,32 +3053,72 @@ export const checks = [
     run: (app) => childFromCard(app, null),
   },
   {
-    // a parent's command that cannot be run: the child is not created, no view appears, and the parent is told in a
-    // relay notice (a message of kind relay in its chat) whose text says where the command comes from. The stored
-    // command is replaced in the file while the parent runs (the store reads the file on every use).
-    name: "child-command-broken",
+    // a child whose Copilot does not start (the card's command cannot be run): the card says why, stays open with its
+    // fields and buttons usable again, and the parent is told nothing; another command on the card and a second
+    // Approve create the child. The card starts with a broken command because the parent's stored one is replaced in
+    // the file while the parent runs (the store reads the file on every use).
+    name: "child-card-retry",
     modes: ["off"],
     scenario: CHILD_PROMPT_SCENARIO,
     settings: { relay: true },
     broker: true,
     async run(app) {
-      await app.newSession();
-      const file = path.join(app.dir, "config", "copilot-relay-desktop", "session-commands.json");
-      const card = `${V}.el.querySelectorAll(".perm.delegation")[0]`;
-      await app.check(`!!${V}.relayName && !${V}.relayChip.hidden && !${V}.relayChip.classList.contains("off")`, "the parent to connect to the broker");
-      mkdirSync(path.dirname(file), { recursive: true });
-      writeFileSync(file, JSON.stringify({ "scripted-work": "/nonexistent/copilot-ui-check" }));
-      await app.send("create_session kid Do-it");
-      await app.check(`!!${card}?.querySelector(".prompt-editor") && !${card}.querySelector(".opts button.primary").disabled`, "the card");
-      await app.ev(`${card}.querySelector(".opts button.primary").click()`);
-      const notice = `[...${V}.log.querySelectorAll(".msg.relay")].map((e) => e.textContent).join(" ")`;
-      const where = "This is the command from the child's approval card, which starts as the parent session's command.";
-      await app.check(`${notice}.includes(${JSON.stringify(where)})`, "the parent to be told why the child did not start");
-      const text = await app.ev(notice);
-      assert.match(text, /Session "kid" was not created: /);
-      assert.ok(text.includes(where), text);
-      await app.idle();
+      const { card, notices } = await brokenChildCard(app);
+      // as a real click does, the button takes the focus first (a script's click() leaves it where it was)
+      await app.ev(`(() => { const b = ${card}.querySelector(".opts button.primary"); b.focus(); b.click(); })()`);
+      await app.check(`!${card}.querySelector(".delegation-error").hidden`, "the start error on the card");
+      const error = await app.ev(`${card}.querySelector(".delegation-error").textContent`);
+      assert.match(error, /Could not start "\/nonexistent\/copilot-ui-check": /);
+      assert.ok(error.includes("This is the command from the child's approval card. Change it on the card and approve again, or reject the request."), error);
+      assert.deepEqual(
+        await app.ev(`({ done: ${card}.classList.contains("done"), buttons: [...${card}.querySelectorAll(".opts button")].map((b) => b.textContent + (b.disabled ? " (off)" : "")), command: ${card}.querySelector(".pe-command").disabled, own: ${card}.querySelector(".pe-own").disabled, kept: ${card}.querySelector(".pe-command").value, waiting: ${V}.openCards.size })`),
+        { done: false, buttons: ["Approve", "Reject"], command: false, own: false, kept: "/nonexistent/copilot-ui-check", waiting: 1 },
+        "the card takes another answer",
+      );
       assert.equal(await app.ev(`views.has("scripted-work-2")`), false, "no view for the child that did not start");
+      assert.equal(await app.ev(`${card}.querySelector(".pe-template").disabled`), true, "a control that was off before the click stays off (no templates)");
+      assert.equal(await app.ev(`document.activeElement === ${card}.querySelector(".pe-command")`), true, "the command field has the focus again");
+      // the same command again: a second failure leaves the card as the first did
+      await app.ev(`${card}.querySelector(".opts button.primary").click()`);
+      await app.check(`${card}.querySelectorAll(".opts button").length === 2 && !${card}.querySelector(".delegation-error").hidden`, "the card open again after the second failure");
+      assert.equal(await app.ev(`${card}.classList.contains("done") || ${card}.querySelector(".pe-command").disabled`), false);
+      assert.deepEqual(await notices(), [], "the parent is told nothing while the card is open");
+      // a cleared field is the Settings command, which runs
+      await app.ev(`(() => { const t = ${card}.querySelector(".pe-command"); t.value = ""; t.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+      await app.ev(`${card}.querySelector(".opts button.primary").click()`);
+      await app.check(`!!views.get("scripted-work-2")`, "the child's view after the second Approve");
+      await app.check(`${card}.classList.contains("done")`, "the card to be answered");
+      assert.match(await app.ev(`${card}.querySelector(".opts").textContent`), /Approved/);
+      assert.equal(await app.ev(`${card}.querySelector(".delegation-error").hidden`), true, "the error goes with the retry");
+      // the parent's only notice is the creation: a notice of the failed starts would have come before it (it takes the
+      // way through the broker, so it is looked for only now)
+      // every message of the chat (the creation comes as a system note, a failure would come as a relay notice); the
+      // card is not one of them
+      const messages = () => app.ev(`[...${V}.log.querySelectorAll(":scope > .msg")].map((e) => e.textContent)`);
+      await until(async () => (await messages()).some((t) => t.includes("was created")), "the parent to be told of the creation");
+      assert.ok(!(await messages()).some((t) => t.includes("was not created") || t.includes("copilot-ui-check")), "no notice of the failed starts");
+      await app.idle();
+    },
+  },
+  {
+    // after a failed start the card can also be rejected: nothing starts, the card is answered, and the parent is told
+    // of the rejection (not of the failed start, whose text holds the command)
+    name: "child-card-retry-reject",
+    modes: ["off"],
+    scenario: CHILD_PROMPT_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      const { card, notices } = await brokenChildCard(app);
+      await app.ev(`${card}.querySelector(".opts button.primary").click()`);
+      await app.check(`!${card}.querySelector(".delegation-error").hidden`, "the start error on the card");
+      await app.ev(`[...${card}.querySelectorAll(".opts button")].find((b) => b.textContent === "Reject").click()`);
+      await app.check(`${card}.classList.contains("done")`, "the card to be answered");
+      assert.match(await app.ev(`${card}.querySelector(".opts").textContent`), /Rejected/);
+      await until(async () => (await notices()).some((t) => t.includes("rejected the request")), "the parent to be told of the rejection");
+      assert.ok(!(await notices()).some((t) => t.includes("copilot-ui-check")), "the command does not travel to the parent");
+      assert.equal(await app.ev(`views.has("scripted-work-2")`), false, "no child");
+      await app.idle();
     },
   },
   {

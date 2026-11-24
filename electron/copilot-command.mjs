@@ -12,7 +12,8 @@ const NOT_FOUND = "The program was not found, or cannot be run.";
 const WHERE = {
   session: "This is this session's own command. Change it in the session's Setup.",
   settings: "This is the command from Settings. Change it there, or give the session its own Copilot command.",
-  parent: "This is the command from the child's approval card, which starts as the parent session's command. Change it on the next card, or in the parent's Setup.",
+  // shown on the card itself, which stays open after a failed start (the field starts as the parent's command)
+  card: "This is the command from the child's approval card. Change it on the card and approve again, or reject the request.",
 };
 // the command ran and ended with a message of its own (an argument it does not take, a shell error): the remedy is
 // the command. cmd.exe does not treat ' as a quote, so a line written for a POSIX shell fails this way on Windows.

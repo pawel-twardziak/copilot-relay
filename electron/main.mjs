@@ -501,7 +501,7 @@ const SETUP_TIMEOUT_TEXT = `Copilot did not answer within ${CHILD_SETUP_TIMEOUT_
 
 /** Start a Copilot process with a new session and attach it. `link` ({ name, parentKey }) is for delegated sessions;
  *  `tier` is the context tier to start with (null: the Settings default); `own` the session's own prompt part;
- *  `command` its own Copilot command ("" = Settings), `commandSource` where it comes from ("parent" for a child). */
+ *  `command` its own Copilot command ("" = Settings), `commandSource` where it comes from ("card" for a child: its approval card). */
 async function createSession(cwd, link = {}, deadline, tier = null, own = "", command = "", commandSource = "session") {
   requireDir(cwd);
   const typed = normalizeCommand(command);
@@ -975,13 +975,20 @@ async function setConfigOption(sessionId, entry, configId, value) {
   return res?.configOptions ?? null;
 }
 
-/** Create the approved child and link it to its parent. Never throws: every failure ends as an outcome for the parent.
+/** Create the approved child and link it to its parent. Never throws; resolves to what the card is told:
+ *  { outcome: "created" } or { outcome: "failed", text, retry }. With `retry` the child's Copilot never started, the
+ *  parent has been told nothing and the request stays open; every other failure ends as an outcome for the parent.
  *  `command`: what the approval card's command field held ("" for the Settings command); a card without the field
  *  (undefined) gives the parent's stored command, which is also what the field starts with. */
 async function createChild(req, own = "", command = undefined) {
   const { parentSessionId, name, task, agent, model } = req;
   const parent = open.get(parentSessionId);
-  if (!parent) return;
+  if (!parent) return { outcome: "failed", text: "The session that asked for it is no longer open.", retry: false };
+  // a failure after the child's Copilot started: the child is discarded and the parent told, the request is over
+  const failed = (kind, text) => {
+    tellParent(req, kind, `Session "${name}" was not created: ${text}`);
+    return { outcome: "failed", text, retry: false };
+  };
   const deadline = Date.now() + CHILD_SETUP_TIMEOUT_MS;
   let child = null;
   let announced = false; // the renderer knows this child and has to be told when it goes away
@@ -994,7 +1001,17 @@ async function createChild(req, own = "", command = undefined) {
   };
   try {
     const tier = sessionTier(parentSessionId); // the child works on the parent's context window
-    child = await createSession(parent.cwd, { name, parentKey: `cli:${parentSessionId}` }, deadline, tier, own, command ?? commands.get(parentSessionId), "parent");
+    try {
+      child = await createSession(parent.cwd, { name, parentKey: `cli:${parentSessionId}` }, deadline, tier, own, command ?? commands.get(parentSessionId), "card");
+    } catch (e) {
+      // The child's Copilot did not come to be (its command, most likely): nothing was made and the parent has been
+      // told nothing, so the card takes another answer (delegation:answer keeps the request). The text, which holds
+      // the command, goes to the card only.
+      if (open.get(parentSessionId) === parent) return { outcome: "failed", text: friendly(e), retry: true };
+      // the parent was closed or restarted meanwhile and its requests went with it: there is no card to answer
+      // again. A restarted parent is open again and is told, in words that do not hold the command.
+      return failed("failed", "the session that asked for it was closed or restarted while its child was starting.");
+    }
     const { sessionId, entry } = child;
     tiers.set(sessionId, tier); // as an override, so a later reopen keeps it
     if (!entry.relay) throw new Error("The relay is switched off in this app, so the new session cannot be linked to its parent.");
@@ -1002,7 +1019,7 @@ async function createChild(req, own = "", command = undefined) {
     const config = resolveConfig(entry.configOptions, { agent, model, inheritedModel: findModelOption(parent.configOptions)?.currentValue });
     if (config.error) {
       await discard();
-      return tellParent(req, "invalid", `Session "${name}" was not created: ${config.error}`);
+      return failed("invalid", config.error);
     }
     for (const { configId, value } of config.sets) await withDeadline(setConfigOption(sessionId, entry, configId, value), deadline, SETUP_TIMEOUT_TEXT);
 
@@ -1011,7 +1028,7 @@ async function createChild(req, own = "", command = undefined) {
 
     if (!(await waitRegistered(entry.relay, REGISTER_TIMEOUT_MS))) {
       await discard();
-      return tellParent(req, "failed", `Session "${name}" was not created: it did not connect to the relay broker in time.`);
+      return failed("failed", "it did not connect to the relay broker in time.");
     }
     await entry.relay.setTask(task); // the broker keeps the task with the link (shown in the tree); false only costs that
     const finalName = entry.relay.name;
@@ -1023,20 +1040,35 @@ async function createChild(req, own = "", command = undefined) {
     const parentName = parentEntry.relay?.name;
     const folder = parentEntry.cwd;
     send("relay:message", { sessionId, from: parentName, fromCwd: folder, human: false, text: task, prompt: childPrompt({ parentName, task, folder }), wake: true });
+    return { outcome: "created" };
   } catch (e) {
     await discard();
-    tellParent(req, "failed", `Session "${name}" was not created: ${friendly(e)}`);
+    return failed("failed", friendly(e));
   }
 }
 
 // reachable only from the window (preload): nothing the broker or a session sends can answer a request
 // (so the child's command is the user's typing on the card, or the parent's stored one)
 handle("delegation:answer", async (requestId, approved, own, command) => {
+  // taken while it is answered, so a second click cannot start a second child
   const req = pendingRequests.take(requestId);
   if (!req) return false;
-  if (approved === true) await createChild(req, String(own ?? ""), typeof command === "string" ? command : undefined);
-  else tellParent(req, "rejected", `The user rejected the request to create session "${req.name}".`);
-  return true;
+  if (approved !== true) {
+    tellParent(req, "rejected", `The user rejected the request to create session "${req.name}".`);
+    return { outcome: "rejected" };
+  }
+  const reloadsBefore = windowReloads;
+  const result = await createChild(req, String(own ?? ""), typeof command === "string" ? command : undefined);
+  if (!result.retry) return result;
+  // the start failed: the request is open again, for Approve or Reject
+  if (windowReloads === reloadsBefore) {
+    pendingRequests.add(req);
+    return result;
+  }
+  // the window was reloaded during the start: the card is gone, so nobody could answer again. The request ends,
+  // and the parent is told in words that do not hold the command.
+  tellParent(req, "failed", `Session "${req.name}" was not created: its start failed and the window was reloaded meanwhile. Ask again.`);
+  return { ...result, retry: false };
 });
 
 handle("relay:ack", async (sessionId, id) => {
@@ -1707,6 +1739,7 @@ function confirmLeavingChildren() {
 // After a reload the views are gone but main keeps every process: a child's permission card would be lost for good
 // and Close all sub-sessions would not reach it. So its work is stopped first, with the user's consent. Reopen cards
 // of sessions that stay open come back when their view is opened again (sessions:open).
+let windowReloads = 0; // a reload takes every card with it: a request answered across one cannot be kept (delegation:answer)
 async function confirmedReload(reload) {
   const parent = win && !win.isDestroyed() ? win : null;
   if (!parent) return;
@@ -1715,9 +1748,11 @@ async function confirmedReload(reload) {
     const reopens = [...reopenCards.values()].filter((c) => children.includes(c.sessionId)).length;
     const choice = dialog.showMessageBoxSync(parent, { type: "warning", buttons: ["Reload", "Cancel"], defaultId: 1, cancelId: 1, ...reloadWarning(children.length, pendingRequests.size, reopens) });
     if (choice !== 0) return;
+    // counted before the children are closed: a start that fails during that wait must already see the reload
+    windowReloads++;
     await Promise.all(children.map((id) => closeEntry(id).catch(() => {})));
     pendingRequests.clear();
-  }
+  } else windowReloads++;
   if (!parent.isDestroyed()) reload(parent.webContents);
 }
 

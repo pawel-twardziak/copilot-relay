@@ -15,18 +15,15 @@ clause; the comment of the field's Enter guard.
 
 ## A. Worth doing first (analysed below)
 
-1. **A child that fails to start shows "→ Approved" on its card, and the reason only as a relay notice in the
-   parent's chat** (`delegationCard`'s `answer` in `electron/renderer/app.js`; `createChild`'s catch and `tellParent`
-   in `electron/main.mjs`). Before this branch a child's command could not be mistyped; now a typo on the card ends
-   this way, and the card with the typed command is already disabled.
-   *Proposal:* let `delegation:answer` return the outcome (`created` / `failed` with its text), and show a failure
-   on the card itself, with the command still readable.
+1. **Done in `feat/child-card-retry`** (see `2026-11-24-child-card-retry-deferred.md`): a child that failed to
+   start showed "→ Approved" on its card, and the reason only as a relay notice in the parent's chat. The card now
+   shows the reason and stays open for another command.
 
 ## B. Window and wording
 
-2. **A failed child start still quotes the command to the parent's model and the broker** (item 4 of
-   `2026-11-24-session-command-deferred.md`). With the card's field the quoted command may be one the user typed on
-   the card, with any variable written into it. The owner's decision, as there.
+2. **Done in `feat/child-card-retry`:** a failed child start quoted the command to the parent's model and the
+   broker (item 4 of `2026-11-24-session-command-deferred.md`). The text of a failed start now goes to the card
+   only.
 3. **The hint of a stopped command is one text for every cause**: an argument Copilot refuses, a shell error, and
    on Windows a missing program. The app does not read the message to tell them apart (its wording depends on the
    system language).
@@ -40,8 +37,8 @@ clause; the comment of the field's Enter guard.
    effect there, as the card is not in a form.
 6. **A text field on the card can lose the focus to the chat's input while the parent streams**; the card's text
    area behaves the same.
-7. **`createChild` returns without a word when the parent is gone** and the card then shows "→ Approved"
-   (`electron/main.mjs`). Before this branch; `pendingRequests.dropForParent` makes it nearly unreachable.
+7. **Done in `feat/child-card-retry`:** `createChild` returned without a word when the parent was gone and the card
+   showed "→ Approved". The card now shows "Not created: The session that asked for it is no longer open."
 
 ## D. Tests and housekeeping
 

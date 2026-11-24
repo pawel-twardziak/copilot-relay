@@ -50,7 +50,7 @@ scripted ACP agent).
 | `REFUSED_TYPE` | `The command must be text.` |
 | `WHERE.session` | `This is this session's own command. Change it in the session's Setup.` |
 | `WHERE.settings` | `This is the command from Settings. Change it there, or give the session its own Copilot command.` |
-| `WHERE.parent` | `This is the command from the child's approval card, which starts as the parent session's command. Change it on the next card, or in the parent's Setup.` (changed after v0.24.0, with the card's command field) |
+| `WHERE.card` (was `WHERE.parent`) | `This is the command from the child's approval card. Change it on the card and approve again, or reject the request.` (changed after v0.25.0: the card stays open after a failed start) |
 | `NOT_FOUND` | `The program was not found, or cannot be run.` |
 | button | text `Setup`, title `This session's prompt and Copilot command (saving restarts its Copilot)` |
 | dialog title (session) | `Setup: <session title or folder>` |
