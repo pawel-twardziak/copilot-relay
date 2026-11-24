@@ -7,6 +7,7 @@ import { afterEach, test } from "node:test";
 import { Delegation } from "../../src/delegation.mjs";
 import { DelegationStore } from "../../src/delegation-store.mjs";
 import { Registry, nameSuffix, relayPrompt } from "../../src/registry.mjs";
+import { createSessionInput } from "../../src/mcp.mjs";
 import { onceDelivery } from "../../extension/copilot-relay/relay-client.mjs";
 
 const dirs = [];
@@ -75,6 +76,37 @@ test("create_session returns a request id and emits session_request", () => {
   assert.equal(parentControl[0][1].name, "badacz");
   assert.equal(parentControl[0][1].task, "do it");
   assert.equal(typeof parentControl[0][1].requestId, "string");
+});
+
+test("create_session forwards the new fields in session_request", () => {
+  const { d, parentControl } = setup();
+  d.requestCreate("cli:parent", { ...req, folder: "/work/x", prompt: "be brief", context: "long_context", command: "copilot --foo bar" });
+  const sent = parentControl[0][1];
+  assert.equal(sent.folder, "/work/x");
+  assert.equal(sent.prompt, "be brief");
+  assert.equal(sent.context, "long_context");
+  assert.equal(sent.command, "copilot --foo bar");
+});
+
+test("createSessionInput refuses a bad command", () => {
+  const r = createSessionInput({ name: "a", task: "b", command: "node x" });
+  assert.deepEqual(r, { refused: 'Not sent: Only the copilot command is allowed, not "node".' });
+});
+
+test("createSessionInput refuses an over-long field", () => {
+  const f = createSessionInput({ name: "a", task: "b", folder: "x".repeat(4097) });
+  assert.match(f.refused, /"folder"/);
+  assert.match(f.refused, /4096/);
+  const p = createSessionInput({ name: "a", task: "b", prompt: "x".repeat(20001) });
+  assert.match(p.refused, /"prompt"/);
+  assert.match(p.refused, /20000/);
+});
+
+test("createSessionInput passes the fields", () => {
+  const all = createSessionInput({ name: "a", task: "b", agent: "g", model: "m", folder: "/f", prompt: "p", context: "default", command: " copilot --foo " });
+  assert.deepEqual(all.request, { name: "a", task: "b", agent: "g", model: "m", folder: "/f", prompt: "p", context: "default", command: "copilot --foo" });
+  const none = createSessionInput({ name: "a", task: "b", command: "  " });
+  assert.deepEqual(none.request, { name: "a", task: "b", agent: "", model: "", folder: "", prompt: "", context: "", command: "" });
 });
 
 test("a report reaches the parent and stays on disk until acked", () => {

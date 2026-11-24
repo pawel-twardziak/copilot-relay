@@ -175,13 +175,13 @@ export class Delegation {
     return block ? `${prompt}\n\n${block}` : prompt;
   }
 
-  requestCreate(callerKey, { name, task, agent, model }) {
+  requestCreate(callerKey, { name, task, agent, model, folder, prompt, context, command }) {
     const peer = this.registry.get(callerKey);
     if (!peer) return "You are not registered with the relay broker.";
     if (!peer.control) return "Your app connection is not connected, so a session cannot be requested now.";
     const requestId = this.newId();
     try {
-      peer.control("session_request", { requestId, name, task, agent, model });
+      peer.control("session_request", { requestId, name, task, agent, model, folder, prompt, context, command });
     } catch {
       return "Your app connection is not connected, so a session cannot be requested now.";
     }

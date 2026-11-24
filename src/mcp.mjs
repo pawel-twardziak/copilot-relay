@@ -9,9 +9,27 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { childCommandArgs } from "./child-command.mjs";
 
 const text = (t) => ({ content: [{ type: "text", text: t }] });
 const IDLE_MS = 30 * 60_000;
+const FOLDER_MAX = 4096;
+const PROMPT_MAX = 20000;
+
+/** Builds the session request from create_session's input, or refuses it (the model sees the reason). */
+export function createSessionInput({ name, task, agent, model, folder, prompt, context, command }) {
+  for (const [field, value, max] of [["folder", folder, FOLDER_MAX], ["prompt", prompt, PROMPT_MAX]])
+    if (typeof value === "string" && value.length > max) return { refused: `Not sent: "${field}" is longer than ${max} characters.` };
+  let cmd = "";
+  if (typeof command === "string" && command.trim()) {
+    const parsed = childCommandArgs(command);
+    if (parsed.refused) return { refused: `Not sent: ${parsed.refused}` };
+    cmd = command.trim();
+  }
+  return {
+    request: { name, task, agent: agent ?? "", model: model ?? "", folder: folder ?? "", prompt: prompt ?? "", context: context ?? "", command: cmd },
+  };
+}
 
 /** Delegation tools are for desktop-app sessions only (identity `app:<uuid>` given by the MCP URL). */
 export function delegationToolsAllowed(peerParam) {
@@ -88,14 +106,34 @@ function buildServer(registry, getKey, { mailbox, delegation = null, fixedKey = 
         inputSchema: {
           name: z.string().describe("Name for the new session"),
           task: z.string().describe("The task the new session should work on"),
-          agent: z.string().optional().describe("Optional agent to use"),
-          model: z.string().optional().describe("Optional model to use"),
+          agent: z.string().optional().describe("Optional agent to use. The user can change it before approving."),
+          model: z.string().optional().describe("Optional model to use. The user can change it before approving."),
+          folder: z
+            .string()
+            .optional()
+            .describe("Absolute path of the folder the new session works in. Default: your own folder. The user can change it before approving."),
+          prompt: z
+            .string()
+            .optional()
+            .describe("The new session's own prompt part (instructions added to its system prompt). Default: none. The user can change it before approving."),
+          context: z
+            .enum(["default", "long_context"])
+            .optional()
+            .describe('Context window tier: "default" (200k) or "long_context" (1M). Default: yours. The user can change it before approving.'),
+          command: z
+            .string()
+            .optional()
+            .describe(
+              'Only the copilot command with arguments, e.g. "copilot --foo bar". The arguments are added to the command your own session runs. Any other program, a path or shell syntax is refused. Default: your own command. The user can change it before approving.',
+            ),
         },
       },
-      async ({ name, task, agent, model }) => {
+      async (input) => {
         const key = getKey();
         if (!key) return text("You are not registered with the relay broker.");
-        return text(delegation.requestCreate(key, { name, task, agent: agent ?? "", model: model ?? "" }));
+        const { request, refused } = createSessionInput(input);
+        if (refused) return text(refused);
+        return text(delegation.requestCreate(key, request));
       },
     );
     server.registerTool(
