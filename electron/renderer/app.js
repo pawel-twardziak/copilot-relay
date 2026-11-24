@@ -2117,10 +2117,13 @@ class SessionView {
         if (res?.outcome === "failed" && res.retry) {
           // the child's Copilot did not start: the request is still open in main, and so is the card
           for (const c of frozen) c.disabled = false;
-          errorEl.textContent = res.text;
+          // without the editor there is no command field to change: say so, as the text points at the card
+          errorEl.textContent = editor ? res.text : `${res.text}\n\nThis card could not load its command field. Reject it and let the session ask again.`;
           errorEl.hidden = false;
           opts.replaceChildren(approveBtn, rejectBtn);
           this.openCard(card);
+          // the clicked button is gone and took the focus with it: back to what is to be corrected
+          if (activeId === this.sessionId && (!document.activeElement || document.activeElement === document.body)) promptSlot.querySelector(".pe-command")?.focus();
           return;
         }
         result = !res ? "This request is no longer open." : res.outcome === "failed" ? `Not created: ${res.text}` : approved ? "→ Approved" : "→ Rejected";

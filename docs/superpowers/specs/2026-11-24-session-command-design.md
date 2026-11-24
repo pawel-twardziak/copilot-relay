@@ -181,7 +181,9 @@ With a shell the start itself no longer fails for a missing program (`ENOENT`); 
   again, or reject the request", and is shown on the card itself, which stays open: its fields and both buttons
   are usable again, the request stays pending in the main process, and the parent is told nothing (the text holds
   the command line, which so never travels to the broker or the parent's model). A second Approve tries again;
-  Reject tells the parent of the rejection. A parent that went away meanwhile ends the request. Failures after
+  Reject tells the parent of the rejection. Two things end the request instead, because the card can no longer be
+  answered: the parent was closed or restarted during the start, or the window was reloaded during it. The parent,
+  if it is open, is then told that the child was not created, in words that do not hold the command. Failures after
   the child's Copilot started (an agent or model it does not offer, no connection to the broker) end the request
   as before: the child is discarded, the parent is told, and the card shows "Not created: …". (Changed after
   v0.25.0, asked by the user: before, every failed start went to the parent through `tellParent` and the card

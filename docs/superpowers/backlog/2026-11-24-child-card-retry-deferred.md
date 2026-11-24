@@ -1,11 +1,19 @@
 # Child card retry: deferred findings
 
-Source: the whole-branch review of `feat/child-card-retry` and the notes of the work itself. No plan of its own: item
-A.1 of `2026-11-24-child-command-card-deferred.md`, asked by the owner with "the command can be corrected and tried
-again". Design: `2026-11-24-session-command-design.md`, section 4 (updated in this branch). A child whose Copilot
-does not start now leaves its approval card open with the reason; the request stays pending in the main process
-(`delegation:answer`, `createChild` in `electron/main.mjs`; `delegationCard` in `electron/renderer/app.js`) and the
-parent is told nothing until the card is approved or rejected. None of these blocked the merge.
+Source: the whole-branch review of `feat/child-card-retry` (fable, medium), the re-review of its fixes, and the notes
+of the work itself. No plan of its own: item A.1 of `2026-11-24-child-command-card-deferred.md`, asked by the owner
+with "the command can be corrected and tried again". Design: `2026-11-24-session-command-design.md`, section 4
+(updated in this branch). A child whose Copilot does not start now leaves its approval card open with the reason;
+the request stays pending in the main process (`delegation:answer`, `createChild` in `electron/main.mjs`;
+`delegationCard` in `electron/renderer/app.js`) and the parent is told nothing until the card is approved or
+rejected. None of these blocked the merge.
+
+Fixed after the review, so not listed below: a window reload during a start that then failed left a pending request
+without a card (the request now ends and the parent is told, without the command; `windowReloads`); a parent
+restarted during the start was told nothing and its ended card said "approve again" (it is told now, in words of
+its own); a card that could not load its editor said "change it on the card" with no field there (it says so now);
+the focus was lost after a failed start (it goes to the command field); the error text could overflow the card; the
+check looked for a notice to the parent too early.
 
 ## A. Worth doing first
 
@@ -21,24 +29,37 @@ Nothing.
    card does not offer another try there; the parent's model asks again.
 3. **Every failure before the child exists counts as "can be tried again"**, not only a command that does not
    start: a folder that is gone, a `session/new` that Copilot did not answer in time, a store that could not be
-   written (`createSession` in `electron/main.mjs`). Trying again is harmless in each, and Reject ends it.
+   written (`createSession` in `electron/main.mjs`). Trying again is harmless for the first two. For a store that
+   could not be written it is not quite: `session/new` has succeeded by then, so each try makes one more Copilot
+   session that nothing points at, and a failed `commands.set` after `prompts.set` leaves a prompt row for it (item
+   13 of `2026-11-24-session-command-deferred.md`). The card now invites repeating it; Reject ends it.
+4. **A card that could not load its editor cannot change the command**: after a failed start it says so and asks
+   for a Reject. Approve is still there and sends the parent's command again (which may work after a deadline).
 
 ## C. Behaviour, small
 
-4. **A parent that is closed while its card is open after a failed start**: the request is dropped with it
+5. **A parent that is closed while its card is open after a failed start**: the request is dropped with it
    (`pendingRequests.dropForParent`), and a later click on the card answers "This request is no longer open."
-5. **A second card for the same parent is independent**: each request is taken while it is answered, so a double
+6. **A second card for the same parent is independent**: each request is taken while it is answered, so a double
    click on Approve cannot start two children; two cards can be answered at the same time.
+7. **A reload that does not go through `confirmedReload`** (none exists in the app today) would not be counted in
+   `windowReloads`, and a start that failed across it would leave a pending request without a card again.
+8. **Reject before the card's editor has loaded** leaves the later-loaded editor enabled on an ended card. As
+   before this branch.
 
 ## D. Tests and housekeeping
 
-6. **No check for "Not created: …"** (a failure after the child's Copilot started): the scripted agent's
+9. **No check for "Not created: …"** (a failure after the child's Copilot started): the scripted agent's
    `create_session` sends only a name and a task, so an agent or model the session does not offer cannot be asked
    for in a UI check (`electron/test/fixtures/acp/scripted-agent.mjs`).
-7. **No check for a parent that goes away during the child's start** (`retry` is then false: `createChild`'s inner
-   catch compares the parent's entry).
-8. **The outcome's shape (`{ outcome, text, retry }`) is tested only through the UI checks** `child-card-retry` and
-   `child-card-retry-reject`; `createChild` lives in `electron/main.mjs`, which `node --test` cannot load.
+10. **No check for a parent that goes away or is restarted during the child's start**, nor for a window reload
+    during it (`createChild`'s inner catch; `windowReloads` in `delegation:answer`). Both need a start that hangs
+    until something else happens.
+11. **No check that the parent's "!" mark in the list goes and comes back** with the card; `child-card-retry`
+    checks `openCards.size` only.
+12. **No check for the card without an editor** (Settings unreadable) after a failed start.
+13. **The outcome's shape (`{ outcome, text, retry }`) is tested only through the UI checks** `child-card-retry` and
+    `child-card-retry-reject`; `createChild` lives in `electron/main.mjs`, which `node --test` cannot load.
 
 ## Not verified
 

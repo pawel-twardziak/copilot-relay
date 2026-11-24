@@ -1001,8 +1001,11 @@ async function createChild(req, own = "", command = undefined) {
     } catch (e) {
       // The child's Copilot did not come to be (its command, most likely): nothing was made and the parent has been
       // told nothing, so the card takes another answer (delegation:answer keeps the request). The text, which holds
-      // the command, goes to the card only. A parent that went away meanwhile has nobody left to ask.
-      return { outcome: "failed", text: friendly(e), retry: open.get(parentSessionId) === parent };
+      // the command, goes to the card only.
+      if (open.get(parentSessionId) === parent) return { outcome: "failed", text: friendly(e), retry: true };
+      // the parent was closed or restarted meanwhile and its requests went with it: there is no card to answer
+      // again. A restarted parent is open again and is told, in words that do not hold the command.
+      return failed("failed", "the session that asked for it was closed or restarted while its child was starting.");
     }
     const { sessionId, entry } = child;
     tiers.set(sessionId, tier); // as an override, so a later reopen keeps it
@@ -1049,9 +1052,18 @@ handle("delegation:answer", async (requestId, approved, own, command) => {
     tellParent(req, "rejected", `The user rejected the request to create session "${req.name}".`);
     return { outcome: "rejected" };
   }
+  const reloadsBefore = windowReloads;
   const result = await createChild(req, String(own ?? ""), typeof command === "string" ? command : undefined);
-  if (result.retry) pendingRequests.add(req); // the start failed: the request is open again, for Approve or Reject
-  return result;
+  if (!result.retry) return result;
+  // the start failed: the request is open again, for Approve or Reject
+  if (windowReloads === reloadsBefore) {
+    pendingRequests.add(req);
+    return result;
+  }
+  // the window was reloaded during the start: the card is gone, so nobody could answer again. The request ends,
+  // and the parent is told in words that do not hold the command.
+  tellParent(req, "failed", `Session "${req.name}" was not created: its start failed and the window was reloaded meanwhile. Ask again.`);
+  return { ...result, retry: false };
 });
 
 handle("relay:ack", async (sessionId, id) => {
@@ -1719,6 +1731,7 @@ function confirmLeavingChildren() {
 // After a reload the views are gone but main keeps every process: a child's permission card would be lost for good
 // and Close all sub-sessions would not reach it. So its work is stopped first, with the user's consent. Reopen cards
 // of sessions that stay open come back when their view is opened again (sessions:open).
+let windowReloads = 0; // a reload takes every card with it: a request answered across one cannot be kept (delegation:answer)
 async function confirmedReload(reload) {
   const parent = win && !win.isDestroyed() ? win : null;
   if (!parent) return;
@@ -1730,7 +1743,9 @@ async function confirmedReload(reload) {
     await Promise.all(children.map((id) => closeEntry(id).catch(() => {})));
     pendingRequests.clear();
   }
-  if (!parent.isDestroyed()) reload(parent.webContents);
+  if (parent.isDestroyed()) return;
+  windowReloads++;
+  reload(parent.webContents);
 }
 
 function notifyIfUnfocused(title, body) {

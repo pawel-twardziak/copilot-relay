@@ -2696,7 +2696,8 @@ export const checks = [
     broker: true,
     async run(app) {
       const { card, notices } = await brokenChildCard(app);
-      await app.ev(`${card}.querySelector(".opts button.primary").click()`);
+      // as a real click does, the button takes the focus first (a script's click() leaves it where it was)
+      await app.ev(`(() => { const b = ${card}.querySelector(".opts button.primary"); b.focus(); b.click(); })()`);
       await app.check(`!${card}.querySelector(".delegation-error").hidden`, "the start error on the card");
       const error = await app.ev(`${card}.querySelector(".delegation-error").textContent`);
       assert.match(error, /Could not start "\/nonexistent\/copilot-ui-check": /);
@@ -2707,6 +2708,12 @@ export const checks = [
         "the card takes another answer",
       );
       assert.equal(await app.ev(`views.has("scripted-work-2")`), false, "no view for the child that did not start");
+      assert.equal(await app.ev(`${card}.querySelector(".pe-template").disabled`), true, "a control that was off before the click stays off (no templates)");
+      assert.equal(await app.ev(`document.activeElement === ${card}.querySelector(".pe-command")`), true, "the command field has the focus again");
+      // the same command again: a second failure leaves the card as the first did
+      await app.ev(`${card}.querySelector(".opts button.primary").click()`);
+      await app.check(`${card}.querySelectorAll(".opts button").length === 2 && !${card}.querySelector(".delegation-error").hidden`, "the card open again after the second failure");
+      assert.equal(await app.ev(`${card}.classList.contains("done") || ${card}.querySelector(".pe-command").disabled`), false);
       assert.deepEqual(await notices(), [], "the parent is told nothing while the card is open");
       // a cleared field is the Settings command, which runs
       await app.ev(`(() => { const t = ${card}.querySelector(".pe-command"); t.value = ""; t.dispatchEvent(new Event("input", { bubbles: true })); })()`);
@@ -2715,6 +2722,13 @@ export const checks = [
       await app.check(`${card}.classList.contains("done")`, "the card to be answered");
       assert.match(await app.ev(`${card}.querySelector(".opts").textContent`), /Approved/);
       assert.equal(await app.ev(`${card}.querySelector(".delegation-error").hidden`), true, "the error goes with the retry");
+      // the parent's only notice is the creation: a notice of the failed starts would have come before it (it takes the
+      // way through the broker, so it is looked for only now)
+      // every message of the chat (the creation comes as a system note, a failure would come as a relay notice); the
+      // card is not one of them
+      const messages = () => app.ev(`[...${V}.log.querySelectorAll(":scope > .msg")].map((e) => e.textContent)`);
+      await until(async () => (await messages()).some((t) => t.includes("was created")), "the parent to be told of the creation");
+      assert.ok(!(await messages()).some((t) => t.includes("was not created") || t.includes("copilot-ui-check")), "no notice of the failed starts");
       await app.idle();
     },
   },
