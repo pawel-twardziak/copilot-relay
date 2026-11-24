@@ -53,6 +53,14 @@ const optionList = (option) => {
   return out;
 };
 
+const ECHO_MAX = 200;
+
+/** A model-written value as a note quotes it: one line (control characters become spaces), at most 200 characters. */
+const echo = (v) => {
+  const t = v.replace(/\p{Cc}/gu, " ");
+  return t.length > ECHO_MAX ? `${t.slice(0, ECHO_MAX)}…` : t;
+};
+
 /** What main may say about the folder a parent asked for, before anyone approved: "dir" (an existing local folder),
  *  "network" (never looked at: UNC text, or a path main's automatic-check rule refuses) or "missing" (relative, not
  *  there, not a folder, or the check failed). `allow(abs)` is that rule; `isDir(abs)` is asked only once it passed. */
@@ -86,9 +94,9 @@ export function cardStart(request, parent, { folderState = "missing" } = {}) {
       cwd = path.resolve(folder);
       from.cwd = true;
     } else if (state === "network") {
-      notes.cwd = `Asked for the folder "${folder}", which is on a network location; network folders are not checked automatically.`;
+      notes.cwd = `Asked for the folder "${echo(folder)}", which is on a network location; network folders are not checked automatically.`;
     } else {
-      notes.cwd = `Asked for the folder "${folder}", which is not an existing absolute path.`;
+      notes.cwd = `Asked for the folder "${echo(folder)}", which is not an existing absolute path.`;
     }
   }
 
@@ -100,7 +108,7 @@ export function cardStart(request, parent, { folderState = "missing" } = {}) {
       tier = asked;
       from.tier = true;
     } else {
-      notes.tier = `Asked for the context "${context}", which is not 200k or 1M.`;
+      notes.tier = `Asked for the context "${echo(context)}", which is not 200k or 1M.`;
     }
   }
 
@@ -133,9 +141,9 @@ export function cardStart(request, parent, { folderState = "missing" } = {}) {
       agent = askedAgent;
       from.agent = true;
     } else if (!agentOption) {
-      notes.agent = `Asked for the agent "${askedAgent}", but there are no custom agents available.`;
+      notes.agent = `Asked for the agent "${echo(askedAgent)}", but there are no custom agents available.`;
     } else {
-      notes.agent = `Asked for the agent "${askedAgent}", which is not offered here. Valid agents: ${list(valuesOf(agentOption))}.`;
+      notes.agent = `Asked for the agent "${echo(askedAgent)}", which is not offered here. Valid agents: ${list(valuesOf(agentOption))}.`;
     }
   }
 
@@ -146,7 +154,7 @@ export function cardStart(request, parent, { folderState = "missing" } = {}) {
       model = askedModel;
       from.model = true;
     } else {
-      notes.model = `Asked for the model "${askedModel}", which is not offered here. Valid models: ${list(valuesOf(modelOption))}.`;
+      notes.model = `Asked for the model "${echo(askedModel)}", which is not offered here. Valid models: ${list(valuesOf(modelOption))}.`;
     }
   }
 
