@@ -290,6 +290,42 @@ function agentPids(app) {
     })
     .map(Number);
 }
+/** A parent started with its own command (--tag parent) asks for a child; the card's command field, which starts
+ *  with the parent's command, is set to a command with --tag <tag> (null: cleared) and the card is approved. */
+async function childFromCard(app, tag) {
+  const argvFile = path.join(app.dir, "argv.jsonl");
+  const withTag = (t) => `SCRIPTED_ARGV_FILE='${argvFile}' '${SCRIPTED_AGENT}' --tag ${t}`;
+  const typed = tag === null ? "" : withTag(tag);
+  const lines = () => (existsSync(argvFile) ? readFileSync(argvFile, "utf8").split("\n").filter(Boolean) : []);
+  const stored = () => JSON.parse(readFileSync(path.join(app.dir, "config", "copilot-relay-desktop", "session-commands.json"), "utf8"));
+  const D = `document.querySelector("#prompt-dialog")`;
+  const card = `${V}.el.querySelectorAll(".perm.delegation")[0]`;
+  const type = (el, text) => app.ev(`(() => { const t = ${el}; t.value = ${JSON.stringify(text)}; t.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+  await app.ev(`(window.__newSession = newSession(${JSON.stringify(path.join(app.dir, "work"))}), true)`);
+  await app.check(`${D}.open && !!${D}.querySelector(".pe-command")`, "the prompt dialog with the command field");
+  await type(`${D}.querySelector(".pe-command")`, withTag("parent"));
+  await app.ev(`document.querySelector("#prompt-ok").click()`);
+  await app.ev(`window.__newSession`, "newSession to return");
+  await app.check(`!!${V} && !${V}.busy`, "the parent's view");
+  await app.check(`!!${V}.relayName && !${V}.relayChip.hidden && !${V}.relayChip.classList.contains("off")`, "the parent to connect to the broker");
+  // the driver's send needs the session newSession() of the driver made: this one was started by its dialog
+  await app.ev(`(() => { const v = ${V}; v.input.value = "create_session kid Do-it"; v.input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); })()`);
+  await app.check(`!!${card}?.querySelector(".pe-command") && !${card}.querySelector(".opts button.primary").disabled`, "the card");
+  assert.equal(await app.ev(`${card}.querySelector(".pe-command").value`), withTag("parent"), "the card starts with the parent's command");
+  await type(`${card}.querySelector(".pe-command")`, typed);
+  await app.ev(`${card}.querySelector(".opts button.primary").click()`);
+  await app.check(`!!views.get("scripted-work-2")`, "the child's view");
+  await app.check(`${card}.classList.contains("done") && !${V}.busy`, "the card to be answered and the parent idle");
+  assert.equal(stored()["scripted-work"], withTag("parent"), "the parent keeps its own command");
+  if (tag === null) {
+    assert.equal(lines().length, 1, "the Settings command records no arguments: the child did not take the parent's command");
+    assert.equal("scripted-work-2" in stored(), false, "no own command for a child started with the Settings command");
+  } else {
+    await until(async () => lines().length === 2, "the child's start");
+    assert.deepEqual(JSON.parse(lines()[1]), ["--tag", tag, "--acp", "--stdio"]);
+    assert.equal(stored()["scripted-work-2"], typed, "the child's own command is the card's");
+  }
+}
 /** Every group's mark: in the chat, and in its entry when its body is in the panel (else null). */
 const groupMarks = (app) => app.ev(`[...${V}.log.querySelectorAll(":scope > .group")].map((g) => ({
   kind: g._info.kind,
@@ -2438,6 +2474,30 @@ export const checks = [
     },
   },
   {
+    // a command that runs and ends by itself with its own message (here a shell line; with Copilot, an argument it does
+    // not take): the note carries that message and says to check the command, not to install Copilot
+    name: "new-session-start-stopped",
+    modes: ["off"],
+    settings: { copilotCommand: "sh -c 'echo bad-flag-here >&2; exit 3' x" },
+    async run(app) {
+      if (process.platform === "win32") return; // a POSIX shell line
+      const D = `document.querySelector("#prompt-dialog")`;
+      await app.ev(`(window.__newSession = newSession(${JSON.stringify(path.join(app.dir, "work"))}), true)`);
+      await app.check(`${D}.open`, "the prompt dialog");
+      await app.ev(`document.querySelector("#prompt-ok").click()`);
+      await app.check(`${D}.querySelector("#prompt-note").textContent.startsWith("Could not start the session:")`, "the start error in the dialog");
+      const note = await app.ev(`${D}.querySelector("#prompt-note").textContent`);
+      assert.match(note, /copilot exited \(3\)/);
+      assert.match(note, /bad-flag-here/);
+      assert.match(note, /The command stopped \(see above\)\. Check the program and its arguments; if they are right, check that you are signed in/);
+      assert.match(note, /This is the command from Settings\./);
+      assert.doesNotMatch(note, /Otherwise install it/);
+      assert.doesNotMatch(note, /On Windows/);
+      await app.ev(`document.querySelector("#prompt-cancel").click()`);
+      assert.equal(await app.ev(`window.__newSession.then(() => true)`, "newSession to return"), true);
+    },
+  },
+  {
     // a start that never answers (a command that sleeps) ends at the start deadline: the note says so, the dialog
     // stays open with Start and Cancel enabled, and the command's process is gone
     name: "new-session-start-deadline",
@@ -2549,9 +2609,10 @@ export const checks = [
     },
   },
   {
-    // a delegated child starts with its parent's stored command (not Settings'), keeps it as its own, and its approval
-    // card offers no command field. The parent is given its command in the new-session dialog; the scripted agent
-    // records every start's arguments in $SCRIPTED_ARGV_FILE.
+    // a delegated child starts with its parent's stored command (not Settings') and keeps it as its own: the approval
+    // card's command field starts with the parent's command, and the card is approved as it is. The parent is given
+    // its command in the new-session dialog; the scripted agent records every start's arguments in
+    // $SCRIPTED_ARGV_FILE.
     name: "child-command-inherited",
     modes: ["off"],
     scenario: CHILD_PROMPT_SCENARIO,
@@ -2575,9 +2636,10 @@ export const checks = [
       // the driver's send needs the session newSession() of the driver made: this one was started by its dialog
       await app.ev(`(() => { const v = ${V}; v.input.value = "create_session kid Do-it"; v.input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); })()`);
       await app.check(`!!${card}?.querySelector(".prompt-editor") && !${card}.querySelector(".opts button.primary").disabled`, "the card");
-      assert.equal(await app.ev(`!!${card}.querySelector(".pe-command")`), false, "no command field on the approval card");
+      assert.equal(await app.ev(`${card}.querySelector(".pe-command").value`), command, "the card's command field starts with the parent's command");
       await app.ev(`${card}.querySelector(".opts button.primary").click()`);
       await app.check(`${card}.classList.contains("done")`, "the card to be answered");
+      assert.equal(await app.ev(`${card}.querySelector(".pe-command").disabled`), true, "an answered card's command cannot be edited");
       await app.check(`!!views.get("scripted-work-2")`, "the child's view");
       await until(async () => lines().length === 2, "the child's start");
       assert.deepEqual(JSON.parse(lines()[1]), ["--tag", "parent", "--acp", "--stdio"]);
@@ -2585,6 +2647,27 @@ export const checks = [
       assert.equal(stored()["scripted-work"], command);
       await app.check(`!${V}.busy`, "the parent to be idle");
     },
+  },
+  {
+    // the approval card's command field decides the child's command: another command typed on the card starts the
+    // child with it and is kept as the child's own, and the parent keeps its own (childFromCard)
+    name: "child-command-card",
+    modes: ["off"],
+    scenario: CHILD_PROMPT_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    run: (app) => childFromCard(app, "card"),
+  },
+  {
+    // a cleared command field on the approval card: the child starts with the Settings command (which records no
+    // arguments) and gets no stored command of its own. A check of its own: the scripted agent tells only the first
+    // child of a folder apart (uniqueIds counts the starts in a file every session of the folder rewrites).
+    name: "child-command-card-empty",
+    modes: ["off"],
+    scenario: CHILD_PROMPT_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    run: (app) => childFromCard(app, null),
   },
   {
     // a parent's command that cannot be run: the child is not created, no view appears, and the parent is told in a
@@ -2606,10 +2689,11 @@ export const checks = [
       await app.check(`!!${card}?.querySelector(".prompt-editor") && !${card}.querySelector(".opts button.primary").disabled`, "the card");
       await app.ev(`${card}.querySelector(".opts button.primary").click()`);
       const notice = `[...${V}.log.querySelectorAll(".msg.relay")].map((e) => e.textContent).join(" ")`;
-      await app.check(`${notice}.includes("This is the parent session's command.")`, "the parent to be told why the child did not start");
+      const where = "This is the command from the child's approval card, which starts as the parent session's command.";
+      await app.check(`${notice}.includes(${JSON.stringify(where)})`, "the parent to be told why the child did not start");
       const text = await app.ev(notice);
       assert.match(text, /Session "kid" was not created: /);
-      assert.ok(text.includes("This is the parent session's command."), text);
+      assert.ok(text.includes(where), text);
       await app.idle();
       assert.equal(await app.ev(`views.has("scripted-work-2")`), false, "no view for the child that did not start");
     },

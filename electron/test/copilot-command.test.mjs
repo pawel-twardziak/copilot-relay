@@ -48,8 +48,22 @@ test("startFailureText names the command and where it is set", () => {
   assert.equal(startFailureText({ ...base, source: "session", notFound: true, login: false }),
     'Could not start "cop --x": copilot exited (127)\n\nThe program was not found, or cannot be run. This is this session\'s own command. Change it in the session\'s Setup.');
   assert.equal(startFailureText({ ...base, source: "parent", notFound: false, login: false }),
-    'Could not start "cop --x": copilot exited (127)\n\nGENERAL This is the parent session\'s command. Change it in the parent\'s Setup.');
+    'Could not start "cop --x": copilot exited (127)\n\nGENERAL This is the command from the child\'s approval card, which starts as the parent session\'s command. Change it on the next card, or in the parent\'s Setup.');
   assert.equal(startFailureText({ ...base, source: "settings", notFound: false, login: true }), 'Could not start "cop --x": copilot exited (127)\n\nLOGIN');
+});
+// Copilot (or the shell) ran the command and it ended with a message of its own, e.g. an argument it does not take:
+// the remedy is the command, not installing Copilot
+test("startFailureText: a command that stopped by itself is told to check its arguments", () => {
+  const base = { command: "cop --bad", source: "session", detail: "copilot exited (1): Invalid rule", notFound: false, login: false, loginHint: "LOGIN", generalHint: "GENERAL", stopped: true };
+  assert.equal(startFailureText({ ...base, platform: "linux" }),
+    'Could not start "cop --bad": copilot exited (1): Invalid rule\n\nThe command stopped (see above). Check the program and its arguments; if they are right, check that you are signed in (`copilot login` in a terminal). This is this session\'s own command. Change it in the session\'s Setup.');
+  assert.equal(startFailureText({ ...base, platform: "win32" }),
+    'Could not start "cop --bad": copilot exited (1): Invalid rule\n\nThe command stopped (see above). Check that the program is installed, and its arguments (on Windows only double quotes "…" group an argument); if they are right, check that you are signed in (`copilot login` in a terminal). This is this session\'s own command. Change it in the session\'s Setup.');
+  // the login and not-found remedies still come first
+  assert.equal(startFailureText({ ...base, login: true }), 'Could not start "cop --bad": copilot exited (1): Invalid rule\n\nLOGIN');
+  assert.match(startFailureText({ ...base, notFound: true }), /The program was not found, or cannot be run\. This is this session's own command\./);
+  // not stopped by itself (a timeout, a signal): the general remedy
+  assert.match(startFailureText({ ...base, stopped: false }), /\n\nGENERAL This is this session's own command\./);
 });
 test("isNotFoundExit", () => {
   assert.equal(isNotFoundExit({ exitCode: 127 }, "linux"), true);

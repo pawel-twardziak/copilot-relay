@@ -190,7 +190,8 @@ A session can ask for a new session dedicated to one task, a *delegated* (child)
 an ordinary session: it appears in the list, you can open it, read what it did, keep talking to it, and resume it later.
 
 - **`create_session(name, task, agent?, model?)`** is called by the parent. A card appears in the parent's view with
-  the name, the full task, the agent, the model (or "inherited") and the folder, with **Approve** and **Reject**.
+  the name, the full task, the agent, the model (or "inherited") and the folder, a prompt editor and a **Copilot
+  command** field (it starts with the parent's command; see "A command per session"), with **Approve** and **Reject**.
   **Every creation needs your click**: there is no "always allow", and no model or message can answer the card. The
   parent is marked `!` in the list, and an OS notification fires if the window is not focused. The tool returns at
   once; the outcome arrives later as a message from `relay`, so the parent can keep working.
@@ -440,7 +441,9 @@ global and `~/.local/bin` installs are found even when the app is started from t
 If Copilot still isn't found, open **⚙ Settings** and enter its command. The command is a line that may carry
 arguments; the system shell runs it, and the app adds `--acp --stdio` at its end, so it must be one command that
 takes them. A path with spaces is quoted (`"C:\Program Files\...\copilot.exe"`) or given alone (an absolute path
-to an existing file works unquoted). A wrapper script must pass its arguments on (`exec copilot "$@"`). Typical paths:
+to an existing file works unquoted). A wrapper script must pass its arguments on (`exec copilot "$@"`). On Windows
+the shell is `cmd`, where only double quotes group an argument: write `--allow-tool "shell(dotnet:*)"`, not
+`'shell(dotnet:*)'` (Copilot would get the quotes and refuse the rule). Typical paths:
 
 | OS | find it with | typical path |
 |---|---|---|
@@ -451,9 +454,11 @@ to an existing file works unquoted). A wrapper script must pass its arguments on
 The `COPILOT_PATH` environment variable works too, and is such a line as well.
 
 **A command per session.** In the dialog of a new session, or later in the session's **Setup**, a session can have its
-own Copilot command. It replaces the Settings command for that session; empty means the Settings command. A delegated
-child starts with a copy of its parent's command. If a session's command is broken, repair it from **Setup** on the
-dead view. A start that does not answer within 60 seconds fails.
+own Copilot command. It replaces the Settings command for that session; empty means the Settings command. The card
+that approves a delegated child has the same field: it starts with the parent's command, and what it holds when you
+approve becomes the child's command (cleared: the Settings command). If a session's command is broken, repair it
+from **Setup** on the dead view. A start that does not answer within 60 seconds fails; a command that stops by
+itself shows its own message, and that is where to look first.
 
 On Linux and macOS, closing or restarting a session ends Copilot's whole process group, so a process one of its tools
 left running in that group (a dev server put in the background) stops with the session.

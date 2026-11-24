@@ -23,7 +23,7 @@ carry arguments. The user did not say what they will run with it; nothing here a
 4. A path to another program or script still works (asked by the user), and so does every value that works today: a
    bare name (`copilot`), an absolute path, an absolute path with spaces written without quotes, a quoted path.
 5. A fork gets a copy of the own command. Deleting a session removes it. A delegated child starts with its parent's
-   own command.
+   own command, unless another one is given on its approval card.
 6. Closing a session still ends its Copilot, and the app still knows when Copilot is really gone.
 7. A failed start names the command and says where it is set (this session or Settings).
 8. A session whose command is broken can be given another command from its view.
@@ -34,7 +34,6 @@ carry arguments. The user did not say what they will run with it; nothing here a
 - Checking the command before the start. The shell and the start report what is wrong.
 - The process that lists sessions for the sidebar: it uses the Settings command.
 - Scheduled scripts and the broker: they have their own commands.
-- A command field on the card that approves a delegated child. The child's command is changed in its view.
 - Restarting running sessions when the Settings command changes. It applies from each session's next start, as today.
 - A marker in the sidebar for sessions that have their own command.
 - Agents other than Copilot. The app still adds `--acp --stdio` (and `--context …`), and nothing else is tested.
@@ -46,7 +45,8 @@ carry arguments. The user did not say what they will run with it; nothing here a
 - A session that cannot be opened and cannot be given another command.
 - A Settings value that works today and stops working after the update.
 - A command that comes from anywhere but the user's typing in the app. It is run by a shell, so no model, tool call,
-  relay message or delegation request may set it. A child takes it only from its parent's stored command.
+  relay message or delegation request may set it. A child takes it from the command field of its approval card
+  (the user's typing), which starts as its parent's stored command.
 - A browser `alert`/`confirm` dialog anywhere in the new UI.
 
 ## Decisions (made with the user)
@@ -153,8 +153,17 @@ With a shell the start itself no longer fails for a missing program (`ENOENT`); 
 
 - The error of an exit carries the exit code.
 - POSIX: exit code 127 (not found) or 126 (not runnable) before Copilot answered `initialize` gets the "not found"
-  hint. Everything else gets today's general hint. Windows gets today's general hint (its "not found" text depends
-  on the system language; today it is not recognised either).
+  hint. Windows has no such case (its "not found" text depends on the system language).
+- A command that ended by itself with an exit code (other than the two above) said why in its own message: an
+  argument Copilot does not take, a shell error. Its hint is "The command stopped (see above). Check the program
+  and its arguments; if they are right, check that you are signed in (`copilot login` in a terminal)."; on
+  Windows it reads "Check that the program is installed, and its arguments (on Windows only double quotes "…"
+  group an argument)": there a missing program ends `cmd` with an ordinary exit code too, and `cmd` does not
+  treat `'` as a quote, so a line written for a POSIX shell reaches Copilot with the quotes in it. Added after
+  v0.24.0: the general hint sent the user to install Copilot when Copilot had started and refused an argument.
+- Everything else gets today's general hint: a deadline, and a signal that ended the shell itself. (A Copilot
+  killed by a signal under a shell that did not replace itself arrives as exit code 128+n, section 3, and so
+  gets the hint of the point before.)
 - The message quotes the command as the user wrote it and says where it is set: "this session's command" when the
   session has its own, else "the command in Settings". The remedy follows: change it in the session's dialog, or in
   Settings.
@@ -168,7 +177,8 @@ With a shell the start itself no longer fails for a missing program (`ENOENT`); 
   answer within 60 seconds" and the same "where it is set" text. Loading the history (`session/load`) gets no
   deadline: it is long for a long session.
 - **A delegated child that fails to start** has no view and no stored command yet. Its error names a third source:
-  "the parent session's command", with the remedy "change it in the parent's Setup". It reaches the parent through
+  "the command from the child's approval card, which starts as the parent session's command", with the remedy
+  "change it on the next card, or in the parent's Setup". It reaches the parent through
   `tellParent`, as every failed child start does today.
 
 ## 5. Where the command is kept and used
@@ -180,9 +190,12 @@ With a shell the start itself no longer fails for a missing program (`ENOENT`); 
 - **New session** (`sessions:new`): takes the own command next to the own prompt, starts with it, and saves it after
   `session/new` as the prompt is saved (a failed save fails the start: the next start would lose it).
 - **Open and restart** (`openSession`): the session's effective command.
-- **Delegated child** (`createChild`): starts with the parent's *stored* own command and gets it saved as its own.
-  A parent without one gives a child without one, which follows Settings (author's call: a later change of the
-  Settings command then reaches both). An adopted child keeps what it has.
+- **Delegated child** (`createChild`): starts with the command in the approval card's command field and gets it
+  saved as its own. The field starts with the parent's *stored* own command, so a card approved as it is gives the
+  child what its parent has; a cleared field gives a child without an own command, which follows Settings. A
+  parent without one gives an empty field. The request that asks for the child carries no command: the field's
+  start value comes from the app's store. An adopted child keeps what it has. (The field was added after v0.24.0,
+  asked by the user; before, the child always took the parent's stored command.)
 - **Fork** copies the entry; **delete** removes it.
 - A session made outside the app, or before this version, has no entry and uses the Settings command.
 - **Settings.** `settings:set` normalizes the command as in section 1. `settings:get` keeps returning the effective
@@ -223,7 +236,10 @@ New session in /home/you/project
 - **A dead view** (the start failed, or Copilot exited): the button works there too. Saving stores the values;
   there is nothing to close; the view reopens with them. This is what makes a broken command repairable. It stays
   off while the session is being deleted, is opening, or has a turn running.
-- The card that approves a delegated child is unchanged.
+- The card that approves a delegated child has the same command field in its prompt editor (section 5); it is
+  disabled once the card is answered.
+- On Windows the field's hint, and the Settings hint, add: "On Windows only double quotes ("…") group an
+  argument." (added after v0.24.0).
 
 ## 7. Errors
 

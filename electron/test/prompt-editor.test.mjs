@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { test } from "node:test";
 
-const { pickTemplate, createPromptEditor } = createRequire(import.meta.url)("../renderer/prompt-editor.js");
+const { pickTemplate, createPromptEditor, commandHint, WINDOWS_QUOTES } = createRequire(import.meta.url)("../renderer/prompt-editor.js");
 
 const rev = { text: "Review only." };
 
@@ -76,6 +76,16 @@ test("the command field shows the stored command and the Settings one as placeho
   assert.equal(input.placeholder, "Settings: copilot");
   assert.equal(input.maxLength, 4000);
   assert.equal(e.command(), "cop --x");
+});
+
+test("the command field's hint names the Windows quoting rule only on Windows", () => {
+  // the fake element keeps text children as strings
+  const hintOf = (platform) => createPromptEditor({ ...base, command: { value: "", settings: "copilot", platform } }).el.querySelector(".pe-command-row").querySelector(".hint").children.join("");
+  assert.equal(hintOf("linux"), "Empty: the command from Settings. May carry arguments; the app adds --acp --stdio at the end.");
+  assert.equal(hintOf(undefined), hintOf("linux"));
+  assert.equal(hintOf("win32"), 'Empty: the command from Settings. May carry arguments; the app adds --acp --stdio at the end. On Windows only double quotes ("…") group an argument.');
+  assert.equal(commandHint("win32"), hintOf("win32"));
+  assert.equal(WINDOWS_QUOTES, 'On Windows only double quotes ("…") group an argument.');
 });
 
 test("without command there is no field", () => {
