@@ -34,24 +34,57 @@ test("POST /api/shutdown answers with the pid and the broker exits", async (t) =
   await assert.rejects(fetch(`${b.url}/health`));
 });
 
-test("the broker answers a shutdown only after the whole request, closes the connection, then exits", async (t) => {
-  const b = await startBroker(t);
+/** A raw connection to the broker with the head of a shutdown request sent: `length` is its Content-Length. */
+function shutdownHead(t, b, length) {
   const sock = net.connect(b.port, "127.0.0.1");
   t.after(() => sock.destroy());
-  let got = "";
-  sock.setEncoding("utf8").on("data", (d) => (got += d));
-  const closed = new Promise((resolve) => sock.once("close", resolve));
+  const state = { sock, got: "" };
+  sock.setEncoding("utf8").on("data", (d) => (state.got += d));
+  sock.on("error", () => {}); // a reset is seen as the close below, not as an uncaught error
+  state.closed = new Promise((resolve) => sock.once("close", resolve));
+  sock.write(`POST /api/shutdown HTTP/1.1\r\nHost: 127.0.0.1:${b.port}\r\nContent-Type: application/json\r\nContent-Length: ${length}\r\n\r\n`);
+  return state;
+}
+const within = (promise, ms, what) =>
+  Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error(`timed out waiting for ${what}`)), ms).unref())]);
+
+test("the broker answers a shutdown only after the whole request, closes the connection itself and exits at once", async (t) => {
+  const b = await startBroker(t);
   // the head of the request without its body: an answer now would leave the body unread when the process exits
-  sock.write(`POST /api/shutdown HTTP/1.1\r\nHost: 127.0.0.1:${b.port}\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n`);
+  const c = shutdownHead(t, b, 2);
   await new Promise((resolve) => setTimeout(resolve, 300));
-  assert.equal(got, "", "no answer before the body arrived");
+  assert.equal(c.got, "", "no answer before the body arrived");
   assert.equal(b.proc.exitCode, null, "the broker still runs");
-  sock.write("{}");
-  await closed; // the broker closes the connection itself (Connection: close)
-  assert.match(got, /^HTTP\/1\.1 200 /);
-  assert.match(got, /\r\nconnection: close\r\n/i);
-  assert.ok(got.includes(JSON.stringify({ ok: true, pid: b.proc.pid })), "the answer's body arrived");
-  assert.equal(await b.exited, 0);
+  const sent = Date.now();
+  c.sock.write("{}");
+  await within(c.closed, 5000, "the broker to close the connection"); // Connection: close, not the caller
+  assert.match(c.got, /^HTTP\/1\.1 200 /);
+  assert.match(c.got, /\r\nconnection: close\r\n/i);
+  assert.ok(c.got.includes(JSON.stringify({ ok: true, pid: b.proc.pid })), "the answer's body arrived");
+  assert.equal(await within(b.exited, 5000, "the broker to exit"), 0);
+  assert.ok(Date.now() - sent < 1500, "the exit follows the close, not the 2 s fallback timer");
+});
+
+test("a shutdown request that is cut off leaves the broker running", async (t) => {
+  const b = await startBroker(t);
+  const c = shutdownHead(t, b, 10);
+  c.sock.write("{}"); // 2 of the 10 bytes announced
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  c.sock.destroy();
+  await c.closed;
+  await new Promise((resolve) => setTimeout(resolve, 300)); // time for a crash to show
+  assert.equal(b.proc.exitCode, null, "the broker still runs");
+  assert.equal((await health(b)).pid, b.proc.pid);
+  // and it can still be stopped
+  assert.equal((await post(b)).status, 200);
+  assert.equal(await within(b.exited, 5000, "the broker to exit"), 0);
+});
+
+test("a shutdown request with a body that is not JSON still stops the broker", async (t) => {
+  const b = await startBroker(t);
+  const r = await fetch(`${b.url}/api/shutdown`, { method: "POST", headers: { "content-type": "application/json" }, body: "{x}" });
+  assert.equal(r.status, 200);
+  assert.equal(await within(b.exited, 5000, "the broker to exit"), 0);
 });
 
 test("a foreign shutdown request is refused and the broker keeps running", async (t) => {

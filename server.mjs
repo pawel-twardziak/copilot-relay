@@ -17,7 +17,7 @@ const config = JSON.parse(await readFile(configPath, "utf8").catch(() => "{}"));
 
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.COPILOT_RELAY_PORT ?? config.port ?? 7777);
-const SHUTDOWN_GRACE_MS = 2000; // POST /api/shutdown: the longest wait for the caller to close its connection
+const SHUTDOWN_GRACE_MS = 2000; // POST /api/shutdown: the longest wait for the answer's connection to close
 // Tool titles approved without asking (relay tools only by default).
 const AUTO_APPROVE = config.autoApproveTools ?? ["send_message", "list_sessions"];
 const DEFAULT_CWD = path.resolve(path.dirname(configPath), config.cwd ?? ".");
@@ -265,11 +265,13 @@ const server = http.createServer(async (req, res) => {
         });
 
       // The desktop app's "Update and restart broker". The process must not exit under the answer: the request is
-      // read to its end first (unread bytes turn the close into a reset), the connection is closed with the
-      // answer, and the exit follows the close. The timer is for a client that keeps the connection open.
+      // read to its end first (a socket closed with unread bytes is reset; whether that was the answer lost now and
+      // then on Windows CI is not confirmed), the broker closes the connection with the answer, and the exit
+      // follows that close. The body is not parsed: whatever it holds, the caller asked to stop. The timer is for
+      // a close that never comes (a socket that was gone before the listener was added).
       case "POST /api/shutdown": {
-        await readBody(req);
-        res.socket.once("close", shutdown);
+        for await (const _ of req); // drain
+        res.socket?.once("close", shutdown);
         setTimeout(shutdown, SHUTDOWN_GRACE_MS).unref();
         res.writeHead(200, { "content-type": "application/json", connection: "close" });
         return res.end(JSON.stringify({ ok: true, pid: process.pid }));
@@ -425,7 +427,8 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(404).end();
   } catch (e) {
     if (!(e instanceof HttpError)) console.error(e);
-    if (!res.headersSent) json(res, e.code ?? 400, { error: e.message });
+    // e.code is an HTTP status only for an HttpError; a request cut off mid-body rejects with code "ECONNRESET"
+    if (!res.headersSent) json(res, Number.isInteger(e.code) ? e.code : 400, { error: e.message });
   }
 });
 
