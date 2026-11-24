@@ -401,6 +401,8 @@ function heldTypedCheck(queue) {
       const turn = async (text) => {
         await app.send(text); // its permission keeps the turn running
         await app.check(`${V}.prompting`, "a running turn");
+        // the card sets the status line when it arrives: wait for it, so a later status text is not overwritten
+        await app.check(`!!${V}.el.querySelector(".perm:not(.done) .opts button.primary")`, "the turn's permission card");
       };
       // answers permissions until nothing runs (with the queue on, the queued message's turn follows or joins this one)
       const end = async () => {
