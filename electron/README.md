@@ -98,11 +98,14 @@ identity it has in a terminal (`cli:<sessionId>`), so it keeps its relay name. I
 these run without a permission prompt.
 
 - The header shows the session's relay name (e.g. `relay: swift-otter`). Click it to rename the session.
-- Messages from other sessions appear as purple "from …" bubbles. Each becomes a new turn as soon as the
-  session is idle.
+- Messages from other sessions appear as purple "from …" bubbles. By default they are held until you approve
+  them (see **Messages wait for you** under [Delegated sessions](#delegated-sessions)); an approved message
+  becomes a new turn as soon as the session is idle. The broker's own notices are never held.
 - Queue: off by default (**⚙ Settings → Deliver queued messages during a turn**). When on, messages and your own
   prompts sent while the session works are queued and delivered after the current tool step (never while a tool
-  runs). A queued message is answered first (the agent replies and stops); after the last answer the app sends one
+  runs). This holds for approved messages and, with **My messages while busy** off, for your own prompts; with that
+  switch on (the default), a message you send during a turn waits under **Your messages** for Approve instead, and
+  relay messages are held too (see **Messages wait for you**). A queued message is answered first (the agent replies and stops); after the last answer the app sends one
   "↻ continuing the task" prompt, so the agent goes back to its task. Stop with nothing queued cancels that continuation; with items queued it pauses, and ▶ answers them and then continues. The queue
   strip shows them: ✕ removes one, click edits your own, ▶ resumes. Up in the first line of the message box takes
   all your queued messages back into it, one per line in front of what you typed (relay messages stay queued).
@@ -222,19 +225,24 @@ an ordinary session: it appears in the list, you can open it, read what it did, 
   **Orders from parent (N)** (a `send_message` from the session's parent), **Other sessions (N)** (a `send_message`
   from any other session) and **Your messages (N)** (a message of yours that arrives while a turn is running: typed
   in the chat's own message box, or sent from the relay GUI; a message of yours to an idle session starts a turn as
-  before). The first task of a new sub-session is never held. **Approve** puts the message in the chat's queue, like a
-  message you typed while it was busy (it becomes a prompt when the turn ends); **✕** discards it. The list shows
-  `⏸ N` next to the session. Your own messages are held only during a turn, and after it they wait for **Approve**
-  like the rest; the ones you typed live only in the window and are lost when it closes. All other messages are kept by
-  the broker until the chat takes them (the prompt starts, or ✕), so they survive reloading the window and
-  reopening the session.
+  before). The broker's own notices and the first task of a new sub-session are never held. **Approve** puts the
+  message at the end of the chat's queue, like a message you typed while it was busy: if the session is idle the turn
+  starts at once; if it is working, the queue delivers the message at the end of the turn, or during the turn when
+  **Deliver queued messages during a turn** is on. **✕** discards it. The list shows `⏸ N` next to the session: for an
+  open chat it counts all its lists; for a session without an open view it comes from the broker, counts replies from
+  sub-sessions, orders from the parent and messages from other sessions (never your own messages) and ignores the
+  switches. Your own messages are held only during a turn, and after it they wait for **Approve** like the rest; the
+  ones you typed live only in the window and are lost when it closes. All other messages are kept by the broker until
+  the chat takes them (the prompt starts, or ✕), so they survive reloading the window and reopening the session.
   In the status bar, after **Approve:**, four checkboxes switch the kinds on and off: **Sub-session replies**,
   **Parent orders**, **Other sessions** and **My messages while busy**. All are on by default and stored per chat.
   A kind that is switched off is delivered at once, as before (the messages already held move to the queue, in
   order); with a kind switched off, its messages that were still waiting in the queue when the session closed are
-  delivered again when it opens, instead of being lost. This needs the broker of this version: use **Update and restart broker** in Settings, an older broker
-  delivers these messages without holding them. Deleting a session in the app also makes the broker forget the
-  messages kept for it.
+  delivered again to the queue, without an approval, when it opens, instead of being lost. Holding the messages of
+  other sessions, of the parent and from the relay GUI needs the broker of this version: use **Update and restart
+  broker** in Settings. An older broker delivers those messages without holding them; messages typed in the chat's
+  own message box are still held, and replies from sub-sessions are held as before. Deleting a session in the app
+  also makes the broker forget the messages kept for it; they are not delivered again.
 - **Permissions.** A child starts with no automatic approvals beyond the relay tools, and asks like any other session.
   While it waits, it has a `!` in the list and an OS notification fires if the window is not focused. Nothing is
   answered for you.
@@ -255,7 +263,8 @@ an ordinary session: it appears in the list, you can open it, read what it did, 
   wakes it. A deliberately closed child sends nothing; the tree shows it closed, and a session whose process died is
   shown with a red ring.
 - **Messages to a closed relative.** A `send_message` from a parent to a closed child, or from a child to its closed
-  parent, shows a reopen card in the sender's view. **Approve** resumes the session and delivers every queued message;
+  parent, shows a reopen card in the sender's view. **Approve** resumes the session and delivers every queued message (an order from a parent to its closed child is then
+  held in the child's list **Orders from parent** like any other order, so it waits for a second approval there);
   **Reject** drops them and tells the sender. The sender is told at once that the message waits. An unanswered card
   comes back after a window reload, a restart or a broker restart; a card whose answer did not reach the broker keeps
   its buttons.

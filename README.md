@@ -225,7 +225,8 @@ default 12), refilled by a human prompt in either of the two. `report_result` an
 In the desktop app, messages to an open app session are marked by the broker and kept (in `delegations.json`) until the
 app acknowledges them: a reply of a delegated session to its parent (`report_result`, `send_message`), an order from
 the parent, a `send_message` from any other session, and a message of the user (`POST /api/send`). The chat holds
-each kind in its own list for the user's approval (Approve sends it to the queue, ✕ discards it; the first task of a
+each kind in its own list for the user's approval (the user's own messages only while a turn is running; Approve
+sends it to the queue, ✕ discards it; the first task of a
 new sub-session is never held). `GET /api/links` also answers `held` (replies of children per parent) and
 `heldByKind` (per recipient key `cli:<sessionId>`, the unacknowledged `child`, `parent` and `other` messages; the
 user's own are never counted). Update the

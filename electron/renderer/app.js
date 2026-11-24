@@ -1168,7 +1168,7 @@ class SessionView {
     this.sendBtn.disabled = this.dead || this.deleting || (this.busy && !this.sendsWhileBusy());
   }
 
-  /** Messages that would be lost with this view: the queue's and your typed held ones (the broker's held ones are delivered again). */
+  /** Messages that would be lost with this view: the queue's and your typed held ones (the broker's held ones are delivered again when a view is reopened, but not after a delete: the broker forgets them). */
   unsentCount() {
     return this.queue.length + this.held.filter((item) => item.typed).length;
   }
