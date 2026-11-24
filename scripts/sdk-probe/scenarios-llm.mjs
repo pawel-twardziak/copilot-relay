@@ -373,7 +373,12 @@ export const llmScenarios = [
         s.data.steeringSeen = w.events.slice(steerAt).some((e) => e.type === "user.message" && has(e.data?.content, "STEERED"));
         s.check("A message queued during a turn runs after it (mode enqueue)", has(text, "QUEUED-ONE"), s.data.pendingItems.ok ? `pending items seen: ${s.data.pendingItems.result?.items?.length ?? "?"}` : s.data.pendingItems.error);
         s.check("A queued message can be taken back before it runs", !has(text, "QUEUED-TWO") && (s.data.withdraw.result?.removed === true || s.data.removeMostRecent?.ok === true), s.data.withdraw.ok ? JSON.stringify(s.data.withdraw.result) : s.data.withdraw.error);
-        s.check("A message can be injected into the running turn (mode immediate)", s.data.steer.ok && (has(text, "STEERED") || s.data.steeringSeen), `delivery values: ${[...new Set(s.data.userMessages.map((m) => m.delivery))].join(", ")}`);
+        // a text-only turn has no tool call to inject at, so "immediate" may only jump the queue: that is a fact
+        // to read, not proof of steering. Only a delivery other than "queued" or "idle" counts as injected.
+        const steered = s.data.userMessages.find((m) => has(m.content, "Stop counting"));
+        const injected = Boolean(steered) && !["queued", "idle"].includes(steered.delivery);
+        s.check("A message sent with mode immediate is accepted", s.data.steer.ok && Boolean(steered), s.data.steer.error ?? `delivery: ${steered?.delivery ?? "never delivered"}`);
+        s.check("… and is injected into the running turn (not only moved to the front of the queue)", injected ? true : null, injected ? `delivery: ${steered.delivery}` : `not shown: delivered as "${steered?.delivery ?? "?"}", ${s.data.userMessages.findIndex((m) => m === steered) < s.data.userMessages.findIndex((m) => has(m.content, "QUEUED-ONE")) ? "before" : "after"} the queued message`);
         s.saveEvents("queue", w);
       } finally {
         await session.abort().catch(() => {});
