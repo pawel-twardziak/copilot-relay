@@ -203,7 +203,7 @@ test("cardStart takes valid parent values", () => {
     parentOf(),
     atDir,
   );
-  assert.equal(s.cwd, "/work/other");
+  assert.equal(s.cwd, path.resolve("/work/other")); // on Windows the current drive is put in front
   assert.equal(s.tier, "long_context");
   assert.equal(s.agent, "reviewer");
   assert.equal(s.model, "gpt-b");
@@ -260,7 +260,7 @@ test("cardStart deduplicates the lists", () => {
 
 test("answerFields normalises the card's values", () => {
   const ctx = { parentCwd: "/work/parent", parentTier: "long_context" };
-  assert.deepEqual(answerFields({ cwd: "/a/b/../c", tier: "default", agent: "x", model: "y" }, ctx), { cwd: "/a/c", tier: "default", agent: "x", model: "y" });
+  assert.deepEqual(answerFields({ cwd: "/a/b/../c", tier: "default", agent: "x", model: "y" }, ctx), { cwd: path.resolve("/a/c"), tier: "default", agent: "x", model: "y" });
   assert.deepEqual(answerFields({ cwd: "rel", tier: "huge", agent: 1, model: null }, ctx), { cwd: "/work/parent", tier: "long_context", agent: "", model: "" });
   assert.deepEqual(answerFields({}, ctx), { cwd: "/work/parent", tier: "long_context", agent: "", model: "" });
   assert.deepEqual(answerFields(undefined, ctx), { cwd: "/work/parent", tier: "long_context", agent: "", model: "" });
@@ -290,11 +290,11 @@ test("folderState never stats a network folder", async () => {
   assert.deepEqual(allowed, []);
   // a mount, a mapped drive, an automount: the rule refuses it, so it is never stat'ed
   assert.equal(await folderState("/net/host/x", deps(() => false)), "network");
-  assert.deepEqual(allowed, ["/net/host/x"]);
+  assert.deepEqual(allowed, [path.resolve("/net/host/x")]);
   assert.deepEqual(stated, []);
   // a local one is stat'ed after the rule passed it, resolved
   assert.equal(await folderState("/work/a/../other", deps(() => true)), "dir");
-  assert.deepEqual(stated, ["/work/other"]);
+  assert.deepEqual(stated, [path.resolve("/work/other")]);
   assert.equal(await folderState("/work/x", { allow: async () => true, isDir: async () => false }), "missing");
   // relative or empty: nothing is asked at all
   allowed.length = 0;
