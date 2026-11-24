@@ -90,14 +90,17 @@ export const freeScenarios = [
     title: "Environment: Node, SDK, installed CLI, repository under test",
     async run(s) {
       const pkg = JSON.parse(fs.readFileSync(path.join(here, "node_modules", "@microsoft", "copilot-sdk", "package.json"), "utf8"));
-      const set = (n) => (process.env[n] ? "set" : "unset");
       s.data.node = process.version;
       s.data.platform = `${process.platform} ${process.arch} ${os.release()}`;
       s.data.sdk = { name: pkg.name, version: pkg.version, bundledCliVersion: pkg.copilotCliVersion, protocolVersion: G.sdkProtocolVersion };
       s.data.cli = sanitize(G.cli);
       s.data.cliVersion = cliVersion(G.cli.command);
       s.data.copilotHome = cleanText(G.copilotHome);
-      s.data.env = Object.fromEntries(["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "COPILOT_HOME", "COPILOT_CLI_PATH", "COPILOT_PATH", "GH_HOST", "GH_TOKEN", "GITHUB_TOKEN", "COPILOT_GITHUB_TOKEN", "COPILOT_CUSTOM_INSTRUCTIONS_DIRS"].map((n) => [n, set(n)]));
+      // names only, never values
+      const watched = ["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "NODE_EXTRA_CA_CERTS", "COPILOT_HOME", "COPILOT_CLI_PATH", "COPILOT_PATH", "GH_HOST", "GH_TOKEN", "GITHUB_TOKEN", "COPILOT_GITHUB_TOKEN", "COPILOT_CUSTOM_INSTRUCTIONS_DIRS"];
+      s.data.envSet = watched.filter((n) => process.env[n]);
+      s.data.envUnset = watched.filter((n) => !process.env[n]);
+      if (process.env.COPILOT_CUSTOM_INSTRUCTIONS_DIRS) s.note("COPILOT_CUSTOM_INSTRUCTIONS_DIRS is set: the probe was probably started from inside a Copilot session (for example by an agent in the app). Every probe session inherits that session's instructions, which can change the replies the turn scenarios check. Start the full run from a plain terminal.");
       s.data.cwd = cleanText(G.cwd);
       s.data.repo = {
         isGitRepo: fs.existsSync(path.join(G.cwd, ".git")),

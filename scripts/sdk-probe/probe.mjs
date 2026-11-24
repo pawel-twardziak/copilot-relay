@@ -95,6 +95,9 @@ if (opt["variant-check"]) {
   const out = { ok: false, variant: name };
   let client;
   try {
+    // the in-process runtime takes its location from this process's environment: without this it would look for
+    // runtime.node next to the installed CLI (COPILOT_CLI_PATH) instead of testing the runtime bundled with the SDK
+    if (name === "inprocess") delete process.env.COPILOT_CLI_PATH;
     client = new sdk.CopilotClient({ mode: "coding-agent", runtime: runtimeFor(name) });
     const t0 = Date.now();
     await withTimeout(client.start(), 80_000, "client.start()");
