@@ -26,12 +26,16 @@
 // The scenario's optional uniqueIds: true gives every session/new after the first one in a folder its own id
 // (scripted-<folder>-2, …), for a delegated child, which starts in its parent's folder.
 // Unknown arguments (--acp --stdio, the context tier…) are ignored.
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 
 const { prompts = [], load = {}, uniqueIds = false } = process.env.SCRIPTED_SCENARIO ? (await import(pathToFileURL(process.env.SCRIPTED_SCENARIO).href)).default : {};
+
+// $SCRIPTED_ARGV_FILE: the arguments this process was started with, one JSON line per start (a check reads what
+// reached the agent through the command line, the app's --acp --stdio included)
+if (process.env.SCRIPTED_ARGV_FILE) appendFileSync(process.env.SCRIPTED_ARGV_FILE, JSON.stringify(process.argv.slice(2)) + "\n");
 
 const send = (msg) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...msg }) + "\n");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

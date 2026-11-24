@@ -271,7 +271,7 @@ left out):
   in Settings means no child part; "Restore default" goes back to the built-in text.
   After updating the app, restart the broker (Settings -> "Update and restart broker") so the new adopted-child rule
   and notes apply.
-- **Own part**: written per session, in the Prompt dialog.
+- **Own part**: written per session, in the **Setup** dialog.
 
 **Templates** (Settings) are named texts for the own part. Picking one *copies* its text into the editor: it is not
 linked, so editing or deleting a template later changes no session.
@@ -282,7 +282,7 @@ linked, so editing or deleting a template later changes no session.
   own part.
 - On a child's card: the card that asks you to approve a new child has the editor, so you can add to the child's
   prompt before you click **Approve**.
-- In a running session: the **Prompt** button. **Save and restart** restarts that session's Copilot with the new
+- In a running session: the **Setup** button. **Save and restart** restarts that session's Copilot with the new
   prompt; the history is kept. It needs no running turn, and the session's subagents and shell commands stop.
 
 Changes in **Settings** (default part, child part, templates) reach a session at its next start; running sessions
@@ -437,7 +437,10 @@ To build locally, run `npm run dist:win` on Windows or `npm run dist:linux` on L
 
 The app runs `copilot` from `PATH`. On macOS and Linux it reads `PATH` from your login shell, so Homebrew, npm
 global and `~/.local/bin` installs are found even when the app is started from the Dock or a desktop launcher.
-If Copilot still isn't found, open **⚙ Settings** and enter the full path:
+If Copilot still isn't found, open **⚙ Settings** and enter its command. The command is a line that may carry
+arguments; the system shell runs it, and the app adds `--acp --stdio` at its end, so it must be one command that
+takes them. A path with spaces is quoted (`"C:\Program Files\...\copilot.exe"`) or given alone (an absolute path
+to an existing file works unquoted). A wrapper script must pass its arguments on (`exec copilot "$@"`). Typical paths:
 
 | OS | find it with | typical path |
 |---|---|---|
@@ -445,7 +448,17 @@ If Copilot still isn't found, open **⚙ Settings** and enter the full path:
 | macOS | `which copilot` | `/opt/homebrew/bin/copilot` |
 | Linux | `which copilot` | `~/.local/bin/copilot` |
 
-The `COPILOT_PATH` environment variable works too. Settings are stored in Electron's `userData` folder:
+The `COPILOT_PATH` environment variable works too, and is such a line as well.
+
+**A command per session.** In the dialog of a new session, or later in the session's **Setup**, a session can have its
+own Copilot command. It replaces the Settings command for that session; empty means the Settings command. A delegated
+child starts with a copy of its parent's command. If a session's command is broken, repair it from **Setup** on the
+dead view. A start that does not answer within 60 seconds fails.
+
+On Linux and macOS, closing or restarting a session ends Copilot's whole process group, so a process one of its tools
+left running in that group (a dev server put in the background) stops with the session.
+
+Settings are stored in Electron's `userData` folder:
 `%APPDATA%\copilot-relay-desktop` on Windows, `~/Library/Application Support/copilot-relay-desktop` on macOS,
 and `~/.config/copilot-relay-desktop` on Linux.
 

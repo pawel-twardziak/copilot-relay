@@ -336,7 +336,7 @@ class SessionView {
 
     this.titleEl = h("b", { class: "renamable", onclick: () => this.renameSession() });
     this.selects = h("span", { class: "selects" });
-    this.promptBtn = h("button", { class: "prompt-btn", title: "This session's own prompt (saving restarts its Copilot)", onclick: () => this.editPrompt() }, "Prompt");
+    this.promptBtn = h("button", { class: "prompt-btn", title: "This session's prompt and Copilot command (saving restarts its Copilot)", onclick: () => this.editPrompt() }, "Setup");
     this.relayChip = h("button", { class: "relay-chip", hidden: true, onclick: () => this.renameRelay() });
     this.usageFill = h("span", { class: "fill" });
     this.usageLabel = h("span", { class: "label" }, "context: —");
@@ -1142,7 +1142,8 @@ class SessionView {
     this.stopBtn.disabled = !b || this.dead || this.deleting;
     this.input.disabled = this.dead || this.deleting;
     this.agentPicker.disabled = off;
-    this.promptBtn.disabled = off; // a new prompt takes a restart, as a new context window does
+    // a new prompt or command takes a restart, as a new context window does; a dead view keeps it: Setup repairs it
+    this.promptBtn.disabled = b || this.deleting;
     this.showQueueStatus();
     renderList();
     if (!b) queueMicrotask(() => this.pump());
@@ -2328,39 +2329,51 @@ class SessionView {
     await reopenView(this, failure && `Could not change ${what}: ${failure.message}`);
   }
 
-  /** The header's Prompt button: the session's own part in the prompt dialog; "Save and restart" restarts Copilot
-   *  with the new text (main closes the session, the reopen replays it). A refusal keeps the dialog open with the
-   *  text; an unchanged text closes it and restarts nothing. */
+  /** The header's Setup button: the session's own prompt part and Copilot command in the prompt dialog; "Save and
+   *  restart" restarts Copilot with them (main closes the session, the reopen replays it). It also works on a dead
+   *  view (a broken command is repaired here): nothing is closed, the reopen starts it again. A refusal keeps the
+   *  dialog open with the text; unchanged values close it and restart nothing
+   *  (on a dead view they reopen it: the cause may have been fixed elsewhere, in Settings). */
   async editPrompt() {
-    if (this.busy || this.dead || this.deleting || $("#prompt-dialog").open) return;
+    if (this.busy || this.deleting || $("#prompt-dialog").open) return;
     let p, s;
     try {
       [p, s] = await Promise.all([api.getPrompt(this.sessionId), api.getSettings()]);
     } catch (e) {
-      return this.error(`Could not read this session's prompt: ${e.message}`);
+      return this.error(`Could not read this session's setup: ${e.message}`);
     }
-    if (this.dead || this.deleting || views.get(this.sessionId) !== this) return;
-    const editor = PromptEditor.createPromptEditor({ defaultPart: p.defaultPart, childPart: p.isChild ? p.childPart : null, templates: s.promptTemplates ?? [], own: p.own, h });
+    if (this.deleting || views.get(this.sessionId) !== this) return;
+    const editor = PromptEditor.createPromptEditor({
+      defaultPart: p.defaultPart,
+      childPart: p.isChild ? p.childPart : null,
+      templates: s.promptTemplates ?? [],
+      own: p.own,
+      command: { value: p.command, settings: p.settingsCommand },
+      h,
+    });
     let restart = false;
     let failure = null;
-    const onOk = async (own) => {
-      if (this.dead || this.deleting || views.get(this.sessionId) !== this) return "This session is no longer open here. Open its prompt again.";
+    const onOk = async (own, command) => {
+      if (this.deleting || views.get(this.sessionId) !== this) return "This session is no longer open here. Open its setup again.";
       if (this.busy) return "Wait until Copilot finishes this turn.";
-      this.setBusy(true); // nothing starts a turn while main closes the session
-      this.statusEl.textContent = "Restarting Copilot with the new prompt…";
+      const dead = this.dead; // a dead view has no Copilot to close and no turn to hold off
+      if (!dead) {
+        this.setBusy(true); // nothing starts a turn while main closes the session
+        this.statusEl.textContent = "Restarting Copilot with the new setup…";
+      }
       try {
-        const res = await api.setPrompt(this.sessionId, own);
-        if (res?.reopen) return void (restart = true);
-        this.setBusy(false); // refused or unchanged: nothing was closed
+        const res = await api.setPrompt(this.sessionId, own, command);
+        if (res?.reopen || (res?.unchanged && dead)) return void (restart = true); // a dead view reopens even unchanged
+        if (!dead) this.setBusy(false); // refused or unchanged: nothing was closed
         return res?.refused || undefined;
       } catch (e) {
         failure = e; // main may have closed it: the reopen below shows the failure
         restart = true;
       }
     };
-    const title = `Prompt: ${this.titleEl.textContent || this.cwd}`;
+    const title = `Setup: ${this.titleEl.textContent || this.cwd}`;
     await PromptEditor.openPromptDialog({ title, okLabel: "Save and restart", note: RESTART_NOTE, editor, onOk });
-    if (restart) await this.restarted(failure, "the prompt");
+    if (restart) await this.restarted(failure, "the setup");
   }
 
   setConfig(configOptions) {
@@ -2816,12 +2829,12 @@ async function newSession(cwd) {
     cwd ??= await api.pickDir();
     if (!cwd) return;
     const s = await api.getSettings();
-    const editor = PromptEditor.createPromptEditor({ defaultPart: s.promptDefault ?? "", childPart: null, templates: s.promptTemplates ?? [], own: "", h });
+    const editor = PromptEditor.createPromptEditor({ defaultPart: s.promptDefault ?? "", childPart: null, templates: s.promptTemplates ?? [], own: "", command: { value: "", settings: s.effective }, h });
     let res = null;
-    const onOk = async (own) => {
+    const onOk = async (own, command) => {
       setStatus(`Starting Copilot in ${cwd}…`);
       try {
-        res = await api.newSession(cwd, own);
+        res = await api.newSession(cwd, own, command);
       } catch (e) {
         return `Could not start the session: ${e.message}`;
       } finally {
@@ -3505,8 +3518,9 @@ async function openSettings() {
   const example = s.platform === "win32" ? "C:\\Users\\you\\AppData\\Roaming\\npm\\copilot.cmd" : "/opt/homebrew/bin/copilot";
   $("#set-hint").textContent =
     `Leave empty to use "copilot" from PATH (or $COPILOT_PATH). Currently used: ${s.effective}\n` +
-    `Set a full path if the app cannot find Copilot, e.g. ${example}\n` +
-    `Find it with: ${s.platform === "win32" ? "where copilot" : "which copilot"}`;
+    `May carry arguments; the system shell runs it and the app adds --acp --stdio at the end.\n` +
+    `Quote a path with spaces, or give the path alone, e.g. ${example}\n` +
+    `A session can have its own command in its Setup. Find Copilot with: ${s.platform === "win32" ? "where copilot" : "which copilot"}`;
   renderStorage();
   $("#set-relay").checked = s.relay;
   $("#set-queue").checked = s.queueMidTurn;

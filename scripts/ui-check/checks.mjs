@@ -16,10 +16,12 @@ import { launch, until } from "./driver.mjs";
 
 // the notes of the prompt editor in a running session and of Settings (global constraints: RESTART_NOTE, SETTINGS_NOTE)
 const RESTART_NOTE = "Saving restarts this session's Copilot. The history stays.";
+const SETUP_TITLE = "This session's prompt and Copilot command (saving restarts its Copilot)";
 const SETTINGS_NOTE = "Changes here reach a running session the next time its Copilot starts.";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const FIXTURES = path.join(ROOT, "electron", "test", "fixtures", "acp");
+const SCRIPTED_AGENT = path.join(FIXTURES, "scripted-agent.mjs"); // the command settings.json holds in a launch
 export const PANEL_SCENARIO = path.join(FIXTURES, "panel-scenario.mjs");
 const BASELINE_DIR = path.join(ROOT, "electron", "test", "fixtures", "ui-baseline");
 
@@ -273,14 +275,15 @@ async function stubEditCount(app) {
   })()`);
   assert.equal(ok, true, "startEdit calls api.countFrom once");
 }
-/** The pids of the scripted agents running in the launch's work folder (the session's Copilot processes). */
+/** The pids of the scripted agents running in the launch's work folder (the session's Copilot processes). Only the
+ *  agent itself (`node …/scripted-agent.mjs`) counts, not the shell that started it (`sh -c '…scripted-agent.mjs' …`). */
 function agentPids(app) {
   const work = path.join(app.dir, "work");
   return readdirSync("/proc")
     .filter((p) => /^\d+$/.test(p))
     .filter((p) => {
       try {
-        return readlinkSync(`/proc/${p}/cwd`) === work && readFileSync(`/proc/${p}/cmdline`, "utf8").includes("scripted-agent.mjs");
+        return readlinkSync(`/proc/${p}/cwd`) === work && readFileSync(`/proc/${p}/cmdline`, "utf8").split("\0")[1]?.endsWith("scripted-agent.mjs");
       } catch {
         return false; // gone, or not ours
       }
@@ -2421,6 +2424,9 @@ export const checks = [
       await app.ev(`(() => { const t = ${D}.querySelector(".pe-own"); t.value = "Keep me."; t.dispatchEvent(new Event("input", { bubbles: true })); })()`);
       await app.ev(`document.querySelector("#prompt-ok").click()`);
       await app.check(`${D}.querySelector("#prompt-note").textContent.startsWith("Could not start the session:")`, "the start error in the dialog");
+      const note = await app.ev(`${D}.querySelector("#prompt-note").textContent`);
+      assert.match(note, /The program was not found, or cannot be run\./);
+      assert.match(note, /This is the command from Settings\./);
       assert.equal(await app.ev(`${D}.open`), true, "the dialog stays open");
       assert.equal(await app.ev(`${D}.querySelector(".pe-own").value`), "Keep me.");
       assert.equal(await app.ev(`document.querySelector("#prompt-ok").disabled`), false, "Start can be pressed again");
@@ -2429,6 +2435,70 @@ export const checks = [
       assert.equal(await app.ev(`window.__newSession.then(() => true)`, "newSession to return"), true);
       assert.equal(await app.ev(`${D}.open`), false);
       assert.equal(await app.ev(`views.size`), shown, "no view");
+    },
+  },
+  {
+    // a start that never answers (a command that sleeps) ends at the start deadline: the note says so, the dialog
+    // stays open with Start and Cancel enabled, and the command's process is gone
+    name: "new-session-start-deadline",
+    modes: ["off"],
+    settings: { copilotCommand: "sh -c 'sleep 30' x" },
+    env: { COPILOT_RELAY_START_TIMEOUT_MS: "1000" },
+    async run(app) {
+      if (process.platform === "win32") return;
+      const work = path.join(app.dir, "work");
+      const D = `document.querySelector("#prompt-dialog")`;
+      const leftovers = () =>
+        readdirSync("/proc")
+          .filter((p) => /^\d+$/.test(p))
+          .filter((p) => {
+            try {
+              return readlinkSync(`/proc/${p}/cwd`) === work;
+            } catch {
+              return false; // gone, or not ours
+            }
+          });
+      await app.ev(`(window.__newSession = newSession(${JSON.stringify(work)}), true)`);
+      await app.check(`${D}.open`, "the prompt dialog");
+      await app.ev(`document.querySelector("#prompt-ok").click()`);
+      await app.check(`${D}.querySelector("#prompt-note").textContent.includes("Copilot did not answer within 1 seconds.")`, "the deadline text in the dialog");
+      assert.equal(await app.ev(`${D}.open`), true, "the dialog stays open");
+      assert.equal(await app.ev(`document.querySelector("#prompt-ok").disabled`), false, "Start can be pressed again");
+      assert.equal(await app.ev(`document.querySelector("#prompt-cancel").disabled`), false, "Cancel can be pressed");
+      await until(async () => leftovers().length === 0, "the command's process to be gone");
+      await app.ev(`document.querySelector("#prompt-cancel").click()`);
+      await app.ev(`window.__newSession.then(() => true)`, "newSession to return");
+    },
+  },
+  {
+    // a signal sent to the app's main process (Ctrl+C in a terminal, a kill) leaves no Copilot of the launch behind:
+    // each Copilot leads its own process group, so the signal does not reach it, but Electron's own handling of the
+    // signal quits the app through before-quit, which kills every Copilot; this guards that path. The agent alone
+    // would end by itself when the app dies (its stdin closes), so the command leaves a `sleep` behind it in the
+    // same group: only a kill of the group removes it.
+    name: "signal-kills-copilots",
+    modes: ["off"],
+    settings: { copilotCommand: `sh -c '"$0" "$@"; sleep 60' ${path.join(ROOT, "electron", "test", "fixtures", "acp", "scripted-agent.mjs")}` },
+    async run(app) {
+      if (process.platform === "win32") return;
+      const work = path.join(app.dir, "work");
+      const inWork = () =>
+        readdirSync("/proc")
+          .filter((p) => /^\d+$/.test(p))
+          .filter((p) => {
+            try {
+              return readlinkSync(`/proc/${p}/cwd`) === work;
+            } catch {
+              return false; // gone, or not ours
+            }
+          });
+      await app.newSession();
+      assert.ok(app.agents().length >= 1, "an agent for the session");
+      const main = app.mainPid();
+      assert.ok(main, "the app's main process");
+      process.kill(main, "SIGTERM");
+      await until(async () => !existsSync(`/proc/${main}`), "the app to exit");
+      await until(async () => app.agents().length === 0 && inWork().length === 0, "no process of the session to be left after SIGTERM");
     },
   },
   {
@@ -2479,6 +2549,72 @@ export const checks = [
     },
   },
   {
+    // a delegated child starts with its parent's stored command (not Settings'), keeps it as its own, and its approval
+    // card offers no command field. The parent is given its command in the new-session dialog; the scripted agent
+    // records every start's arguments in $SCRIPTED_ARGV_FILE.
+    name: "child-command-inherited",
+    modes: ["off"],
+    scenario: CHILD_PROMPT_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      const argvFile = path.join(app.dir, "argv.jsonl");
+      const command = `SCRIPTED_ARGV_FILE='${argvFile}' '${SCRIPTED_AGENT}' --tag parent`;
+      const lines = () => (existsSync(argvFile) ? readFileSync(argvFile, "utf8").split("\n").filter(Boolean) : []);
+      const stored = () => JSON.parse(readFileSync(path.join(app.dir, "config", "copilot-relay-desktop", "session-commands.json"), "utf8"));
+      const D = `document.querySelector("#prompt-dialog")`;
+      const card = `${V}.el.querySelectorAll(".perm.delegation")[0]`;
+      await app.ev(`(window.__newSession = newSession(${JSON.stringify(path.join(app.dir, "work"))}), true)`);
+      await app.check(`${D}.open && !!${D}.querySelector(".pe-command")`, "the prompt dialog with the command field");
+      await app.ev(`(() => { const t = ${D}.querySelector(".pe-command"); t.value = ${JSON.stringify(command)}; t.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+      await app.ev(`document.querySelector("#prompt-ok").click()`);
+      await app.ev(`window.__newSession`, "newSession to return");
+      await app.check(`!!${V} && !${V}.busy`, "the parent's view");
+      await app.check(`!!${V}.relayName && !${V}.relayChip.hidden && !${V}.relayChip.classList.contains("off")`, "the parent to connect to the broker");
+      assert.deepEqual(lines().map((l) => JSON.parse(l)), [["--tag", "parent", "--acp", "--stdio"]]);
+      // the driver's send needs the session newSession() of the driver made: this one was started by its dialog
+      await app.ev(`(() => { const v = ${V}; v.input.value = "create_session kid Do-it"; v.input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); })()`);
+      await app.check(`!!${card}?.querySelector(".prompt-editor") && !${card}.querySelector(".opts button.primary").disabled`, "the card");
+      assert.equal(await app.ev(`!!${card}.querySelector(".pe-command")`), false, "no command field on the approval card");
+      await app.ev(`${card}.querySelector(".opts button.primary").click()`);
+      await app.check(`${card}.classList.contains("done")`, "the card to be answered");
+      await app.check(`!!views.get("scripted-work-2")`, "the child's view");
+      await until(async () => lines().length === 2, "the child's start");
+      assert.deepEqual(JSON.parse(lines()[1]), ["--tag", "parent", "--acp", "--stdio"]);
+      assert.equal(stored()["scripted-work-2"], command, "the child's own command is the parent's");
+      assert.equal(stored()["scripted-work"], command);
+      await app.check(`!${V}.busy`, "the parent to be idle");
+    },
+  },
+  {
+    // a parent's command that cannot be run: the child is not created, no view appears, and the parent is told in a
+    // relay notice (a message of kind relay in its chat) whose text says where the command comes from. The stored
+    // command is replaced in the file while the parent runs (the store reads the file on every use).
+    name: "child-command-broken",
+    modes: ["off"],
+    scenario: CHILD_PROMPT_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      await app.newSession();
+      const file = path.join(app.dir, "config", "copilot-relay-desktop", "session-commands.json");
+      const card = `${V}.el.querySelectorAll(".perm.delegation")[0]`;
+      await app.check(`!!${V}.relayName && !${V}.relayChip.hidden && !${V}.relayChip.classList.contains("off")`, "the parent to connect to the broker");
+      mkdirSync(path.dirname(file), { recursive: true });
+      writeFileSync(file, JSON.stringify({ "scripted-work": "/nonexistent/copilot-ui-check" }));
+      await app.send("create_session kid Do-it");
+      await app.check(`!!${card}?.querySelector(".prompt-editor") && !${card}.querySelector(".opts button.primary").disabled`, "the card");
+      await app.ev(`${card}.querySelector(".opts button.primary").click()`);
+      const notice = `[...${V}.log.querySelectorAll(".msg.relay")].map((e) => e.textContent).join(" ")`;
+      await app.check(`${notice}.includes("This is the parent session's command.")`, "the parent to be told why the child did not start");
+      const text = await app.ev(notice);
+      assert.match(text, /Session "kid" was not created: /);
+      assert.ok(text.includes("This is the parent session's command."), text);
+      await app.idle();
+      assert.equal(await app.ev(`views.has("scripted-work-2")`), false, "no view for the child that did not start");
+    },
+  },
+  {
     // the header's Prompt button: the dialog holds the stored own part, says that saving restarts Copilot, and "Save
     // and restart" reopens the session with the new text; the button follows the busy state; a refusal (main's, or a
     // turn the view started meanwhile) keeps the dialog open with the text. A UUID: main takes only those. Every
@@ -2514,7 +2650,8 @@ export const checks = [
       await app.send("First.");
       await app.answerPermission();
       await app.idle();
-      assert.equal(await app.ev(`${btn}.textContent`), "Prompt");
+      assert.equal(await app.ev(`${btn}.textContent`), "Setup");
+      assert.equal(await app.ev(`${btn}.title`), SETUP_TITLE);
       assert.equal(await app.ev(`${btn}.disabled`), false);
       // 1. the dialog: the stored own part, the restart note, "Save and restart"; a top-level session has no child fold
       await openDialog();
@@ -2577,6 +2714,203 @@ export const checks = [
       assert.equal(await userMessages(), 3, "the reopened chat keeps its turns");
       assert.equal(await app.ev(`${btn}.disabled`), false);
       assert.equal(await app.ev(`api.getPrompt(${id}).then((p) => p.own)`), "O3");
+    },
+  },
+  {
+    // the command field of the new-session dialog: what is typed there reaches the agent's command line (the scripted
+    // agent records its arguments in $SCRIPTED_ARGV_FILE) and is stored for the session
+    name: "session-command-new",
+    modes: ["off"],
+    sessionId: HISTORY_ID,
+    async run(app) {
+      const work = path.join(app.dir, "work");
+      const argvFile = path.join(app.dir, "argv.jsonl");
+      const D = `document.querySelector("#prompt-dialog")`;
+      const lines = () => (existsSync(argvFile) ? readFileSync(argvFile, "utf8").split("\n").filter(Boolean) : []);
+      await app.ev(`(window.__newSession = newSession(${JSON.stringify(work)}), true)`);
+      await app.check(`${D}.open && !!${D}.querySelector(".pe-command")`, "the prompt dialog with the command field");
+      assert.equal(await app.ev(`${D}.querySelector(".pe-command").placeholder`), `Settings: ${SCRIPTED_AGENT}`);
+      await app.ev(`(() => { const t = ${D}.querySelector(".pe-command"); t.value = ${JSON.stringify(`SCRIPTED_ARGV_FILE='${argvFile}' '${SCRIPTED_AGENT}' --tag one`)}; t.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+      await app.ev(`document.querySelector("#prompt-ok").click()`);
+      await app.ev(`window.__newSession`, "newSession to return");
+      await app.check(`views.has(${JSON.stringify(HISTORY_ID)})`, "the view");
+      assert.equal(lines().at(-1), JSON.stringify(["--tag", "one", "--acp", "--stdio"]));
+      const stored = JSON.parse(readFileSync(path.join(app.dir, "config", "copilot-relay-desktop", "session-commands.json"), "utf8"));
+      assert.equal(stored[HISTORY_ID], `SCRIPTED_ARGV_FILE='${argvFile}' '${SCRIPTED_AGENT}' --tag one`);
+    },
+  },
+  {
+    // plain Enter in the command field must not submit the form (its first submit button is Cancel, which would
+    // close the dialog and lose the text); Ctrl+Enter accepts, as in the text area. Real key events: a synthetic
+    // one does not trigger the browser's implicit submission.
+    name: "session-command-enter",
+    modes: ["off"],
+    sessionId: HISTORY_ID,
+    async run(app) {
+      const work = path.join(app.dir, "work");
+      const D = `document.querySelector("#prompt-dialog")`;
+      await app.ev(`(window.__newSession = newSession(${JSON.stringify(work)}), true)`);
+      await app.check(`${D}.open && !!${D}.querySelector(".pe-command")`, "the prompt dialog");
+      await app.ev(`(() => { for (const [sel, text] of [[".pe-own", "Keep me."], [".pe-command", ${JSON.stringify(`'${SCRIPTED_AGENT}' --tag enter`)}]]) { const t = ${D}.querySelector(sel); t.value = text; t.dispatchEvent(new Event("input", { bubbles: true })); } ${D}.querySelector(".pe-command").focus(); })()`);
+      await app.pressEnter();
+      await app.ev("new Promise((r) => setTimeout(r, 300))");
+      assert.equal(await app.ev(`${D}.open`), true, "plain Enter leaves the dialog open");
+      assert.equal(await app.ev(`${D}.querySelector(".pe-own").value`), "Keep me.");
+      assert.equal(await app.ev(`${D}.querySelector(".pe-command").value`), `'${SCRIPTED_AGENT}' --tag enter`);
+      await app.pressEnter({ ctrl: true });
+      await app.ev(`window.__newSession`, "newSession to return");
+      await app.check(`!${D}.open && views.has(${JSON.stringify(HISTORY_ID)})`, "Ctrl+Enter to start the session");
+    },
+  },
+  {
+    // Setup: the command field is empty with the Settings command as placeholder; a new command (and text) restarts
+    // Copilot with it, exactly one start; the same values again restart nothing
+    name: "session-command-setup",
+    modes: ["off"],
+    sessionId: HISTORY_ID,
+    async run(app) {
+      const id = JSON.stringify(HISTORY_ID);
+      const V = `views.get(${id})`;
+      const argvFile = path.join(app.dir, "argv.jsonl");
+      const D = `document.querySelector("#prompt-dialog")`;
+      const btn = `${V}.el.querySelector(".head .prompt-btn")`;
+      const lines = () => (existsSync(argvFile) ? readFileSync(argvFile, "utf8").split("\n").filter(Boolean) : []);
+      const set = (sel, text) => app.ev(`(() => { const t = ${D}.querySelector(${JSON.stringify(sel)}); t.value = ${JSON.stringify(text)}; t.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+      const command = `SCRIPTED_ARGV_FILE='${argvFile}' '${SCRIPTED_AGENT}' --tag two`;
+      await app.newSession();
+      assert.equal(await app.ev(`${btn}.textContent`), "Setup");
+      assert.equal(await app.ev(`${btn}.title`), SETUP_TITLE);
+      await app.ev(`${btn}.click()`);
+      await app.check(`${D}.open && !!${D}.querySelector(".pe-command")`, "the Setup dialog");
+      assert.ok((await app.ev(`${D}.querySelector("#prompt-title").textContent`)).startsWith("Setup: "));
+      assert.equal(await app.ev(`${D}.querySelector(".pe-command").value`), "");
+      assert.equal(await app.ev(`${D}.querySelector(".pe-command").placeholder`), `Settings: ${SCRIPTED_AGENT}`);
+      assert.equal(await app.ev(`${D}.querySelector("label.pe-command-row > span").textContent`), "Copilot command");
+      await set(".pe-command", command);
+      await set(".pe-own", "Own text.");
+      await app.ev(`document.querySelector("#prompt-ok").click()`);
+      await app.check(`!${D}.open`, "the dialog to close");
+      await until(async () => lines().length === 1, "the restart with the new command");
+      await app.idle();
+      assert.deepEqual(lines().map((l) => JSON.parse(l)), [["--tag", "two", "--acp", "--stdio"]]);
+      // unchanged: nothing restarts
+      await app.ev(`${btn}.click()`);
+      await app.check(`${D}.open`, "the Setup dialog again");
+      assert.equal(await app.ev(`${D}.querySelector(".pe-command").value`), command);
+      assert.equal(await app.ev(`${D}.querySelector(".pe-own").value`), "Own text.");
+      await app.ev(`document.querySelector("#prompt-ok").click()`);
+      await app.check(`!${D}.open`, "the dialog to close");
+      await app.idle();
+      assert.equal(lines().length, 1, "no new start for unchanged values");
+    },
+  },
+  {
+    // a broken own command leaves a dead view whose Setup still works: clearing the field brings it back and drops
+    // the stored command
+    name: "session-command-repair",
+    modes: ["off"],
+    sessionId: HISTORY_ID,
+    async run(app) {
+      const id = JSON.stringify(HISTORY_ID);
+      const V = `views.get(${id})`;
+      const D = `document.querySelector("#prompt-dialog")`;
+      const btn = () => `${V}.el.querySelector(".head .prompt-btn")`;
+      const storeFile = path.join(app.dir, "config", "copilot-relay-desktop", "session-commands.json");
+      const stored = () => (existsSync(storeFile) ? JSON.parse(readFileSync(storeFile, "utf8")) : {});
+      const setup = async (command) => {
+        await app.ev(`${btn()}.click()`);
+        await app.check(`${D}.open && !!${D}.querySelector(".pe-command")`, "the Setup dialog");
+        await app.ev(`(() => { const t = ${D}.querySelector(".pe-command"); t.value = ${JSON.stringify(command)}; t.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+        await app.ev(`document.querySelector("#prompt-ok").click()`);
+        await app.check(`!${D}.open`, "the dialog to close");
+      };
+      await app.newSession();
+      await setup("/nonexistent/copilot-ui-check");
+      await app.check(`${V} && ${V}.dead`, "the view to be dead");
+      assert.ok((await app.ev(`${V}.el.textContent`)).includes("This is this session's own command."));
+      assert.equal(await app.ev(`${btn()}.disabled`), false, "Setup stays available on a dead view");
+      assert.equal(stored()[HISTORY_ID], "/nonexistent/copilot-ui-check");
+      await setup("");
+      await app.check(`${V} && !${V}.dead && !${V}.resuming`, "the view to be alive again");
+      assert.equal(HISTORY_ID in stored(), false, "no stored command");
+    },
+  },
+  {
+    // a dead view whose cause was fixed elsewhere (the command works now, nothing in the dialog changes): "Save and
+    // restart" with unchanged values reopens the view
+    name: "session-command-repair-unchanged",
+    modes: ["off"],
+    sessionId: HISTORY_ID,
+    async run(app) {
+      const id = JSON.stringify(HISTORY_ID);
+      const V = `views.get(${id})`;
+      const D = `document.querySelector("#prompt-dialog")`;
+      const flag = path.join(app.dir, "agent-ok");
+      // starts the scripted agent only while the flag file exists; otherwise it exits at once
+      const command = `sh -c 'test -f "$0" || exit 1; exec "$@"' '${flag}' '${SCRIPTED_AGENT}'`;
+      await app.newSession();
+      await app.ev(`${V}.el.querySelector(".head .prompt-btn").click()`);
+      await app.check(`${D}.open && !!${D}.querySelector(".pe-command")`, "the Setup dialog");
+      await app.ev(`(() => { const t = ${D}.querySelector(".pe-command"); t.value = ${JSON.stringify(command)}; t.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+      await app.ev(`document.querySelector("#prompt-ok").click()`);
+      await app.check(`!${D}.open && ${V} && ${V}.dead`, "the view to be dead");
+      writeFileSync(flag, "");
+      await app.ev(`${V}.el.querySelector(".head .prompt-btn").click()`);
+      await app.check(`${D}.open && !!${D}.querySelector(".pe-command")`, "the Setup dialog again");
+      await app.ev(`document.querySelector("#prompt-ok").click()`);
+      await app.check(`!${D}.open`, "the dialog to close");
+      await app.check(`${V} && !${V}.dead && !${V}.resuming`, "the view to be alive again");
+    },
+  },
+  {
+    // a fork takes its origin's own command; deleting the fork drops it
+    name: "session-command-fork-delete",
+    modes: ["off"],
+    sessionId: HISTORY_ID,
+    async run(app) {
+      const id = JSON.stringify(HISTORY_ID);
+      const D = `document.querySelector("#prompt-dialog")`;
+      const work = path.join(app.dir, "work");
+      const storeFile = path.join(app.dir, "config", "copilot-relay-desktop", "session-commands.json");
+      const stored = () => JSON.parse(readFileSync(storeFile, "utf8"));
+      const command = `'${SCRIPTED_AGENT}' --tag fork`;
+      await app.ev(`(window.__newSession = newSession(${JSON.stringify(work)}), true)`);
+      await app.check(`${D}.open`, "the prompt dialog");
+      await app.ev(`(() => { const t = ${D}.querySelector(".pe-command"); t.value = ${JSON.stringify(command)}; t.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+      await app.ev(`document.querySelector("#prompt-ok").click()`);
+      await app.ev(`window.__newSession`, "newSession to return");
+      await app.check(`views.has(${id}) && !views.get(${id}).busy`, "the view");
+      // Copilot's history files of the session, written here: the agent keeps none
+      const iso = new Date(2026, 10, 23, 9, 0).toISOString();
+      const dir = path.join(app.dir, "copilot-home", "session-state", HISTORY_ID);
+      mkdirSync(dir, { recursive: true });
+      const events = [
+        { type: "session.start", data: { sessionId: HISTORY_ID, context: { cwd: work } }, timestamp: iso },
+        { type: "user.message", data: { content: "Look around." }, timestamp: iso },
+        { type: "assistant.message", data: { messageId: "m1", content: "x" }, timestamp: iso },
+      ];
+      writeFileSync(path.join(dir, "events.jsonl"), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
+      const fork = await app.ev(`api.forkSession(${id}, { ordinal: 1, text: "Look around.", where: "afterReply" })`);
+      assert.notEqual(fork.sessionId, HISTORY_ID);
+      assert.equal(stored()[fork.sessionId], command);
+      const deleted = await app.ev(`api.deleteSession(${JSON.stringify(fork.sessionId)})`);
+      assert.ok(!deleted?.refused && !deleted?.stuck, JSON.stringify(deleted));
+      assert.equal(fork.sessionId in stored(), false);
+      assert.equal(stored()[HISTORY_ID], command);
+    },
+  },
+  {
+    // the Settings hint explains what the command may carry, and the field takes up to 4000 characters
+    name: "settings-command-hint",
+    modes: ["off"],
+    async run(app) {
+      await app.ev(`document.querySelector("#btn-settings").click()`);
+      await app.check(`document.querySelector("#settings").open`, "the Settings dialog");
+      const hint = await app.ev(`document.querySelector("#set-hint").textContent`);
+      assert.match(hint, /May carry arguments/);
+      assert.match(hint, /--acp --stdio/);
+      assert.match(hint, /Currently used:/);
+      assert.equal(await app.ev(`document.querySelector("#set-command").maxLength`), 4000);
     },
   },
   {
