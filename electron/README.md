@@ -231,8 +231,8 @@ an ordinary session: it appears in the list, you can open it, read what it did, 
   In the status bar, after **Approve:**, four checkboxes switch the kinds on and off: **Sub-session replies**,
   **Parent orders**, **Other sessions** and **My messages while busy**. All are on by default and stored per chat.
   A kind that is switched off is delivered at once, as before (the messages already held move to the queue, in
-  order); a message that arrives while its kind is off and the chat is closed is delivered when it is reopened,
-  not lost. This needs the broker of this version: use **Update and restart broker** in Settings, an older broker
+  order); with a kind switched off, its messages that were still waiting in the queue when the session closed are
+  delivered again when it opens, instead of being lost. This needs the broker of this version: use **Update and restart broker** in Settings, an older broker
   delivers these messages without holding them. Deleting a session in the app also makes the broker forget the
   messages kept for it.
 - **Permissions.** A child starts with no automatic approvals beyond the relay tools, and asks like any other session.
