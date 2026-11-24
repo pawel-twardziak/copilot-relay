@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { test } from "node:test";
 
-const { pickTemplate } = createRequire(import.meta.url)("../renderer/prompt-editor.js");
+const { pickTemplate, createPromptEditor } = createRequire(import.meta.url)("../renderer/prompt-editor.js");
 
 const rev = { text: "Review only." };
 
@@ -23,4 +23,63 @@ test("pickTemplate asks when the text was typed or edited", () => {
   assert.deepEqual(pickTemplate({ text: "Mine.", lastTemplateText: null }, rev), { ask: true });
   assert.deepEqual(pickTemplate({ text: "Other. Be brief.", lastTemplateText: "Other." }, rev), { ask: true });
   assert.deepEqual(pickTemplate({ text: "Review only. Be brief.", lastTemplateText: "Review only." }, rev), { ask: true });
+});
+
+// A DOM-less stand-in for the app's h: just enough element (attributes as properties, children, class lookup) for
+// createPromptEditor to build and the tests to read back.
+class FakeEl {
+  constructor(tag) {
+    this.tag = tag;
+    this.children = [];
+    this.className = "";
+    this.value = "";
+    this.hidden = false;
+    this.textContent = "";
+  }
+  setAttribute(k, v) {
+    if (k === "maxlength") this.maxLength = Number(v);
+    else this[k] = v;
+  }
+  addEventListener() {}
+  append(...kids) {
+    this.children.push(...kids);
+  }
+  focus() {}
+  querySelector(sel) {
+    const cls = sel.slice(1);
+    for (const c of this.children) {
+      if (!(c instanceof FakeEl)) continue;
+      if (c.className.split(" ").includes(cls)) return c;
+      const found = c.querySelector(sel);
+      if (found) return found;
+    }
+    return null;
+  }
+}
+function h(tag, attrs = {}, ...kids) {
+  const el = new FakeEl(tag);
+  for (const [k, v] of Object.entries(attrs ?? {})) {
+    if (v == null || v === false) continue;
+    if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (k === "class") el.className = v;
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const c of kids.flat()) if (c != null && c !== false) el.append(c);
+  return el;
+}
+const base = { defaultPart: "", childPart: null, templates: [], own: "", h };
+
+test("the command field shows the stored command and the Settings one as placeholder", () => {
+  const e = createPromptEditor({ ...base, command: { value: "cop --x", settings: "copilot" } });
+  const input = e.el.querySelector(".pe-command");
+  assert.equal(input.value, "cop --x");
+  assert.equal(input.placeholder, "Settings: copilot");
+  assert.equal(input.maxLength, 4000);
+  assert.equal(e.command(), "cop --x");
+});
+
+test("without command there is no field", () => {
+  const e = createPromptEditor(base);
+  assert.equal(e.el.querySelector(".pe-command"), null);
+  assert.equal(e.command(), "");
 });

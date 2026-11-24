@@ -20,10 +20,12 @@
   /**
    * The editor. defaultPart / childPart: the Settings parts (childPart null: not a child, that fold is not shown);
    * templates: [{ id, name, text }]; own: the text the area starts with; h: the app's DOM helper (app.js). The session
-   * stores the text, never which template it came from.
-   * @returns {{ el: HTMLElement, value(): string, focus(): void }}
+   * stores the text, never which template it came from. command ({ value, settings }, optional) adds the session's
+   * Copilot command field under the text area: empty means the Settings command, shown as the placeholder. Without
+   * it there is no field.
+   * @returns {{ el: HTMLElement, value(): string, command(): string, focus(): void }}
    */
-  function createPromptEditor({ defaultPart, childPart, templates, own, h }) {
+  function createPromptEditor({ defaultPart, childPart, templates, own, command, h }) {
     let lastTemplateText = null; // the text the last picked template put in, while it is untouched or edited
     let shown = ""; // the template the select shows ("" = — none —)
     let asked = null; // the template the Replace/Keep question is about
@@ -77,6 +79,11 @@
       if (!asked) select.value = "";
     });
 
+    const commandInput = command
+      ? h("input", { class: "pe-command", maxlength: "4000", spellcheck: "false", placeholder: `Settings: ${command.settings}` })
+      : null;
+    if (commandInput) commandInput.value = command.value ?? "";
+
     const root = h(
       "div",
       { class: "prompt-editor" },
@@ -85,15 +92,23 @@
       h("div", { class: "pe-template-row" }, h("span", {}, "Template:"), select),
       ask,
       area,
+      commandInput &&
+        h(
+          "label",
+          { class: "pe-command-row" },
+          h("span", {}, "Copilot command"),
+          commandInput,
+          h("span", { class: "hint" }, "Empty: the command from Settings. May carry arguments; the app adds --acp --stdio at the end."),
+        ),
     );
-    return { el: root, value: () => area.value, focus: () => area.focus() };
+    return { el: root, value: () => area.value, command: () => commandInput?.value ?? "", focus: () => area.focus() };
   }
 
   /**
    * Shows `editor` in #prompt-dialog with the title, the OK button's label and an optional note under the editor.
    * Resolves to the editor's text on OK (or Ctrl+Enter), null on Cancel or Esc; null at once while the dialog is
    * already open for another editor.
-   * onOk(text) (optional) runs on OK while the dialog stays open, OK and Cancel disabled and Esc ignored meanwhile: a
+   * onOk(text, command) (optional) runs on OK while the dialog stays open, OK and Cancel disabled and Esc ignored meanwhile: a
    * returned non-empty string is shown as the note (an error) and the dialog stays open with the text; anything
    * else (or nothing) closes it and resolves to the text. A throw counts as its message. Should the dialog close
    * while onOk runs anyway, the promise waits for onOk and resolves to the text only if onOk accepted it.
@@ -135,7 +150,7 @@
       running = (async () => {
         let error;
         try {
-          error = await onOk(editor.value());
+          error = await onOk(editor.value(), editor.command());
         } catch (e) {
           error = String(e?.message ?? e);
         }
