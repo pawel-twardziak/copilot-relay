@@ -56,6 +56,10 @@ clause; the comment of the field's Enter guard.
     rewrites with its own copy), so a check cannot create two children of one parent. `child-command-card` and
     `child-command-card-empty` are two checks for that reason.
 
+12. **"(a deadline, a signal)" in the doc comment of `startFailureText`** (`electron/copilot-command.mjs`) and
+    "(a timeout, a signal)" in its unit test mean a signal that ended the shell itself; the spec now says so, the
+    comments do not. Found by the re-review of the fixes (opus, high).
+
 ## Not verified
 
 - **Windows:** the new hint texts in the window; that `--allow-tool "shell(dotnet:*)"` with double quotes starts
