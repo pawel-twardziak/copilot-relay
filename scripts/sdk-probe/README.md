@@ -5,6 +5,26 @@ without losing anything the app does today (company agents, permissions, session
 cut, resume, usage)? Run it on the machine and in the repository the app is really used with: company agents,
 policies and the proxy only exist there.
 
+## For an agent asked to run the probe
+
+Run these four commands from the root of this repository, in this order:
+
+```
+git pull origin main
+cd scripts/sdk-probe
+npm install
+node probe.mjs --no-llm --cwd C:\sciezka\do\firmowego\repo
+```
+
+- `C:\sciezka\do\firmowego\repo` is a placeholder. Replace it with the path of the company repository the owner
+  names. If no path was given, ask for it; do not guess and do not use this repository.
+- `--no-llm` keeps the run free: no prompts are sent. Run without it only when the owner asks for the full run.
+- The run is finished when it prints `Done:` and the path of `report.md`. Show the owner the "Checks" table of
+  that report, and every FAIL with its details.
+- Do not commit or push anything: the results are ignored by git on purpose, and the report must be read by the
+  owner before it leaves the machine.
+- If a command fails, stop and report the exact error; "If it stops early" below lists the known causes.
+
 ## Run
 
 ```
