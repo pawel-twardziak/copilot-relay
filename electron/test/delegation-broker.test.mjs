@@ -100,6 +100,10 @@ test("createSessionInput refuses an over-long field", () => {
   const p = createSessionInput({ name: "a", task: "b", prompt: "x".repeat(20001) });
   assert.match(p.refused, /"prompt"/);
   assert.match(p.refused, /20000/);
+  for (const field of ["agent", "model"]) {
+    assert.deepEqual(createSessionInput({ name: "a", task: "b", [field]: "x".repeat(201) }), { refused: `Not sent: "${field}" is longer than 200 characters.` });
+    assert.equal(createSessionInput({ name: "a", task: "b", [field]: "x".repeat(200) }).request[field], "x".repeat(200));
+  }
 });
 
 test("createSessionInput passes the fields", () => {

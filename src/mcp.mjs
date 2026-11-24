@@ -15,10 +15,12 @@ const text = (t) => ({ content: [{ type: "text", text: t }] });
 const IDLE_MS = 30 * 60_000;
 const FOLDER_MAX = 4096;
 const PROMPT_MAX = 20000;
+const NAME_MAX = 200; // an agent or a model name
 
 /** Builds the session request from create_session's input, or refuses it (the model sees the reason). */
 export function createSessionInput({ name, task, agent, model, folder, prompt, context, command }) {
-  for (const [field, value, max] of [["folder", folder, FOLDER_MAX], ["prompt", prompt, PROMPT_MAX]])
+  const limits = [["agent", agent, NAME_MAX], ["model", model, NAME_MAX], ["folder", folder, FOLDER_MAX], ["prompt", prompt, PROMPT_MAX]];
+  for (const [field, value, max] of limits)
     if (typeof value === "string" && value.length > max) return { refused: `Not sent: "${field}" is longer than ${max} characters.` };
   let cmd = "";
   if (typeof command === "string" && command.trim()) {
