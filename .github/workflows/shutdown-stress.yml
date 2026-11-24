@@ -1,0 +1,37 @@
+# TEMPORARY (branch fix/broker-shutdown-flush only): runs the POST /api/shutdown test many times on Windows to
+# measure how often the answer is lost. Removed before the branch is merged.
+name: Shutdown stress
+
+on:
+  push:
+    branches: [fix/broker-shutdown-flush]
+
+permissions:
+  contents: read
+
+jobs:
+  stress:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            electron/package-lock.json
+      - run: npm ci
+      - run: npm ci --prefix electron --omit=dev
+      - name: POST /api/shutdown, 200 runs
+        shell: bash
+        run: |
+          fail=0
+          for i in $(seq 1 200); do
+            if ! node --test --test-name-pattern="POST /api/shutdown answers" electron/test/broker-shutdown.test.mjs > out.txt 2>&1; then
+              fail=$((fail+1))
+              if [ "$fail" -le 3 ]; then grep -E "error:|code:|cause|ECONN|UND_ERR" out.txt | head -8; fi
+            fi
+          done
+          echo "runs=200 failed=$fail"
+          test "$fail" -eq 0
