@@ -215,15 +215,26 @@ an ordinary session: it appears in the list, you can open it, read what it did, 
   already sent are still delivered. The parent is told the outcome; an open child is told when the link is made or ended. A card whose answer did not reach the
   broker keeps its buttons; one the broker no longer has (after a broker restart, or when one of the two sessions
   went away) says "This request is no longer pending."
-- **Replies from sub-sessions wait for you.** What a child sends its parent (`report_result`, or `send_message` to
-  its parent) does not start a turn in the parent. Only replies from *direct children* are held; messages from
-  other sessions arrive as before. They appear in a strip above the message box of the parent's chat, oldest first,
-  each with the child's name, the time and the first line (a click shows the whole text). **Approve** sends the
-  reply to the parent's queue, like a message you typed while it was busy; **✕** discards it. Until then the
-  broker keeps it, so it survives reloading the window; the list shows `⏸ N` next to the parent. The switch
-  **Approve replies from sub-sessions** in the chat's status bar (on by default, stored per chat) turns this off for
-  that chat: replies are then delivered at once, as before. This needs the broker of this version: use **Update and
-  restart broker** in Settings, an older broker delivers the replies without holding them.
+- **Messages wait for you.** A message that arrives in the chat of an open session does not start a turn there; it waits
+  in a list above the message box, oldest first, each row with the sender's name, the time and the first line (a click
+  shows the whole text). There are four kinds, each with its own list:
+  **Replies from sub-sessions (N)** (what a direct child sends its parent with `report_result` or `send_message`),
+  **Orders from parent (N)** (a `send_message` from the session's parent), **Other sessions (N)** (a `send_message`
+  from any other session) and **Your messages (N)** (a message of yours that arrives while a turn is running: typed
+  in the chat's own message box, or sent from the relay GUI; a message of yours to an idle session starts a turn as
+  before). The first task of a new sub-session is never held. **Approve** puts the message in the chat's queue, like a
+  message you typed while it was busy (it becomes a prompt when the turn ends); **✕** discards it. The list shows
+  `⏸ N` next to the session. Your own messages are held only during a turn, and after it they wait for **Approve**
+  like the rest; the ones you typed live only in the window and are lost when it closes. All other messages are kept by
+  the broker until the chat takes them (the prompt starts, or ✕), so they survive reloading the window and
+  reopening the session.
+  In the status bar, after **Approve:**, four checkboxes switch the kinds on and off: **Sub-session replies**,
+  **Parent orders**, **Other sessions** and **My messages while busy**. All are on by default and stored per chat.
+  A kind that is switched off is delivered at once, as before (the messages already held move to the queue, in
+  order); a message that arrives while its kind is off and the chat is closed is delivered when it is reopened,
+  not lost. This needs the broker of this version: use **Update and restart broker** in Settings, an older broker
+  delivers these messages without holding them. Deleting a session in the app also makes the broker forget the
+  messages kept for it.
 - **Permissions.** A child starts with no automatic approvals beyond the relay tools, and asks like any other session.
   While it waits, it has a `!` in the list and an OS notification fires if the window is not focused. Nothing is
   answered for you.

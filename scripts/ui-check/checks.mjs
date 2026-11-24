@@ -1517,6 +1517,137 @@ export const checks = [
     },
   },
   {
+    // held messages of every kind through a real broker: an order of the parent and a message of an unlinked session
+    // are held in the child's view (no turn) and counted in the broker's heldByKind, approving acknowledges, a reopened
+    // view shows what is still unacknowledged, a message of the user sent from the relay GUI (POST /api/send) starts a
+    // turn when the session is idle and is held during a turn, a discard acknowledges, and deleting an unlinked session
+    // in the app makes the broker forget its outbox items. Parent = the driver's session, child = a second one in
+    // <app.dir>/child, the third one in <app.dir>/<a UUID> is not linked. The scenario's second prompt of a session waits
+    // for a permission (a running turn).
+    name: "held-kinds-e2e",
+    modes: ["off"],
+    scenario: path.join(FIXTURES, "held-kinds-scenario.mjs"),
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      const PARENT = "scripted-work";
+      const CHILD = "scripted-child";
+      const OTHER = "bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee"; // a UUID: deleting a session needs one (the scripted agent takes a UUID folder name as the id)
+      const C = `views.get(${JSON.stringify(CHILD)})`;
+      const O = `views.get(${JSON.stringify(OTHER)})`;
+      await app.newSession();
+      const childDir = path.join(app.dir, "child");
+      const otherDir = path.join(app.dir, OTHER);
+      mkdirSync(childDir);
+      mkdirSync(otherDir);
+      await app.startSession(childDir);
+      await app.startSession(otherDir);
+      await app.ev(`activate(${JSON.stringify(PARENT)})`);
+      const connected = (v) => `(() => { const v = ${v}; return !!v?.relayName && !v.relayChip.hidden && !v.relayChip.classList.contains("off"); })()`;
+      for (const [v, what] of [[V, "the parent"], [C, "the child"], [O, "the other session"]]) await app.check(connected(v), `${what} to connect to the broker`);
+      const childName = await app.ev(`${C}.relayName`);
+      const otherName = await app.ev(`${O}.relayName`);
+      const heldByKind = async () => (await (await fetch(`${app.broker.url}/api/links`)).json()).heldByKind?.[`cli:${CHILD}`] ?? {};
+      // the broker's counts of the child per kind (a kind without an item counts 0); `want` names the non-zero ones
+      const heldIs = (want, what) => until(async () => {
+        const got = await heldByKind();
+        return ["child", "parent", "other"].every((k) => (got[k] ?? 0) === (want[k] ?? 0));
+      }, what);
+      const head = (kind) => app.ev(`${C}.el.querySelector('.held-group[data-kind="${kind}"] .held-head')?.textContent ?? null`);
+      const turnsExpr = (v) => `${v}.log.querySelectorAll(":scope > .msg.user, :scope > .msg.relay").length`;
+      /** Types into another session's message box and presses Enter (the driver's send is for its own session). */
+      const typeIn = async (v, text) => {
+        const before = await app.ev(turnsExpr(v));
+        await app.ev(`(() => { const v = ${v}; v.input.value = ${JSON.stringify(text)}; v.input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); })()`);
+        await app.check(`${turnsExpr(v)} > ${before}`, "the message to be sent");
+      };
+      const answerIn = async (v) => {
+        await app.check(`!!${v}.el.querySelector(".perm:not(.done) .opts button.primary")`, "a permission card");
+        await app.ev(`${v}.el.querySelector(".perm:not(.done) .opts button.primary").click()`);
+        await app.check(`!${v}.el.querySelector(".perm:not(.done)")`, "the permission to be answered");
+      };
+      const post = (text) => fetch(`${app.broker.url}/api/send`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ to: childName, text }) });
+
+      // 1. link the child to the parent
+      await app.send(`adopt_session ${childName}`);
+      await app.check(`!!${V}.el.querySelector(".perm.link:not(.done)")`, "the link card");
+      await app.ev(`${V}.el.querySelector(".perm.link .opts button.primary").click()`);
+      await app.check(`${C}.parentSessionId === ${JSON.stringify(PARENT)}`, "the child's parent");
+      await app.idle();
+      assert.equal(await app.ev(turnsExpr(C)), 0, "the child has had no turn");
+
+      // 2. an order of the parent is held in the child: no turn, counted on the broker
+      await app.send(`send_message ${childName} order one`);
+      await app.check(`${C}.el.querySelectorAll(".held-row").length === 1`, "the held order");
+      assert.equal(await head("parent"), "Orders from parent (1)");
+      await heldIs({ parent: 1 }, "the broker to count the held order");
+      assert.equal(await app.ev(`${C}.busy`), false, "no turn in the child");
+      assert.equal(await app.ev(turnsExpr(C)), 0, "nothing added to the child's log");
+      await answerIn(V); // the parent's own turn waits for a permission
+      await app.idle();
+
+      // 3. a message of the unlinked session: its own list
+      await typeIn(O, `send_message ${childName} hello`);
+      await app.check(`!!${C}.el.querySelector('.held-group[data-kind="other"]')`, "the other session's row");
+      assert.equal(await head("other"), "Other sessions (1)");
+      assert.equal(await app.ev(`${C}.el.querySelector('.held-group[data-kind="other"] .held-text').textContent.trim()`), "hello");
+      await heldIs({ parent: 1, other: 1 }, "the broker to count both");
+      assert.equal(await app.ev(turnsExpr(C)), 0, "still no turn in the child");
+
+      // 4. approve the order: the child's turn starts, then the broker's count of orders is 0
+      await app.ev(`${C}.el.querySelector('.held-group[data-kind="parent"] .held-approve').click()`);
+      await app.check(`${C}.log.querySelectorAll(":scope > .msg.relay").length === 1`, "the approved order's turn");
+      await app.idle();
+      await heldIs({ other: 1 }, "the broker to count only the other message after the approval");
+      assert.equal(await head("parent"), null);
+
+      // 5. the view closed and opened again: the unacknowledged message of the other session is back, in the same list
+      await app.ev(`closeView(${JSON.stringify(CHILD)})`);
+      await app.check(`!views.has(${JSON.stringify(CHILD)})`, "the child's view to close");
+      await app.ev(`openSession({ sessionId: ${JSON.stringify(CHILD)}, cwd: ${JSON.stringify(childDir)} })`, "the child to reopen");
+      await app.check(`!!${C} && !!${C}.el.querySelector('.held-group[data-kind="other"]')`, "the other session's row after the reopen");
+      assert.equal(await head("other"), "Other sessions (1)");
+      assert.equal(await app.ev(`${C}.el.querySelectorAll(".held-row").length`), 1, "that row only");
+      await app.check(`!${C}.busy && !${C}.resuming`, "the reopened child");
+
+      // a message of the child to the third session stays in the broker's outbox unacknowledged (step 8 deletes that
+      // unlinked session); it is the child's second prompt, so the next turn of the child is the one that waits
+      const outboxFor = (key) => Object.values(JSON.parse(readFileSync(path.join(app.dir, "relay-delegations.json"), "utf8")).outbox ?? {}).filter((i) => i.toKey === key);
+      await typeIn(C, `send_message ${otherName} for you`);
+      await app.check(`${O}.el.querySelectorAll(".held-row").length === 1`, "the message held in the other session");
+      await until(async () => outboxFor(`cli:${OTHER}`).length === 1, "the item in the broker's outbox");
+      await app.idle(); // the parent's view: the child's turn ends meanwhile
+      await app.check(`!${C}.busy`, "the child's turn to end");
+
+      // 6. the relay GUI's message: an idle session starts a turn (nothing held); during a turn it is held
+      const before = await app.ev(turnsExpr(C));
+      assert.equal((await post("from the gui")).status, 204);
+      await app.check(`${C}.prompting && ${turnsExpr(C)} > ${before}`, "the GUI message's turn");
+      assert.equal(await head("user"), null, "an idle session holds nothing of the user");
+      assert.equal((await post("second from the gui")).status, 204);
+      await app.check(`!!${C}.el.querySelector('.held-group[data-kind="user"]')`, "the held message during the turn");
+      assert.equal(await head("user"), "Your messages (1)");
+      assert.equal(await app.ev(`${C}.el.querySelector('.held-group[data-kind="user"] .held-text').textContent.trim()`), "second from the gui");
+      assert.equal((await heldByKind()).user, undefined, "the broker never counts the user kind");
+      await answerIn(C);
+      await app.idle();
+      assert.equal(await head("user"), "Your messages (1)", "it waits for Approve after the turn");
+
+      // 7. discard the other session's message: no `other` count on the broker
+      await app.ev(`${C}.el.querySelector('.held-group[data-kind="other"] .held-discard').click()`);
+      await app.check(`!${C}.el.querySelector('.held-group[data-kind="other"]')`, "the other row to go");
+      await heldIs({}, "the broker to have no held count left");
+
+      // 8. deleting the third (unlinked) session in the app, with the child's message still unacknowledged in the
+      // broker's outbox, makes the broker forget the item
+      assert.equal(outboxFor(`cli:${OTHER}`).length, 1, "the item is still in the outbox");
+      // the whole flow of the delete button (its confirmation answered yes): main deletes, then the broker forgets
+      await app.ev(`(() => { window.confirm = () => true; window.__deleted = deleteSessionFlow({ sessionId: ${JSON.stringify(OTHER)}, cwd: ${JSON.stringify(otherDir)}, title: "t" }); })()`);
+      await app.check(`!views.has(${JSON.stringify(OTHER)})`, "the deleted session's view to go");
+      await until(async () => outboxFor(`cli:${OTHER}`).length === 0, "the broker to forget the deleted session's outbox items");
+    },
+  },
+  {
     // a size change alone (nothing appended): a following log, and a following panel with an open entry, keep their
     // bottoms when the window gets narrower (the log's text reflows) and lower
     name: "resize-keeps-bottom",

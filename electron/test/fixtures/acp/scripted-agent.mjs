@@ -17,7 +17,7 @@
 // Every prompt (as a user_message_chunk, as Copilot replays it) and every update sent is recorded in
 // <cwd>/.scripted-agent.json; session/load sends them again, in order, before its answer. The scenario's optional
 // load: { delay: ms, error: message } holds that answer back for delay ms, and makes it that error (after the replay).
-// The session id is scripted-<folder name>, or $SCRIPTED_SESSION_ID (a UUID, for checks that need a session Copilot's
+// The session id is scripted-<folder name> (the folder name itself when that is a UUID), or $SCRIPTED_SESSION_ID (a UUID, for checks that need a session Copilot's
 // history files can belong to); session/load takes the id it is asked for (a fork's).
 // The custom instructions the process was started with (the text, trimmed, of every *.instructions.md in
 // <dir>/.github/instructions/ of each dir in $COPILOT_CUSTOM_INSTRUCTIONS_DIRS, as Copilot reads them) are appended
@@ -38,8 +38,9 @@ const { prompts = [], load = {}, uniqueIds = false } = process.env.SCRIPTED_SCEN
 if (process.env.SCRIPTED_ARGV_FILE) appendFileSync(process.env.SCRIPTED_ARGV_FILE, JSON.stringify(process.argv.slice(2)) + "\n");
 
 const send = (msg) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...msg }) + "\n");
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const sessionIdOf = (cwd) => process.env.SCRIPTED_SESSION_ID || `scripted-${path.basename(cwd)}`;
+const sessionIdOf = (cwd) => process.env.SCRIPTED_SESSION_ID || (UUID.test(path.basename(cwd)) ? path.basename(cwd) : `scripted-${path.basename(cwd)}`);
 
 /** The instructions files Copilot would read at this start, in the order of the variable's dirs and by file name. */
 function startInstructions() {
