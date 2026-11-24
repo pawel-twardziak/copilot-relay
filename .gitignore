@@ -5,3 +5,4 @@ workspace/*
 electron/dist/
 electron/relay-client.mjs
 .superpowers/
+scripts/sdk-probe/results/
