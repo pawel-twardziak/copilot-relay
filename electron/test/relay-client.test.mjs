@@ -103,7 +103,9 @@ test("fetchLinkState returns the links and the held counts ({} when the broker s
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   t.after(() => server.close());
   const c = new RelayClient({ url: `http://127.0.0.1:${server.address().port}`, key: "k", cwd: ".", onMessage: () => {} });
-  assert.deepEqual(await c.fetchLinkState(), { links: [], held: { "cli:p": 1 } });
-  body = { links: [] };
-  assert.deepEqual(await c.fetchLinkState(), { links: [], held: {} });
+  assert.deepEqual(await c.fetchLinkState(), { links: [], held: { "cli:p": 1 }, heldByKind: {} });
+  body = { links: [], held: { "cli:p": 1 }, heldByKind: { "cli:p": { child: 1, parent: 0, other: 0 } } };
+  assert.deepEqual(await c.fetchLinkState(), { links: [], held: { "cli:p": 1 }, heldByKind: { "cli:p": { child: 1, parent: 0, other: 0 } } });
+  body = { links: [], heldByKind: [] };
+  assert.deepEqual(await c.fetchLinkState(), { links: [], held: {}, heldByKind: {} });
 });

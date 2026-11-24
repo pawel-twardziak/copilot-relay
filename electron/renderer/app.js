@@ -1227,7 +1227,7 @@ class SessionView {
   /** The switch: off sends every held reply to the queue (oldest first); on moves nothing back. */
   async setHoldReplies(on) {
     try {
-      await api.setHoldReplies(this.sessionId, on);
+      await api.setHoldReplies(this.sessionId, "child", on);
     } catch (e) {
       this.error(`Could not save the setting: ${e.message}`);
       this.holdSwitch.checked = this.holdReplies; // the file was not written: the switch stays as it was
@@ -2685,8 +2685,8 @@ class SessionView {
   loadHoldSwitch() {
     api
       .getHoldReplies(this.sessionId)
-      .then((on) => {
-        if (this.holdTouched || on !== false) return;
+      .then((hold) => {
+        if (this.holdTouched || hold?.child !== false) return;
         this.holdReplies = false;
         for (const item of [...this.held]) this.approveHeld(item); // held while the answer was on its way
         this.renderHeld();
