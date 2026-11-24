@@ -94,7 +94,8 @@
     if (commandInput) {
       commandInput.value = command.value ?? "";
       // a text input lets plain Enter submit the form through its first submit button, which is Cancel: it does
-      // nothing here (Ctrl/Cmd+Enter still reaches the dialog's own handler and accepts, as in the text area)
+      // nothing here (Ctrl/Cmd+Enter still reaches the dialog's own handler and accepts, as in the text area). On a
+      // child's approval card there is no form: Enter does nothing there either way.
       commandInput.addEventListener("keydown", (e) => {
         if (e.key === "Enter" && !e.ctrlKey && !e.metaKey && !e.isComposing) e.preventDefault();
       });

@@ -2489,7 +2489,7 @@ export const checks = [
       const note = await app.ev(`${D}.querySelector("#prompt-note").textContent`);
       assert.match(note, /copilot exited \(3\)/);
       assert.match(note, /bad-flag-here/);
-      assert.match(note, /The command stopped with the message above\. Check the program and its arguments; if they are right, check that you are signed in/);
+      assert.match(note, /The command stopped \(see above\)\. Check the program and its arguments; if they are right, check that you are signed in/);
       assert.match(note, /This is the command from Settings\./);
       assert.doesNotMatch(note, /Otherwise install it/);
       assert.doesNotMatch(note, /On Windows/);

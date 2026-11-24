@@ -12,13 +12,14 @@ const NOT_FOUND = "The program was not found, or cannot be run.";
 const WHERE = {
   session: "This is this session's own command. Change it in the session's Setup.",
   settings: "This is the command from Settings. Change it there, or give the session its own Copilot command.",
-  parent: "This is the command from the child's approval card, which starts as the parent session's command. Change it on the card, or in the parent's Setup.",
+  parent: "This is the command from the child's approval card, which starts as the parent session's command. Change it on the next card, or in the parent's Setup.",
 };
 // the command ran and ended with a message of its own (an argument it does not take, a shell error): the remedy is
 // the command. cmd.exe does not treat ' as a quote, so a line written for a POSIX shell fails this way on Windows.
+// On Windows a program that is not there ends cmd with an ordinary exit code too, so the hint names that as well.
 const stoppedHint = (platform) =>
-  "The command stopped with the message above. Check the program and its arguments" +
-  (platform === "win32" ? ' (on Windows only double quotes "…" group an argument)' : "") +
+  "The command stopped (see above). " +
+  (platform === "win32" ? 'Check that the program is installed, and its arguments (on Windows only double quotes "…" group an argument)' : "Check the program and its arguments") +
   "; if they are right, check that you are signed in (`copilot login` in a terminal).";
 
 /** The trimmed command (an empty one means "none"), or why it is refused. */
