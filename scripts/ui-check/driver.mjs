@@ -73,18 +73,27 @@ async function stopChild(child) {
   await exited;
 }
 
-/** Brokers (server.mjs) with this launch's names file in their environment: the driver's, and those the app started
- *  by itself (RelayClient's #autostart, detached: outside the app's process group). Linux (/proc), like xvfb-run. */
-function brokersOf(namesFile) {
+/** The processes running `script` (an argument ending with it) with this launch's names file in their environment.
+ *  Linux (/proc), like xvfb-run. */
+function launchProcesses(namesFile, script) {
   const pids = [];
   for (const pid of readdirSync("/proc").filter((d) => /^\d+$/.test(d))) {
     try {
-      if (!readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").some((a) => a.endsWith("server.mjs"))) continue;
+      if (!readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").some((a) => a.endsWith(script))) continue;
       if (readFileSync(`/proc/${pid}/environ`, "utf8").split("\0").includes(`COPILOT_RELAY_NAMES_FILE=${namesFile}`)) pids.push(Number(pid));
     } catch {} // gone meanwhile, or not ours to read
   }
   return pids;
 }
+
+/** Brokers (server.mjs) of this launch: the driver's, and those the app started by itself (RelayClient's #autostart,
+ *  detached: outside the app's process group). */
+const brokersOf = (namesFile) => launchProcesses(namesFile, "server.mjs");
+
+/** The scripted agents of this launch. Each leads a process group of its own (AcpConnection starts it detached), so
+ *  the kill of the app's group does not reach one the app left running. Only the agent matches, not the shell that
+ *  started it (`sh -c '…scripted-agent.mjs' --acp --stdio`); the shell exits with it. */
+const agentsOf = (namesFile) => launchProcesses(namesFile, "scripted-agent.mjs");
 
 /** Starts this repo's server.mjs with env (port and state files in it) and a config file that does not exist;
  *  resolves its process once it listens. */
@@ -223,6 +232,7 @@ export async function launch({ scenario, settings = {}, width = 1280, height = 8
       process.kill(-proc.pid, "SIGKILL"); // what is left of the group (Electron's helpers, the agents)
     } catch {}
     if (!gone) await exited;
+    for (const pid of agentsOf(namesFile)) await stopPid(pid);
     // the driver's broker, and any the app started by itself: none outlives the launch
     if (brokerProc) await stopChild(brokerProc);
     for (const pid of brokersOf(namesFile)) await stopPid(pid);

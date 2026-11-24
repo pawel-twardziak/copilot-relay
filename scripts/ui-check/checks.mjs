@@ -273,14 +273,15 @@ async function stubEditCount(app) {
   })()`);
   assert.equal(ok, true, "startEdit calls api.countFrom once");
 }
-/** The pids of the scripted agents running in the launch's work folder (the session's Copilot processes). */
+/** The pids of the scripted agents running in the launch's work folder (the session's Copilot processes). Only the
+ *  agent itself (`node …/scripted-agent.mjs`) counts, not the shell that started it (`sh -c '…scripted-agent.mjs' …`). */
 function agentPids(app) {
   const work = path.join(app.dir, "work");
   return readdirSync("/proc")
     .filter((p) => /^\d+$/.test(p))
     .filter((p) => {
       try {
-        return readlinkSync(`/proc/${p}/cwd`) === work && readFileSync(`/proc/${p}/cmdline`, "utf8").includes("scripted-agent.mjs");
+        return readlinkSync(`/proc/${p}/cwd`) === work && readFileSync(`/proc/${p}/cmdline`, "utf8").split("\0")[1]?.endsWith("scripted-agent.mjs");
       } catch {
         return false; // gone, or not ours
       }
