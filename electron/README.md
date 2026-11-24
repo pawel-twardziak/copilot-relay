@@ -259,7 +259,9 @@ an ordinary session: it appears in the list, you can open it, read what it did, 
   broker** in Settings. An older broker delivers those messages without holding them; messages typed in the chat's
   own message box are still held, and replies from sub-sessions are held as before. Deleting a session in the app
   also makes the broker forget the messages kept for it; they are not delivered again.
-- **Permissions.** A child starts with no automatic approvals beyond the relay tools, and asks like any other session.
+- **Permissions.** A child starts with no automatic approvals beyond the relay tools, and asks like any other session, unless its
+  Copilot command allows more (a flag the parent proposed, or the parent's own command, which the child inherits; see
+  above).
   While it waits, it has a `!` in the list and an OS notification fires if the window is not focused. Nothing is
   answered for you.
 - **No isolation.** By default a child works in **the parent's folder and on its branch**; the parent can propose
