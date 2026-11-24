@@ -269,6 +269,7 @@ dialog label { display: flex; flex-direction: column; gap: 6px; }
 #prompt-note.err { color: var(--err); }
 /* the editor on a child's approval card; answered, its controls are disabled */
 .perm .delegation-prompt { margin-bottom: 8px; }
+.perm .delegation-error { color: var(--err); margin: 0 0 8px; }
 .perm .delegation-prompt .prompt-editor { margin-bottom: 0; }
 /* Settings, "Prompts": the two parts and one row per template (name and Delete, the text below) */
 #set-prompt-default, #set-prompt-child { resize: vertical; line-height: 1.4; }

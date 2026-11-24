@@ -16,7 +16,7 @@ test("normalizeCommand refuses what is not one line of text", () => {
 });
 test("resolveCommand: own, then Settings, then $COPILOT_PATH, then copilot", () => {
   assert.deepEqual(resolveCommand({ own: "a", settings: "b", envPath: "c" }), { command: "a", source: "session" });
-  assert.deepEqual(resolveCommand({ own: "a", ownSource: "parent" }), { command: "a", source: "parent" });
+  assert.deepEqual(resolveCommand({ own: "a", ownSource: "card" }), { command: "a", source: "card" });
   assert.deepEqual(resolveCommand({ own: "", settings: "b", envPath: "c" }), { command: "b", source: "settings" });
   assert.deepEqual(resolveCommand({ envPath: "c" }), { command: "c", source: "settings" });
   assert.deepEqual(resolveCommand({}), { command: "copilot", source: "settings" });
@@ -47,8 +47,9 @@ test("startFailureText names the command and where it is set", () => {
   const base = { command: "cop --x", detail: "copilot exited (127)", loginHint: "LOGIN", generalHint: "GENERAL" };
   assert.equal(startFailureText({ ...base, source: "session", notFound: true, login: false }),
     'Could not start "cop --x": copilot exited (127)\n\nThe program was not found, or cannot be run. This is this session\'s own command. Change it in the session\'s Setup.');
-  assert.equal(startFailureText({ ...base, source: "parent", notFound: false, login: false }),
-    'Could not start "cop --x": copilot exited (127)\n\nGENERAL This is the command from the child\'s approval card, which starts as the parent session\'s command. Change it on the next card, or in the parent\'s Setup.');
+  // a child's start fails on its approval card, which stays open for another answer
+  assert.equal(startFailureText({ ...base, source: "card", notFound: false, login: false }),
+    'Could not start "cop --x": copilot exited (127)\n\nGENERAL This is the command from the child\'s approval card. Change it on the card and approve again, or reject the request.');
   assert.equal(startFailureText({ ...base, source: "settings", notFound: false, login: true }), 'Could not start "cop --x": copilot exited (127)\n\nLOGIN');
 });
 // Copilot (or the shell) ran the command and it ended with a message of its own, e.g. an argument it does not take:

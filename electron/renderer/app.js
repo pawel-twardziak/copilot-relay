@@ -2093,23 +2093,37 @@ class SessionView {
    *  The prompt editor between the task and the buttons takes the child's own part and its Copilot command (Approve
    *  sends them, Reject not); Approve waits until the editor has its Settings parts. `command` is this session's own
    *  command, from main's store (not model-written): the field starts with it, so a card left alone gives the child
-   *  what its parent has. */
+   *  what its parent has. A child whose Copilot does not start leaves the card open with the reason, for another
+   *  command and a second Approve, or a Reject: main keeps the request and has told the parent nothing. */
   delegationCard({ requestId, name, task, agent, model, cwd, command = "" }) {
     this.flush();
     const field = (label, value) => [h("dt", {}, label), h("dd", {}, value)];
     let editor = null;
     const promptSlot = h("div", { class: "delegation-prompt" }, h("p", { class: "hint" }, "Loading the prompt parts…"));
+    const errorEl = h("p", { class: "hint delegation-error", hidden: true });
     const answer = async (approved) => {
       this.closeCard(card);
       const own = approved ? (editor?.value() ?? "") : "";
       // without the editor (Settings could not be read) the child takes the parent's command, as the field would show
       const childCommand = editor ? editor.command() : command;
-      for (const c of promptSlot.querySelectorAll("textarea, select, button, input")) c.disabled = true; // answered: nothing to edit
+      // while it is answered nothing is edited; only what was usable is given back if the card takes another answer
+      const frozen = [...promptSlot.querySelectorAll("textarea, select, button, input")].filter((c) => !c.disabled);
+      for (const c of frozen) c.disabled = true;
+      errorEl.hidden = true;
       opts.replaceChildren(h("span", {}, approved ? "Creating the session…" : "Rejecting…"));
       let result;
       try {
-        const stillOpen = await api.answerDelegation(requestId, approved, own, childCommand);
-        result = !stillOpen ? "This request is no longer open." : approved ? "→ Approved" : "→ Rejected";
+        const res = await api.answerDelegation(requestId, approved, own, childCommand);
+        if (res?.outcome === "failed" && res.retry) {
+          // the child's Copilot did not start: the request is still open in main, and so is the card
+          for (const c of frozen) c.disabled = false;
+          errorEl.textContent = res.text;
+          errorEl.hidden = false;
+          opts.replaceChildren(approveBtn, rejectBtn);
+          this.openCard(card);
+          return;
+        }
+        result = !res ? "This request is no longer open." : res.outcome === "failed" ? `Not created: ${res.text}` : approved ? "→ Approved" : "→ Rejected";
       } catch (e) {
         result = `Could not answer: ${e.message}`;
       }
@@ -2117,7 +2131,8 @@ class SessionView {
       opts.replaceChildren(h("span", {}, result));
     };
     const approveBtn = h("button", { class: "primary", disabled: true, onclick: () => answer(true) }, "Approve");
-    const opts = h("div", { class: "opts" }, approveBtn, h("button", { onclick: () => answer(false) }, "Reject"));
+    const rejectBtn = h("button", { onclick: () => answer(false) }, "Reject");
+    const opts = h("div", { class: "opts" }, approveBtn, rejectBtn);
     const card = h(
       "div",
       { class: "perm delegation" },
@@ -2125,6 +2140,7 @@ class SessionView {
       h("dl", { class: "fields" }, field("Name", name), field("Agent", agent || "default"), field("Model", model || "inherited"), field("Folder", cwd)),
       h("div", { class: "task" }, task),
       promptSlot,
+      errorEl,
       opts,
     );
     api
