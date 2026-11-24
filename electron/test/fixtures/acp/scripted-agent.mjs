@@ -11,7 +11,8 @@
 //                        The prompt is one line, or the last paragraph after a waiting relay notice. The tool's text
 //                        reply is sent as an agent message chunk; any other prompt (a relay notice "[from relay]…")
 //                        does nothing
-//                        "create_session <name> <task…>" calls create_session with { name, task }
+//                        "create_session <name> <task…>" calls create_session with { name, task }, and
+//                        "create_session_json <json>" calls it with the parsed object
 // session/cancel (Stop) ends the running prompt as Copilot does: it answers "cancelled" (if not answered yet) and
 // plays none of its remaining steps; a pause or an unanswered permission request it waits on ends at once.
 // Every prompt (as a user_message_chunk, as Copilot replays it) and every update sent is recorded in
@@ -25,13 +26,16 @@
 // process that opens none, like the app's lister, writes nothing). session/new keeps the starts of the folder's file.
 // The scenario's optional uniqueIds: true gives every session/new after the first one in a folder its own id
 // (scripted-<folder>-2, …), for a delegated child, which starts in its parent's folder.
+// The scenario's optional configOptions: the session's config options (an array, or (cwd) => array for options per
+// folder), returned by session/new and session/load; session/set_config_option({ configId, value }) sets that
+// option's currentValue and answers { configOptions }. Without it the session has none.
 // Unknown arguments (--acp --stdio, the context tier…) are ignored.
 import { appendFileSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 
-const { prompts = [], load = {}, uniqueIds = false } = process.env.SCRIPTED_SCENARIO ? (await import(pathToFileURL(process.env.SCRIPTED_SCENARIO).href)).default : {};
+const { prompts = [], load = {}, uniqueIds = false, configOptions = [] } = process.env.SCRIPTED_SCENARIO ? (await import(pathToFileURL(process.env.SCRIPTED_SCENARIO).href)).default : {};
 
 // $SCRIPTED_ARGV_FILE: the arguments this process was started with, one JSON line per start (a check reads what
 // reached the agent through the command line, the app's --acp --stdio included)
@@ -57,7 +61,7 @@ function startInstructions() {
 }
 const started = { instructions: startInstructions() }; // read at start: the folder may be gone at exit
 
-let session = null; // { id, file, updates, starts, mcpServers }
+let session = null; // { id, file, updates, starts, mcpServers, configOptions }
 let nextId = 0;
 const answers = new Map(); // id of a request we sent -> resolve
 let cancelPlaying = () => {}; // session/cancel: ends the prompt being played (play)
@@ -69,7 +73,8 @@ function open(cwd, fresh, mcpServers, id = sessionIdOf(cwd)) {
   const updates = fresh ? [] : kept.updates;
   const starts = Array.isArray(kept?.starts) ? kept.starts : [];
   if (!session) starts.push(started); // once per process: its first session
-  session = { id, file, updates, starts, mcpServers: mcpServers ?? [] };
+  const options = typeof configOptions === "function" ? configOptions(cwd) : configOptions;
+  session = { id, file, updates, starts, mcpServers: mcpServers ?? [], configOptions: structuredClone(options ?? []) };
   save();
 }
 const save = () => writeFileSync(session.file, JSON.stringify({ sessionId: session.id, updates: session.updates, starts: session.starts }, null, 2));
@@ -91,13 +96,22 @@ function ask(method, params) {
 /** { relay: "prompt" }: the tool's text reply for a prompt that names a relay tool (see the header), else null. */
 async function relayTool(text) {
   // a relay notice that was waiting is put in front of the next prompt ("[from relay]…\n\n<prompt>"): the last paragraph counts
-  const m = /(?:^|\n\n)(adopt_session|release_session|send_message|report_result|create_session) ([^\n]*)$/.exec(text);
+  const m = /(?:^|\n\n)(adopt_session|release_session|send_message|report_result|create_session_json|create_session) ([^\n]*)$/.exec(text);
   if (!m) return null;
+  let tool = m[1];
   let args = { name: m[2] };
   if (m[1] === "report_result") args = { text: m[2] };
   if (m[1] === "create_session") {
     const [name, ...rest] = m[2].split(" ");
     args = { name, task: rest.join(" ") };
+  }
+  if (m[1] === "create_session_json") {
+    tool = "create_session";
+    try {
+      args = JSON.parse(m[2]);
+    } catch (e) {
+      return `scripted agent: create_session_json: ${e.message}`;
+    }
   }
   if (m[1] === "send_message") {
     const [to, ...rest] = m[2].split(" ");
@@ -112,10 +126,10 @@ async function relayTool(text) {
   try {
     const headers = Object.fromEntries((server.headers ?? []).map((h) => [h.name, h.value]));
     await mcp.connect(new StreamableHTTPClientTransport(new URL(server.url), { requestInit: { headers } }));
-    const r = await mcp.callTool({ name: m[1], arguments: args });
+    const r = await mcp.callTool({ name: tool, arguments: args });
     return r.content.filter((c) => c.type === "text").map((c) => c.text).join("");
   } catch (e) {
-    return `scripted agent: ${m[1]} failed: ${e.message}`; // in the chat, so the check that waits for the reply shows it
+    return `scripted agent: ${tool} failed: ${e.message}`; // in the chat, so the check that waits for the reply shows it
   } finally {
     await mcp.close().catch(() => {});
   }
@@ -168,14 +182,20 @@ const handlers = {
       if (used > 0) id = `${id}-${used + 1}`;
     }
     open(cwd, true, mcpServers, id);
-    return { sessionId: session.id, configOptions: [] };
+    return { sessionId: session.id, configOptions: session.configOptions };
   },
   "session/load": async ({ sessionId, cwd = process.cwd(), mcpServers } = {}) => {
     open(cwd, false, mcpServers, sessionId || sessionIdOf(cwd));
     for (const u of session.updates) update(u, false);
     if (load.delay) await sleep(load.delay);
     if (load.error) throw new Error(load.error);
-    return { configOptions: [] };
+    return { configOptions: session.configOptions };
+  },
+  "session/set_config_option": ({ configId, value } = {}) => {
+    const option = session.configOptions.find((o) => o.id === configId);
+    if (!option) throw new Error(`no config option ${configId}`);
+    option.currentValue = value;
+    return { configOptions: session.configOptions };
   },
 };
 

@@ -255,6 +255,9 @@ dialog label { display: flex; flex-direction: column; gap: 6px; }
 #prompt-dialog { width: 640px; max-width: calc(100vw - 32px); }
 #prompt-dialog h2 { overflow-wrap: anywhere; }
 .prompt-editor { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+.folder-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.folder-path { flex: 1; min-width: 0; overflow-wrap: anywhere; user-select: text; font-family: var(--mono, monospace); font-size: 12.5px; }
+.folder-change { flex: none; }
 .pe-fold > summary { cursor: pointer; color: var(--muted); font-size: 12.5px; }
 .pe-fold > pre, .pe-fold > .hint { margin: 6px 0 0; }
 .pe-fold > pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); user-select: text; }
@@ -271,6 +274,15 @@ dialog label { display: flex; flex-direction: column; gap: 6px; }
 .perm .delegation-prompt { margin-bottom: 8px; }
 .perm .delegation-error { color: var(--err); margin: 0 0 8px; overflow-wrap: anywhere; }
 .perm .delegation-prompt .prompt-editor { margin-bottom: 0; }
+/* the card's fields: each value with its "from" mark, a note under it when the parent's value was not taken */
+.perm .fields .dc-value { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.perm .fields .folder-row { flex: 1; min-width: 200px; margin: 0; }
+.perm .fields select { min-width: 160px; }
+.dc-marks { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+.dc-from { color: var(--muted); font-size: 11.5px; font-style: italic; white-space: nowrap; }
+.dc-warning { color: var(--warn); }
+.dc-note { margin: 2px 0 0; color: var(--warn); overflow-wrap: anywhere; }
+.dc-args { margin: 2px 0 0; overflow-wrap: anywhere; }
 /* Settings, "Prompts": the two parts and one row per template (name and Delete, the text below) */
 #set-prompt-default, #set-prompt-child { resize: vertical; line-height: 1.4; }
 #set-templates { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 8px; }

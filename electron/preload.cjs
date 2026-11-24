@@ -49,7 +49,7 @@ contextBridge.exposeInMainWorld("api", {
   answerPermission: (sessionId, reqId, optionId) => call("permission:answer", sessionId, reqId, optionId),
   // a delivered report or notice has started its prompt: the broker may forget it
   relayAck: (sessionId, id) => call("relay:ack", sessionId, id),
-  answerDelegation: (requestId, approved, own, command) => call("delegation:answer", requestId, approved, own, command),
+  answerDelegation: (requestId, approved, own, command, fields) => call("delegation:answer", requestId, approved, own, command, fields),
   // the broker's sub-session links ({ key: "cli:<id>", parent, name, task, createdAt, reported, parentDeleted, online,
   // busy }): the cached snapshot at once, the fresh one follows through onLinks
   getLinks: () => call("links:get"),
@@ -63,7 +63,7 @@ contextBridge.exposeInMainWorld("api", {
   answerReopen: (sessionId, requestId, approved, reason) => call("reopen:answer", sessionId, requestId, approved, reason),
   // the user's answer to a link card (adopt_session, release_session): { result, text }, or false when no longer pending
   answerLink: (sessionId, requestId, approved) => call("link:answer", sessionId, requestId, approved),
-  pickDir: (title) => call("dialog:pickDir", title),
+  pickDir: (title, defaultPath) => call("dialog:pickDir", title, defaultPath),
   // the Settings "Relay broker" section: status = the restart snapshot + working sessions + broker-web sessions
   brokerStatus: () => call("broker:status"),
   brokerRestart: (repo) => call("broker:restart", repo),

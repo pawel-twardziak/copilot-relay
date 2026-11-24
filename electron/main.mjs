@@ -10,13 +10,13 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { AcpConnection } from "./acp.mjs";
-import { isNotFoundExit, normalizeCommand, resolveCommand, startFailureText } from "./copilot-command.mjs";
+import { isNotFoundExit, normalizeCommand, resolveCommand, shellLine, startFailureText } from "./copilot-command.mjs";
 import { countUserMessages, deleteSession, describeCut, forkSession, isSessionId, messageTimes, purgeDeleted, sessionCreatedAt, sessionDir, truncateSession } from "./history.mjs";
 import { createLastActivity } from "./last-activity.mjs";
 import { createUsagePusher } from "./usage.mjs";
 import { JobScheduler } from "./scheduler.mjs";
 import { scheduleInfo } from "./jobs.mjs";
-import { PendingRequests, childPrompt, findModelOption, isRelayTool, linkCardOf, reloadWarning, resolveConfig, unreportedChildren, withDeadline } from "./delegation.mjs";
+import { PendingRequests, answerFields, cardStart, childPrompt, createdText, findModelOption, folderState, isRelayTool, linkCardOf, reloadWarning, resolveConfig, unreportedChildren, withDeadline } from "./delegation.mjs";
 import { createHeldCache, createHoldStore, HELD_KINDS, heldKind } from "./held-replies.mjs";
 import { readLinksCache, writeLinksCache } from "./links-cache.mjs";
 import { listAllPages } from "./session-list.mjs";
@@ -183,7 +183,7 @@ function relayStart(sessionId, cwd, { cfg, alias }, { name, parentKey } = {}) {
         notifyIfUnfocused(HELD_NOTICE[kind], `${m.from} → ${client.name}`);
       }
     },
-    onSessionRequest: (req) => sessionRequested(sessionId, req),
+    onSessionRequest: (req) => sessionRequested(sessionId, req).catch((e) => console.warn(`[delegation] session_request: ${e.message}`)),
     onReported: () => {
       const entry = open.get(sessionId);
       if (entry?.relay === client) entry.reported = true;
@@ -889,14 +889,42 @@ function tellParent(req, kind, text, name = req.name) {
   open.get(req.parentSessionId)?.relay?.outcome({ requestId: req.requestId, kind, name, text });
 }
 
-function sessionRequested(parentSessionId, { requestId, name, task, agent, model }) {
+const isDirectory = (p) => {
+  try {
+    return existsSync(p) && statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+};
+
+/** An existing folder, asked without blocking the main process (a slow mount must not freeze it). */
+const isDirectoryAsync = async (p) => {
+  try {
+    return (await stat(p)).isDirectory();
+  } catch {
+    return false;
+  }
+};
+
+async function sessionRequested(parentSessionId, request) {
   const parent = open.get(parentSessionId);
   if (!parent) return;
-  const req = { requestId, parentSessionId, name, task, agent, model };
-  pendingRequests.add(req);
-  notifyIfUnfocused("A session asks to start a new session", name);
+  const req = { ...request, parentSessionId };
+  pendingRequests.add(req); // before the folder check: a close or a reload meanwhile drops it as any other request
+  notifyIfUnfocused("A session asks to start a new session", req.name);
+  // the folder is model-written: looked at only as far as the automatic-check rule allows (never a network location)
+  const folder = await folderState(req.folder, { allow: allowAutomatic, isDir: isDirectoryAsync });
+  // the parent closed (or was reopened) or the window reloaded meanwhile: the request is gone, so is its card
+  if (open.get(parentSessionId) !== parent || !pendingRequests.has(req.requestId)) return;
   // the parent's own command, for the card's command field: from the store, never from the request
-  send("delegation:request", { ...req, cwd: parent.cwd, command: commands.get(parentSessionId) });
+  const storedCommand = commands.get(parentSessionId) ?? "";
+  const start = cardStart(
+    req,
+    { cwd: parent.cwd, tier: sessionTier(parentSessionId), storedCommand, command: shellLine(commandFor(parentSessionId).command, []), configOptions: parent.configOptions, name: parent.relay?.name },
+    { folderState: folder },
+  );
+  // the card reads only `start` for the child's values: the request's own fields (model-written) are not sent raw
+  send("delegation:request", { requestId: req.requestId, parentSessionId, name: req.name, task: req.task, start });
 }
 
 /** The broker asks the user (through the sender's view) to reopen a closed relative that a message is waiting for. */
@@ -978,10 +1006,11 @@ async function setConfigOption(sessionId, entry, configId, value) {
 /** Create the approved child and link it to its parent. Never throws; resolves to what the card is told:
  *  { outcome: "created" } or { outcome: "failed", text, retry }. With `retry` the child's Copilot never started, the
  *  parent has been told nothing and the request stays open; every other failure ends as an outcome for the parent.
- *  `command`: what the approval card's command field held ("" for the Settings command); a card without the field
- *  (undefined) gives the parent's stored command, which is also what the field starts with. */
-async function createChild(req, own = "", command = undefined) {
-  const { parentSessionId, name, task, agent, model } = req;
+ *  `command`: what the approval card's command field held ("" for the Settings command); without one (undefined,
+ *  e.g. an older window) the parent's stored command is used. `fields`: { cwd, tier, agent, model } from the card,
+ *  already normalised by `answerFields`; the child starts in that folder and tier and gets that agent and model. */
+async function createChild(req, own = "", command = undefined, fields) {
+  const { parentSessionId, name, task } = req;
   const parent = open.get(parentSessionId);
   if (!parent) return { outcome: "failed", text: "The session that asked for it is no longer open.", retry: false };
   // a failure after the child's Copilot started: the child is discarded and the parent told, the request is over
@@ -1000,9 +1029,9 @@ async function createChild(req, own = "", command = undefined) {
     await brokerPost("/api/links/forget", { keys: [`cli:${child.sessionId}`] }).then(refreshLinks, (e) => console.warn(`[links] forget: ${e.message}`));
   };
   try {
-    const tier = sessionTier(parentSessionId); // the child works on the parent's context window
+    const tier = fields.tier; // the card's context window
     try {
-      child = await createSession(parent.cwd, { name, parentKey: `cli:${parentSessionId}` }, deadline, tier, own, command ?? commands.get(parentSessionId), "card");
+      child = await createSession(fields.cwd, { name, parentKey: `cli:${parentSessionId}` }, deadline, tier, own, command ?? commands.get(parentSessionId), "card");
     } catch (e) {
       // The child's Copilot did not come to be (its command, most likely): nothing was made and the parent has been
       // told nothing, so the card takes another answer (delegation:answer keeps the request). The text, which holds
@@ -1016,9 +1045,11 @@ async function createChild(req, own = "", command = undefined) {
     tiers.set(sessionId, tier); // as an override, so a later reopen keeps it
     if (!entry.relay) throw new Error("The relay is switched off in this app, so the new session cannot be linked to its parent.");
 
-    const config = resolveConfig(entry.configOptions, { agent, model, inheritedModel: findModelOption(parent.configOptions)?.currentValue });
+    const config = resolveConfig(entry.configOptions, { agent: fields.agent, model: fields.model, inheritedModel: findModelOption(parent.configOptions)?.currentValue });
     if (config.error) {
       await discard();
+      // the card's choice is not valid for this child: the request stays open for another answer (if its parent is)
+      if (open.get(parentSessionId) === parent) return { outcome: "failed", text: config.error, retry: true };
       return failed("invalid", config.error);
     }
     for (const { configId, value } of config.sets) await withDeadline(setConfigOption(sessionId, entry, configId, value), deadline, SETUP_TIMEOUT_TEXT);
@@ -1034,7 +1065,7 @@ async function createChild(req, own = "", command = undefined) {
     const finalName = entry.relay.name;
     // Copilot titles a session after its first prompt unless it was named. A failed or unanswered rename only costs the title.
     await Promise.race([slashRename(sessionId, entry, finalName).catch((e) => console.warn(`[delegation] /rename: ${e.message}`)), new Promise((r) => setTimeout(r, RENAME_TIMEOUT_MS))]);
-    tellParent(req, "created", `Session "${finalName}" was created and has started on its task. It will send you its result with report_result.`, finalName);
+    tellParent(req, "created", createdText({ name: finalName, childCwd: child.cwd, parentCwd: parent.cwd }), finalName);
     // parent's current name; if it closed meanwhile, the last one known (the child still runs and its report is durable)
     const parentEntry = open.get(parentSessionId) ?? parent;
     const parentName = parentEntry.relay?.name;
@@ -1049,7 +1080,7 @@ async function createChild(req, own = "", command = undefined) {
 
 // reachable only from the window (preload): nothing the broker or a session sends can answer a request
 // (so the child's command is the user's typing on the card, or the parent's stored one)
-handle("delegation:answer", async (requestId, approved, own, command) => {
+handle("delegation:answer", async (requestId, approved, own, command, fields) => {
   // taken while it is answered, so a second click cannot start a second child
   const req = pendingRequests.take(requestId);
   if (!req) return false;
@@ -1058,7 +1089,9 @@ handle("delegation:answer", async (requestId, approved, own, command) => {
     return { outcome: "rejected" };
   }
   const reloadsBefore = windowReloads;
-  const result = await createChild(req, String(own ?? ""), typeof command === "string" ? command : undefined);
+  const parent = open.get(req.parentSessionId);
+  const card = answerFields(fields, { parentCwd: parent?.cwd, parentTier: parent ? sessionTier(req.parentSessionId) : "default" });
+  const result = await createChild(req, String(own ?? ""), typeof command === "string" ? command : undefined, card);
   if (!result.retry) return result;
   // the start failed: the request is open again, for Approve or Reject
   if (windowReloads === reloadsBefore) {
@@ -1294,8 +1327,8 @@ handle("relay:rename", async (sessionId, name) => {
   return relay.rename(name);
 });
 
-handle("dialog:pickDir", async (title) => {
-  const r = await dialog.showOpenDialog(win, { title: title || "Folder for the new session", properties: ["openDirectory", "createDirectory"] });
+handle("dialog:pickDir", async (title, defaultPath) => {
+  const r = await dialog.showOpenDialog(win, { title: title || "Folder for the new session", ...(typeof defaultPath === "string" && isDirectory(defaultPath) ? { defaultPath } : {}), properties: ["openDirectory", "createDirectory"] });
   return r.canceled ? null : r.filePaths[0];
 });
 
