@@ -2549,6 +2549,72 @@ export const checks = [
     },
   },
   {
+    // a delegated child starts with its parent's stored command (not Settings'), keeps it as its own, and its approval
+    // card offers no command field. The parent is given its command in the new-session dialog; the scripted agent
+    // records every start's arguments in $SCRIPTED_ARGV_FILE.
+    name: "child-command-inherited",
+    modes: ["off"],
+    scenario: CHILD_PROMPT_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      const argvFile = path.join(app.dir, "argv.jsonl");
+      const command = `SCRIPTED_ARGV_FILE='${argvFile}' '${SCRIPTED_AGENT}' --tag parent`;
+      const lines = () => (existsSync(argvFile) ? readFileSync(argvFile, "utf8").split("\n").filter(Boolean) : []);
+      const stored = () => JSON.parse(readFileSync(path.join(app.dir, "config", "copilot-relay-desktop", "session-commands.json"), "utf8"));
+      const D = `document.querySelector("#prompt-dialog")`;
+      const card = `${V}.el.querySelectorAll(".perm.delegation")[0]`;
+      await app.ev(`(window.__newSession = newSession(${JSON.stringify(path.join(app.dir, "work"))}), true)`);
+      await app.check(`${D}.open && !!${D}.querySelector(".pe-command")`, "the prompt dialog with the command field");
+      await app.ev(`(() => { const t = ${D}.querySelector(".pe-command"); t.value = ${JSON.stringify(command)}; t.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+      await app.ev(`document.querySelector("#prompt-ok").click()`);
+      await app.ev(`window.__newSession`, "newSession to return");
+      await app.check(`!!${V} && !${V}.busy`, "the parent's view");
+      await app.check(`!!${V}.relayName && !${V}.relayChip.hidden && !${V}.relayChip.classList.contains("off")`, "the parent to connect to the broker");
+      assert.deepEqual(lines().map((l) => JSON.parse(l)), [["--tag", "parent", "--acp", "--stdio"]]);
+      // the driver's send needs the session newSession() of the driver made: this one was started by its dialog
+      await app.ev(`(() => { const v = ${V}; v.input.value = "create_session kid Do-it"; v.input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); })()`);
+      await app.check(`!!${card}?.querySelector(".prompt-editor") && !${card}.querySelector(".opts button.primary").disabled`, "the card");
+      assert.equal(await app.ev(`!!${card}.querySelector(".pe-command")`), false, "no command field on the approval card");
+      await app.ev(`${card}.querySelector(".opts button.primary").click()`);
+      await app.check(`${card}.classList.contains("done")`, "the card to be answered");
+      await app.check(`!!views.get("scripted-work-2")`, "the child's view");
+      await until(async () => lines().length === 2, "the child's start");
+      assert.deepEqual(JSON.parse(lines()[1]), ["--tag", "parent", "--acp", "--stdio"]);
+      assert.equal(stored()["scripted-work-2"], command, "the child's own command is the parent's");
+      assert.equal(stored()["scripted-work"], command);
+      await app.check(`!${V}.busy`, "the parent to be idle");
+    },
+  },
+  {
+    // a parent's command that cannot be run: the child is not created, no view appears, and the parent is told in a
+    // relay notice (a message of kind relay in its chat) whose text says where the command comes from. The stored
+    // command is replaced in the file while the parent runs (the store reads the file on every use).
+    name: "child-command-broken",
+    modes: ["off"],
+    scenario: CHILD_PROMPT_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      await app.newSession();
+      const file = path.join(app.dir, "config", "copilot-relay-desktop", "session-commands.json");
+      const card = `${V}.el.querySelectorAll(".perm.delegation")[0]`;
+      await app.check(`!!${V}.relayName && !${V}.relayChip.hidden && !${V}.relayChip.classList.contains("off")`, "the parent to connect to the broker");
+      mkdirSync(path.dirname(file), { recursive: true });
+      writeFileSync(file, JSON.stringify({ "scripted-work": "/nonexistent/copilot-ui-check" }));
+      await app.send("create_session kid Do-it");
+      await app.check(`!!${card}?.querySelector(".prompt-editor") && !${card}.querySelector(".opts button.primary").disabled`, "the card");
+      await app.ev(`${card}.querySelector(".opts button.primary").click()`);
+      const notice = `[...${V}.log.querySelectorAll(".msg.relay")].map((e) => e.textContent).join(" ")`;
+      await app.check(`${notice}.includes("This is the parent session's command.")`, "the parent to be told why the child did not start");
+      const text = await app.ev(notice);
+      assert.match(text, /Session "kid" was not created: /);
+      assert.ok(text.includes("This is the parent session's command."), text);
+      await app.idle();
+      assert.equal(await app.ev(`views.has("scripted-work-2")`), false, "no view for the child that did not start");
+    },
+  },
+  {
     // the header's Prompt button: the dialog holds the stored own part, says that saving restarts Copilot, and "Save
     // and restart" reopens the session with the new text; the button follows the busy state; a refusal (main's, or a
     // turn the view started meanwhile) keeps the dialog open with the text. A UUID: main takes only those. Every
