@@ -1,0 +1,13 @@
+{
+  "name": "copilot-relay-sdk-probe",
+  "private": true,
+  "version": "0.0.0",
+  "description": "One-off probe: can the Copilot SDK replace `copilot --acp --stdio` in copilot-relay?",
+  "type": "module",
+  "scripts": {
+    "probe": "node probe.mjs"
+  },
+  "dependencies": {
+    "@microsoft/copilot-sdk": "2.0.1"
+  }
+}
