@@ -33,7 +33,8 @@ const names = new NameStore(process.env.COPILOT_RELAY_NAMES_FILE || undefined, {
 const delegation = new Delegation({ registry, store: delegationStore, nameOf: (k) => names.get(k)?.name });
 registry.offlineRelative = (f, n, t) => delegation.messageClosed(f, n, t);
 registry.decorate = (k, p) => delegation.decorate(k, p);
-registry.childMessage = (f, t, x) => delegation.childMessage(f, t, x);
+registry.appMessage = (f, t, x) => delegation.appMessage(f, t, x);
+registry.userMessage = (t, x) => delegation.userMessage(t, x);
 const handleMcp = createMcpHandler(registry, delegation);
 const linkRoutes = linksRoutes({ delegation });
 

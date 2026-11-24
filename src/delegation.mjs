@@ -219,21 +219,33 @@ export class Delegation {
   }
 
   /**
-   * A child's send_message to its app parent: stored like a report (marked, redelivered until acked) and delivered.
+   * An agent's send_message to an app session: stored like a report (marked, redelivered until acked) and delivered.
+   * The mark is set now: from a child to its parent `fromChild`, from a parent to its child `parent`, else `other`.
    * Always true: the message is taken over.
    */
-  childMessage(fromKey, toKey, text) {
-    const child = this.registry.get(fromKey);
+  appMessage(fromKey, toKey, text) {
+    const sender = this.registry.get(fromKey);
+    const mark =
+      sender.parentKey === toKey ? { fromChild: true } : this.registry.get(toKey)?.parentKey === fromKey ? { heldAs: "parent" } : { heldAs: "other" };
     const item = {
       id: this.newId(),
       toKey,
-      from: child.name,
-      ...(child.cwd ? { fromCwd: child.cwd } : {}),
+      from: sender.name,
+      ...(sender.cwd ? { fromCwd: sender.cwd } : {}),
       text,
-      prompt: relayPrompt(child.name, child.cwd, text),
-      fromChild: true,
+      prompt: relayPrompt(sender.name, sender.cwd, text),
+      ...mark,
       fromKey,
     };
+    this.store.enqueue(item); // on disk before any delivery attempt
+    this.#changed();
+    this.#deliver(item);
+    return true;
+  }
+
+  /** A relay-GUI message to an app session: stored (redelivered until acked, always human) and delivered. Always true. */
+  userMessage(toKey, text) {
+    const item = { id: this.newId(), toKey, from: "user", text, prompt: text, human: true, heldAs: "user" };
     this.store.enqueue(item); // on disk before any delivery attempt
     this.#changed();
     this.#deliver(item);
@@ -244,6 +256,17 @@ export class Delegation {
   heldCounts() {
     const counts = {};
     for (const item of this.store.marked()) counts[item.toKey] = (counts[item.toKey] ?? 0) + 1;
+    return counts;
+  }
+
+  /** Recipient key -> unacknowledged held messages per kind (only recipients with a count). */
+  heldByKind() {
+    const counts = {};
+    for (const item of this.store.heldItems()) {
+      const kind = item.fromChild ? "child" : item.heldAs;
+      counts[item.toKey] ??= { child: 0, parent: 0, other: 0 };
+      counts[item.toKey][kind]++;
+    }
     return counts;
   }
 
@@ -281,7 +304,7 @@ export class Delegation {
       text,
       prompt: relayPrompt(from.name, from.cwd, text),
       awaiting: reopen.requestId,
-      ...(targetKey === parent ? { fromChild: true, fromKey } : {}),
+      ...(targetKey === parent ? { fromChild: true, fromKey } : { heldAs: "parent", fromKey }),
     };
     this.store.enqueue(item); // on disk before the user is asked
     if (!existing) this.store.addReopen(reopen);
@@ -499,7 +522,7 @@ export class Delegation {
     const parent = this.store.parentOf(key);
     if (peer && parent && !peer.parentKey) peer.parentKey = parent;
     if (peer && parent && peer.name !== this.store.nameOf(key)) this.store.link(key, parent, peer.name);
-    for (const item of this.store.pending(key)) this.#deliver(item);
+    for (const item of this.store.pending(key)) this.#deliver(item, { redelivered: true });
     for (const reopen of this.store.reopensFrom(key)) this.#askReopen(reopen);
     for (const request of this.#linkRequests.values()) if (request.parentKey === key) this.#askLink(request);
     this.#changed();
@@ -507,9 +530,10 @@ export class Delegation {
 
   ack(key, id) {
     if (!this.store.pending(key).some((i) => i.id === id)) return false;
-    const marked = this.store.pending(key).find((i) => i.id === id).fromChild;
+    const item = this.store.pending(key).find((i) => i.id === id);
+    const held = this.store.heldItems().includes(item);
     const removed = this.store.remove(id);
-    if (marked) this.#changed();
+    if (held) this.#changed();
     return removed;
   }
 
@@ -528,15 +552,17 @@ export class Delegation {
     this.#notice(parentKey, `Session "${this.#nameOf(childKey)}" ended without reporting a result. You can ask the user to reopen it.`);
   }
 
-  #deliver(item) {
+  #deliver(item, { redelivered = false } = {}) {
     // pushTo, not Registry.send: reports and notices are charged to no budget
     return this.registry.pushTo(item.toKey, {
       from: item.from,
       ...(item.fromCwd ? { fromCwd: item.fromCwd } : {}),
-      human: false,
+      human: item.human === true,
       text: item.text,
-      prompt: this.decorate(item.toKey, item.prompt),
+      prompt: item.heldAs === "other" || item.heldAs === "user" ? item.prompt : this.decorate(item.toKey, item.prompt),
       ...(item.fromChild ? { fromChild: true } : {}),
+      ...(item.heldAs ? { heldAs: item.heldAs } : {}),
+      ...(redelivered ? { redelivered: true } : {}),
       deliveryId: item.id,
       wake: true,
     });

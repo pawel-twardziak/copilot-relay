@@ -6,7 +6,7 @@ import path from "node:path";
 import { afterEach, test } from "node:test";
 import { Delegation } from "../../src/delegation.mjs";
 import { DelegationStore } from "../../src/delegation-store.mjs";
-import { Registry, nameSuffix } from "../../src/registry.mjs";
+import { Registry, nameSuffix, relayPrompt } from "../../src/registry.mjs";
 import { onceDelivery } from "../../extension/copilot-relay/relay-client.mjs";
 
 const dirs = [];
@@ -1099,7 +1099,7 @@ test("a report is marked fromChild on the push and on the stored item", () => {
 
 test("send_message from a child to an app parent is stored, marked and redelivered until acked", () => {
   const s = setup();
-  s.registry.childMessage = (f, t, x) => s.d.childMessage(f, t, x);
+  s.registry.appMessage = (f, t, x) => s.d.appMessage(f, t, x);
   const reply = s.registry.send("cli:child", s.registry.get("cli:parent").name, "pytanie");
   assert.match(reply, /^Message to .* delivered/);
   assert.equal(s.parentPush.length, 1);
@@ -1116,7 +1116,7 @@ test("send_message from a child to an app parent is stored, marked and redeliver
 
 test("parent to child, non-relatives and relay notices carry no mark", () => {
   const s = setup();
-  s.registry.childMessage = (f, t, x) => s.d.childMessage(f, t, x);
+  s.registry.appMessage = (f, t, x) => s.d.appMessage(f, t, x);
   s.registry.send("cli:parent", s.registry.get("cli:child").name, "zadanie");
   assert.equal(s.childPush[0].fromChild, undefined);
   s.d.outcome("cli:parent", { kind: "rejected", text: "no" });
@@ -1129,7 +1129,7 @@ test("parent to child, non-relatives and relay notices carry no mark", () => {
 test("a child message to a terminal (non-app) parent keeps today's path", () => {
   const s = setup();
   s.registry.get("cli:parent").app = false;
-  s.registry.childMessage = (f, t, x) => s.d.childMessage(f, t, x);
+  s.registry.appMessage = (f, t, x) => s.d.appMessage(f, t, x);
   s.registry.send("cli:child", s.registry.get("cli:parent").name, "pytanie");
   assert.equal(s.parentPush[0].fromChild, undefined);
   assert.equal(s.store.pending("cli:parent").length, 0);
@@ -1174,4 +1174,116 @@ test("a marked item is counted for its parent after the child is renamed and rel
   assert.equal(s.d.answerLink("cli:p", s.cards("cli:p").at(-1).requestId, true).result, "released");
   assert.equal(s.d.heldCounts()["cli:p"], 1);
   assert.equal(s.store.pending("cli:p").find((i) => i.text === "wynik").fromChild, true);
+});
+
+// ---- held incoming messages: every message to an app session is marked, stored and redelivered ----
+
+/** setup() wired like server.mjs, plus an unrelated app peer `cli:x` named obcy. */
+function heldSetup() {
+  const s = setup();
+  s.registry.appMessage = (f, t, x) => s.d.appMessage(f, t, x);
+  s.registry.userMessage = (t, x) => s.d.userMessage(t, x);
+  s.registry.decorate = (k, p) => s.d.decorate(k, p);
+  s.registry.upsert({ key: "cli:x", name: "obcy", kind: "cli", app: true, push: () => true, control: () => {} });
+  return s;
+}
+
+test("a parent's message to its app child is stored, marked parent and decorated", () => {
+  const { registry, store, childPush } = heldSetup();
+  registry.send("cli:parent", KID, "also update the changelog");
+  const m = childPush.at(-1);
+  assert.equal(m.heldAs, "parent");
+  assert.equal(m.fromChild, undefined);
+  assert.equal(m.human, false);
+  assert.equal(typeof m.deliveryId, "string");
+  assert.equal(m.redelivered, undefined);
+  assert.match(m.prompt, /Your parent/);
+  assert.equal(store.pending("cli:child").length, 1);
+});
+
+test("a message between sessions that are not linked is stored, marked other and not decorated", () => {
+  const { registry, store, childPush } = heldSetup();
+  const budget = registry.budget;
+  registry.send("cli:x", KID, "hej");
+  const m = childPush.at(-1);
+  assert.equal(m.heldAs, "other");
+  assert.equal(m.fromChild, undefined);
+  assert.equal(m.prompt, relayPrompt(registry.get("cli:x").name, undefined, "hej"));
+  assert.equal(registry.budget, budget - 1);
+  assert.equal(store.pending("cli:child").length, 1);
+});
+
+test("a child's message to its parent keeps fromChild and gets no heldAs", () => {
+  const { registry, parentPush } = heldSetup();
+  registry.send("cli:child", registry.get("cli:parent").name, "pytanie");
+  assert.equal(parentPush.at(-1).fromChild, true);
+  assert.equal(parentPush.at(-1).heldAs, undefined);
+});
+
+test("a relay-GUI message to an app session is stored as user and stays human on redelivery", () => {
+  const { registry, file, childPush } = heldSetup();
+  assert.equal(registry.sendFromUser(KID, "hi"), true);
+  const m = childPush.at(-1);
+  assert.equal(m.heldAs, "user");
+  assert.equal(m.human, true);
+  assert.equal(m.from, "user");
+  assert.equal(m.prompt, "hi");
+  assert.equal(m.redelivered, undefined);
+  const push = [];
+  const registry2 = new Registry();
+  registry2.upsert({ key: "cli:child", name: "badacz", kind: "cli", app: true, push: (x) => (push.push(x), true) });
+  new Delegation({ registry: registry2, store: new DelegationStore(file) }).attached("cli:child");
+  assert.equal(push.length, 1);
+  assert.equal(push[0].deliveryId, m.deliveryId);
+  assert.equal(push[0].human, true);
+  assert.equal(push[0].heldAs, "user");
+  assert.equal(push[0].redelivered, true);
+});
+
+test("a recipient that is not an app session keeps the old path", () => {
+  const { registry, store, childPush } = heldSetup();
+  registry.get("cli:child").app = false;
+  registry.send("cli:parent", KID, "zadanie");
+  registry.sendFromUser(KID, "hi");
+  assert.equal(childPush.length, 2);
+  assert.equal(childPush[0].deliveryId, undefined);
+  assert.equal(childPush[1].deliveryId, undefined);
+  assert.equal(store.pending("cli:child").length, 0);
+});
+
+test("a parent's message to a closed child is marked parent when the reopen is approved", () => {
+  const s = closedChild();
+  s.registry.send("cli:parent", KID, "hello");
+  const [{ requestId }] = s.reopens();
+  assert.equal(s.store.awaitingFor(requestId)[0].heldAs, "parent");
+  s.d.answerReopen("cli:parent", requestId, true);
+  s.reopenChild();
+  s.d.attached("cli:child");
+  assert.equal(s.childPush.at(-1).heldAs, "parent");
+});
+
+test("the mark is set when the message is sent: a release afterwards does not change it", () => {
+  const { d, registry, store, childPush } = heldSetup();
+  registry.send("cli:parent", KID, "zadanie");
+  store.unlink("cli:child");
+  registry.get("cli:child").parentKey = null;
+  d.attached("cli:child");
+  assert.equal(childPush.at(-1).heldAs, "parent");
+  assert.equal(childPush.at(-1).redelivered, true);
+});
+
+test("heldByKind counts unacknowledged marked items per recipient and kind, without user and awaiting", () => {
+  const { d, registry, childPush } = heldSetup();
+  let changes = 0;
+  d.onChange(() => changes++);
+  d.report("cli:child", "wynik");
+  registry.send("cli:parent", KID, "rozkaz");
+  registry.send("cli:x", KID, "hej");
+  registry.sendFromUser(KID, "hi");
+  assert.deepEqual(d.heldByKind(), { "cli:parent": { child: 1, parent: 0, other: 0 }, "cli:child": { child: 0, parent: 1, other: 1 } });
+  const order = childPush.find((m) => m.heldAs === "parent");
+  const before = changes;
+  assert.ok(d.ack("cli:child", order.deliveryId));
+  assert.ok(changes > before);
+  assert.deepEqual(d.heldByKind()["cli:child"], { child: 0, parent: 0, other: 1 });
 });

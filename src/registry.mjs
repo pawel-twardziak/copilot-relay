@@ -73,7 +73,8 @@ export class Registry extends EventEmitter {
     this.offlineRelative = null;
     /** Hook (toKey, prompt) => string: decorates prompts sent to a linked recipient. */
     this.decorate = null;
-    this.childMessage = null; // (fromKey, toKey, text) => boolean: the delegation service takes over a child→parent message
+    this.appMessage = null; // (fromKey, toKey, text) => boolean: the delegation service takes over an agent message to an app session
+    this.userMessage = null; // (toKey, text) => boolean: the delegation service takes over a relay-GUI message to an app session
   }
 
   /** True when one of the two peers is the parent of the other. */
@@ -236,8 +237,8 @@ export class Registry extends EventEmitter {
     const budget = linked ? this.pairBudgets.get(`${parentKey}|${childKey}`) : this.budget;
     this.emit("message", { from: from.name, to: to.name, fromKey: from.key, toKey: to.key, text, budget });
     const prompt = relayPrompt(from.name, from.cwd, text);
-    // a child's message to its app parent is stored and delivered by the delegation service instead
-    if (!(from.parentKey === to.key && to.app && this.childMessage?.(from.key, to.key, text)))
+    // a message to an app session is stored, marked and delivered by the delegation service instead
+    if (!(to.app && this.appMessage?.(from.key, to.key, text)))
       this.#deliver(to, {
         from: from.name,
         ...(from.cwd ? { fromCwd: from.cwd } : {}),
@@ -255,7 +256,7 @@ export class Registry extends EventEmitter {
     if (!to) return false;
     this.humanPrompt(to.key);
     this.emit("message", { from: "user", to: to.name, toKey: to.key, text });
-    this.#deliver(to, { from: "user", human: true, text, prompt: text });
+    if (!(to.app && this.userMessage?.(to.key, text))) this.#deliver(to, { from: "user", human: true, text, prompt: text });
     return true;
   }
 
