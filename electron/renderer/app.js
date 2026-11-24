@@ -1168,6 +1168,11 @@ class SessionView {
     this.sendBtn.disabled = this.dead || this.deleting || (this.busy && !this.sendsWhileBusy());
   }
 
+  /** Messages that would be lost with this view: the queue's and your typed held ones (the broker's held ones are delivered again). */
+  unsentCount() {
+    return this.queue.length + this.held.filter((item) => item.typed).length;
+  }
+
   /** What Send does with a message while the view is busy: queue it or hold it (the queue setting, or a running turn with the "user" switch on). */
   sendsWhileBusy() {
     return queueMidTurn || this.holdsTyped();
@@ -2943,12 +2948,12 @@ async function reopenView(old, error, { holdInbox = false, typed, keepFollowUp =
   const v = views.get(sessionId);
   if (!v) return;
   if (error) v.error(error);
-  const lostTyped = v.dead ? v.held.filter((item) => item.typed) : []; // your typed messages go with the queue's
-  if (lostTyped.length) {
+  const lost = v.dead ? queue.length + v.held.filter((item) => item.typed).length : 0; // your typed held messages go with the queue's
+  if (lost) {
     v.held = v.held.filter((item) => !item.typed);
     v.renderHeld();
+    v.error(`${lost} queued message(s) waiting for this session were discarded.`);
   }
-  if (v.dead && queue.length + lostTyped.length) v.error(`${queue.length + lostTyped.length} queued message(s) waiting for this session were discarded.`);
   if (typed && !v.input.value) {
     v.input.value = typed;
     v.autosize();
@@ -3233,13 +3238,13 @@ async function deleteOne(s) {
     }
     if (res.stuck) {
       // closed, but its Copilot process would not exit: main refuses to open it again until that process is gone
-      const lost = v && views.get(s.sessionId) === v ? v.queue.length : 0;
+      const lost = v && views.get(s.sessionId) === v ? v.unsentCount() : 0;
       dropView(s.sessionId);
       return { deleted: false, text: `Could not delete the session: ${res.stuck}${lost ? ` (${lost} queued message(s) were discarded)` : ""}`, isError: true };
     }
     deletedIds.add(s.sessionId);
     if (ui.pinned.delete(s.sessionId)) saveUi();
-    const dropped = v && views.get(s.sessionId) === v ? v.queue.length : 0; // queued messages it never got
+    const dropped = v && views.get(s.sessionId) === v ? v.unsentCount() : 0; // queued and held typed messages it never got
     dropView(s.sessionId); // only now: on a failure the session stays visible
     filePreview.forget(s.sessionId);
     sessions = sessions.filter((x) => x.sessionId !== s.sessionId);

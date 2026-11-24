@@ -481,12 +481,35 @@ function heldTypedCheck(queue) {
       await app.ev(`api.closeSession(${JSON.stringify(HISTORY_ID)})`); // main opens the session again: session/load fails (scenario)
       await app.ev(`reopenView(${V})`, "the reopen");
       await app.check(`${V}.dead && !${V}.resuming`, "the dead view");
+      assert.equal((await app.ev(`${V}.log.textContent`)).includes("Could not resume this session: scripted load failure"), true, "the failure came from the agent's session/load");
       assert.equal((await app.ev(`${V}.log.textContent`)).includes("1 queued message(s) waiting for this session were discarded."), true);
       assert.equal(await rows(), 0);
       assert.equal(await app.ev(`${V}.held.length`), 0);
     },
   };
 }
+
+/** held-typed-delete: deleting a session counts the held typed message in the discard text (the view is dropped with it). */
+const heldTypedDeleteCheck = {
+  name: "held-typed-delete",
+  modes: ["off"],
+  scenario: path.join(FIXTURES, "held-typed-scenario.mjs"),
+  sessionId: HISTORY_ID,
+  async run(app) {
+    const V = `views.get(${JSON.stringify(HISTORY_ID)})`;
+    await app.newSession();
+    await app.send("Start."); // its permission keeps the turn running
+    await app.check(`${V}.prompting`, "a running turn");
+    await app.ev(`(() => { const v = ${V}; v.input.value = "keep this"; v.input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); })()`);
+    assert.equal(await app.ev(`${V}.held.length`), 1);
+    await app.answerPermission();
+    await app.idle();
+    assert.equal(await app.ev(`${V}.held.length`), 1, "still held");
+    const res = await app.ev(`deleteOne({ sessionId: ${JSON.stringify(HISTORY_ID)}, cwd: ${V}.cwd, title: "t" })`);
+    assert.equal(res.deleted, true);
+    assert.equal(res.text.includes("1 queued message(s) waiting for it were discarded"), true, res.text);
+  },
+};
 
 export const checks = [
   {
@@ -3206,4 +3229,5 @@ export const checks = [
   },
   heldTypedCheck(false),
   heldTypedCheck(true),
+  heldTypedDeleteCheck,
 ];
