@@ -11,6 +11,7 @@ import {
   childPrompt,
   REMINDER,
   findModelOption,
+  folderState,
   isRelayTool,
   linkCardOf,
   reloadWarning,
@@ -90,7 +91,9 @@ test("take returns the request once and keeps other parents' requests", () => {
   p.add({ requestId: "s", parentSessionId: "q" });
   p.dropForParent("p");
   p.add(r);
+  assert.equal(p.has("r"), true);
   assert.equal(p.take("r"), r);
+  assert.equal(p.has("r"), false);
   assert.equal(p.take("r"), undefined);
   assert.equal(p.take("s").parentSessionId, "q");
 });
@@ -189,14 +192,16 @@ const parentOf = (extra = {}) => ({
   ...extra,
 });
 const req = (extra = {}) => ({ requestId: "r", name: "kid", task: "t", agent: "", model: "", folder: "", prompt: "", context: "", command: "", ...extra });
-const isDir = (p) => p === "/work/other";
+// main's verdict on the asked folder (folderState); cardStart itself never touches the disk
+const atDir = { folderState: "dir" };
+const missing = { folderState: "missing" };
 const noFrom = { cwd: false, tier: false, agent: false, model: false, own: false, command: false };
 
 test("cardStart takes valid parent values", () => {
   const s = cardStart(
     req({ folder: "/work/other", prompt: "be brief", context: "long_context", agent: "reviewer", model: "gpt-b", command: "copilot --foo" }),
     parentOf(),
-    { isDir },
+    atDir,
   );
   assert.equal(s.cwd, "/work/other");
   assert.equal(s.tier, "long_context");
@@ -212,43 +217,43 @@ test("cardStart takes valid parent values", () => {
 
 test("cardStart falls back with a note", () => {
   const p = parentOf();
-  const rel = cardStart(req({ folder: "rel/dir" }), p, { isDir });
+  const rel = cardStart(req({ folder: "rel/dir" }), p, missing);
   assert.equal(rel.cwd, "/work/parent");
   assert.equal(rel.notes.cwd, 'Asked for the folder "rel/dir", which is not an existing absolute path.');
-  const gone = cardStart(req({ folder: "/nope" }), p, { isDir });
+  const gone = cardStart(req({ folder: "/nope" }), p, missing);
   assert.equal(gone.cwd, "/work/parent");
   assert.match(gone.notes.cwd, /"\/nope"/);
-  const tier = cardStart(req({ context: "huge" }), p, { isDir });
+  const tier = cardStart(req({ context: "huge" }), p, missing);
   assert.equal(tier.tier, "default");
   assert.equal(tier.notes.tier, 'Asked for the context "huge", which is not 200k or 1M.');
-  const agent = cardStart(req({ agent: "ghost" }), p, { isDir });
+  const agent = cardStart(req({ agent: "ghost" }), p, missing);
   assert.equal(agent.agent, "");
   assert.equal(agent.notes.agent, 'Asked for the agent "ghost", which is not offered here. Valid agents: "" (default), reviewer.');
-  const none = cardStart(req({ agent: "ghost" }), parentOf({ configOptions: noAgent }), { isDir });
+  const none = cardStart(req({ agent: "ghost" }), parentOf({ configOptions: noAgent }), missing);
   assert.equal(none.notes.agent, 'Asked for the agent "ghost", but there are no custom agents available.');
-  const model = cardStart(req({ model: "ghost" }), p, { isDir });
+  const model = cardStart(req({ model: "ghost" }), p, missing);
   assert.equal(model.model, "");
   assert.equal(model.notes.model, 'Asked for the model "ghost", which is not offered here. Valid models: gpt-a, gpt-b.');
-  const cmd = cardStart(req({ command: "node x" }), p, { isDir });
+  const cmd = cardStart(req({ command: "node x" }), p, missing);
   assert.equal(cmd.command, "copilot --stored");
   assert.equal(cmd.notes.command, 'Asked for a command that was not taken: Only the copilot command is allowed, not "node".');
   for (const s of [rel, gone, tier, agent, none, model, cmd]) assert.deepEqual(s.from, noFrom);
 });
 
 test("cardStart without proposals keeps today's card", () => {
-  const s = cardStart(req(), parentOf(), { isDir });
+  const s = cardStart(req(), parentOf(), missing);
   assert.equal(s.command, "copilot --stored");
   assert.equal(s.own, "");
   assert.equal(s.cwd, "/work/parent");
   assert.equal(s.tier, "default");
   assert.deepEqual(s.notes, {});
   assert.deepEqual(s.from, noFrom);
-  assert.equal(cardStart(req(), parentOf({ name: "" }), { isDir }).parentName, "the session");
-  assert.equal(cardStart(req(), parentOf({ configOptions: [] }), { isDir }).currentModel, null);
+  assert.equal(cardStart(req(), parentOf({ name: "" }), missing).parentName, "the session");
+  assert.equal(cardStart(req(), parentOf({ configOptions: [] }), missing).currentModel, null);
 });
 
 test("cardStart deduplicates the lists", () => {
-  const s = cardStart(req(), parentOf(), { isDir });
+  const s = cardStart(req(), parentOf(), missing);
   assert.deepEqual(s.models, [{ value: "gpt-a", name: "gpt-a" }, { value: "gpt-b", name: "gpt-b" }]);
   assert.deepEqual(s.agents, [{ value: "", name: "Default" }, { value: "reviewer", name: "Reviewer" }]);
 });
@@ -273,19 +278,46 @@ test("createdText names another folder only", () => {
   );
 });
 
-test("cardStart never looks at a remote folder", () => {
-  const calls = [];
-  for (const folder of ["\\\\host\\share", "//host/share", "/\\host\\share", "\\/host/share"]) {
-    const s = cardStart(req({ folder }), parentOf(), { isDir: (p) => (calls.push(p), true) });
+const remoteNote = (folder) => `Asked for the folder "${folder}", which is on a network location; network folders are not checked automatically.`;
+const UNC = ["\\\\host\\share", "//host/share", "/\\host\\share", "\\/host/share"];
+
+test("folderState never stats a network folder", async () => {
+  const allowed = [];
+  const stated = [];
+  const deps = (allow) => ({ allow: async (p) => (allowed.push(p), allow(p)), isDir: async (p) => (stated.push(p), true) });
+  // UNC text: not even the rule is asked (it would lstat the path's components)
+  for (const folder of UNC) assert.equal(await folderState(folder, deps(() => true)), "network");
+  assert.deepEqual(allowed, []);
+  // a mount, a mapped drive, an automount: the rule refuses it, so it is never stat'ed
+  assert.equal(await folderState("/net/host/x", deps(() => false)), "network");
+  assert.deepEqual(allowed, ["/net/host/x"]);
+  assert.deepEqual(stated, []);
+  // a local one is stat'ed after the rule passed it, resolved
+  assert.equal(await folderState("/work/a/../other", deps(() => true)), "dir");
+  assert.deepEqual(stated, ["/work/other"]);
+  assert.equal(await folderState("/work/x", { allow: async () => true, isDir: async () => false }), "missing");
+  // relative or empty: nothing is asked at all
+  allowed.length = 0;
+  stated.length = 0;
+  for (const folder of ["rel/dir", "", undefined, 7]) assert.equal(await folderState(folder, deps(() => true)), "missing");
+  assert.deepEqual([allowed, stated], [[], []]);
+  // a failing check is a missing folder, not a rejected promise
+  assert.equal(await folderState("/work/x", { allow: async () => { throw new Error("x"); }, isDir: async () => true }), "missing");
+});
+
+test("cardStart says a network folder is not checked", () => {
+  for (const folder of ["/net/host/x", ...UNC]) {
+    const s = cardStart(req({ folder }), parentOf(), { folderState: "network" });
     assert.equal(s.cwd, "/work/parent");
     assert.equal(s.from.cwd, false);
-    assert.equal(s.notes.cwd, `Asked for the folder "${folder}", which is not an existing absolute path.`);
+    assert.equal(s.notes.cwd, remoteNote(folder));
   }
-  assert.deepEqual(calls, []);
+  // UNC text is refused by cardStart too, whatever it was told
+  for (const folder of UNC) assert.equal(cardStart(req({ folder }), parentOf(), atDir).notes.cwd, remoteNote(folder));
 });
 
 test("a quoted parent command keeps its quotes when arguments are appended", () => {
   const line = shellLine("C:\\Program Files\\gh\\copilot.exe", [], { platform: "win32", isFile: () => true });
-  const s = cardStart(req({ command: "copilot --foo" }), parentOf({ command: line }), { isDir });
+  const s = cardStart(req({ command: "copilot --foo" }), parentOf({ command: line }), missing);
   assert.equal(s.command, '"C:\\Program Files\\gh\\copilot.exe" --foo');
 });

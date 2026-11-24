@@ -16,7 +16,7 @@ import { createLastActivity } from "./last-activity.mjs";
 import { createUsagePusher } from "./usage.mjs";
 import { JobScheduler } from "./scheduler.mjs";
 import { scheduleInfo } from "./jobs.mjs";
-import { PendingRequests, answerFields, cardStart, childPrompt, createdText, findModelOption, isRelayTool, linkCardOf, reloadWarning, resolveConfig, unreportedChildren, withDeadline } from "./delegation.mjs";
+import { PendingRequests, answerFields, cardStart, childPrompt, createdText, findModelOption, folderState, isRelayTool, linkCardOf, reloadWarning, resolveConfig, unreportedChildren, withDeadline } from "./delegation.mjs";
 import { createHeldCache, createHoldStore, HELD_KINDS, heldKind } from "./held-replies.mjs";
 import { readLinksCache, writeLinksCache } from "./links-cache.mjs";
 import { listAllPages } from "./session-list.mjs";
@@ -183,7 +183,7 @@ function relayStart(sessionId, cwd, { cfg, alias }, { name, parentKey } = {}) {
         notifyIfUnfocused(HELD_NOTICE[kind], `${m.from} → ${client.name}`);
       }
     },
-    onSessionRequest: (req) => sessionRequested(sessionId, req),
+    onSessionRequest: (req) => sessionRequested(sessionId, req).catch((e) => console.warn(`[delegation] session_request: ${e.message}`)),
     onReported: () => {
       const entry = open.get(sessionId);
       if (entry?.relay === client) entry.reported = true;
@@ -897,18 +897,31 @@ const isDirectory = (p) => {
   }
 };
 
-function sessionRequested(parentSessionId, request) {
+/** An existing folder, asked without blocking the main process (a slow mount must not freeze it). */
+const isDirectoryAsync = async (p) => {
+  try {
+    return (await stat(p)).isDirectory();
+  } catch {
+    return false;
+  }
+};
+
+async function sessionRequested(parentSessionId, request) {
   const parent = open.get(parentSessionId);
   if (!parent) return;
   const req = { ...request, parentSessionId };
-  pendingRequests.add(req);
+  pendingRequests.add(req); // before the folder check: a close or a reload meanwhile drops it as any other request
   notifyIfUnfocused("A session asks to start a new session", req.name);
+  // the folder is model-written: looked at only as far as the automatic-check rule allows (never a network location)
+  const folder = await folderState(req.folder, { allow: allowAutomatic, isDir: isDirectoryAsync });
+  // the parent closed (or was reopened) or the window reloaded meanwhile: the request is gone, so is its card
+  if (open.get(parentSessionId) !== parent || !pendingRequests.has(req.requestId)) return;
   // the parent's own command, for the card's command field: from the store, never from the request
   const storedCommand = commands.get(parentSessionId) ?? "";
   const start = cardStart(
     req,
     { cwd: parent.cwd, tier: sessionTier(parentSessionId), storedCommand, command: shellLine(commandFor(parentSessionId).command, []), configOptions: parent.configOptions, name: parent.relay?.name },
-    { isDir: isDirectory },
+    { folderState: folder },
   );
   // the card reads only `start` for the child's values: the request's own fields (model-written) are not sent raw
   send("delegation:request", { requestId: req.requestId, parentSessionId, name: req.name, task: req.task, start });

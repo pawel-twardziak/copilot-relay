@@ -53,10 +53,27 @@ const optionList = (option) => {
   return out;
 };
 
+/** What main may say about the folder a parent asked for, before anyone approved: "dir" (an existing local folder),
+ *  "network" (never looked at: UNC text, or a path main's automatic-check rule refuses) or "missing" (relative, not
+ *  there, not a folder, or the check failed). `allow(abs)` is that rule; `isDir(abs)` is asked only once it passed. */
+export async function folderState(folder, { allow, isDir }) {
+  if (typeof folder !== "string" || !folder) return "missing";
+  if (isRemote(folder)) return "network"; // by its text: Windows would contact that host before the user approved anything
+  if (!path.isAbsolute(folder)) return "missing";
+  const abs = path.resolve(folder);
+  try {
+    if (!(await allow(abs))) return "network";
+    return (await isDir(abs)) ? "dir" : "missing";
+  } catch {
+    return "missing";
+  }
+}
+
 /** The approval card's start values from the parent's request. `parent`: { cwd, tier, storedCommand, command,
- *  configOptions, name }; `isDir(path)` is the caller's file system check. A value the parent asked for that cannot
- *  be taken gets a note and the default; `from` says which values are the parent's. */
-export function cardStart(request, parent, { isDir }) {
+ *  configOptions, name }; `folderState` is main's verdict on the asked folder (see folderState): cardStart itself never
+ *  touches the disk. A value the parent asked for that cannot be taken gets a note and the default; `from` says which
+ *  values are the parent's. */
+export function cardStart(request, parent, { folderState = "missing" } = {}) {
   const notes = {};
   const from = { cwd: false, tier: false, agent: false, model: false, own: false, command: false };
   const str = (v) => (typeof v === "string" ? v : "");
@@ -64,10 +81,12 @@ export function cardStart(request, parent, { isDir }) {
   let cwd = parent.cwd;
   const folder = str(request.folder);
   if (folder) {
-    // a UNC path is never looked at: Windows would contact that host before the user approved anything
-    if (!isRemote(folder) && path.isAbsolute(folder) && isDir(folder)) {
+    const state = isRemote(folder) ? "network" : folderState; // UNC text never counts as checked
+    if (state === "dir" && path.isAbsolute(folder)) {
       cwd = path.resolve(folder);
       from.cwd = true;
+    } else if (state === "network") {
+      notes.cwd = `Asked for the folder "${folder}", which is on a network location; network folders are not checked automatically.`;
     } else {
       notes.cwd = `Asked for the folder "${folder}", which is not an existing absolute path.`;
     }
@@ -221,6 +240,10 @@ export class PendingRequests {
 
   add(req) {
     this.#byId.set(req.requestId, req);
+  }
+
+  has(id) {
+    return this.#byId.has(id);
   }
 
   take(id) {
