@@ -1114,16 +1114,19 @@ test("send_message from a child to an app parent is stored, marked and redeliver
   assert.equal(s.store.pending("cli:parent").length, 0);
 });
 
-test("parent to child, non-relatives and relay notices carry no mark", () => {
+test("a parent's message is marked parent, a non-relative's other, a relay notice has no mark", () => {
   const s = setup();
   s.registry.appMessage = (f, t, x) => s.d.appMessage(f, t, x);
   s.registry.send("cli:parent", s.registry.get("cli:child").name, "zadanie");
   assert.equal(s.childPush[0].fromChild, undefined);
+  assert.equal(s.childPush[0].heldAs, "parent");
   s.d.outcome("cli:parent", { kind: "rejected", text: "no" });
   assert.equal(s.parentPush.at(-1).fromChild, undefined);
+  assert.equal(s.parentPush.at(-1).heldAs, undefined);
   s.registry.upsert({ key: "cli:x", name: "obcy", kind: "cli", app: true, push: () => true });
   s.registry.send("cli:x", s.registry.get("cli:parent").name, "hej");
   assert.equal(s.parentPush.at(-1).fromChild, undefined);
+  assert.equal(s.parentPush.at(-1).heldAs, "other");
 });
 
 test("a child message to a terminal (non-app) parent keeps today's path", () => {
