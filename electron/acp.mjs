@@ -45,9 +45,11 @@ export class AcpConnection extends EventEmitter {
     });
     this.proc.on("error", (e) => this.#fail(e));
     this.proc.on("exit", (code, signal) => {
-      // An exit code means the shell waited for its command, so Copilot is gone. A signal (a kill of the group, or
-      // anyone's) may have ended only the shell: Copilot is gone once the group is empty, and is made to go.
-      if (isWin || signal === null) return this.#exit(code, signal);
+      // An exit code on its own means the shell waited for its command, so Copilot is gone; the group is left alone.
+      // A signal (a kill of the group, or anyone's) may have ended only the shell, and after this connection's own
+      // kill the leader may exit with a code (an agent the shell exec'd, shutting down gracefully) while the rest of
+      // the group still runs: then Copilot is gone once the group is empty, and is made to go.
+      if (isWin || (signal === null && !this.#killing)) return this.#exit(code, signal);
       if (!this.#killing) this.kill();
       this.#whenGroupEmpty(() => this.#exit(code, signal));
     });

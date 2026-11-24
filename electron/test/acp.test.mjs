@@ -118,6 +118,18 @@ test("a shell that replaced itself with the agent: exit waits for what the agent
   assert.equal(alive(childPid), false);
 });
 
+test("a shell that replaced itself with the agent: after kill, exit waits for the group also on an exit code", posixOnly, async () => {
+  // the agent leads the group and exits 0 on SIGTERM; its child ignores SIGTERM and goes only with the SIGKILL at 3 s
+  const conn = new AcpConnection({ command: `exec ${agent("graceful-agent.mjs")}`, cwd });
+  const { pid, childPid } = await conn.start();
+  assert.equal(conn.proc.pid, pid);
+  const gone = exitOf(conn);
+  conn.kill();
+  assert.deepEqual(await gone, { code: 0, signal: null, stderr: "" });
+  assert.equal(alive(pid), false);
+  assert.equal(alive(childPid), false);
+});
+
 test("forceKill ends a stubborn agent at once", posixOnly, async () => {
   const conn = new AcpConnection({ command: agent("stubborn-agent.mjs"), cwd });
   const { pid, childPid } = await conn.start();
