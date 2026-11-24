@@ -27,6 +27,9 @@
       try {
         const chosen = await pick(current);
         if (chosen) set(chosen);
+      } catch (e) {
+        // the picker failed (its IPC call was refused): the folder stays as it was
+        console.warn(`[folder-row] pick: ${e?.message ?? e}`);
       } finally {
         picking = false;
       }

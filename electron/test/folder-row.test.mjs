@@ -109,3 +109,18 @@ test("a click while a pick runs does not start a second one", async () => {
   parts(row)[1].click();
   assert.equal(calls, 2, "a pick is possible again afterwards");
 });
+
+test("a pick that fails keeps the value, warns, and leaves the button usable", async (t) => {
+  const warned = [];
+  t.mock.method(console, "warn", (...a) => warned.push(a.join(" ")));
+  let calls = 0;
+  const row = createFolderRow({ value: "/a", pick: async () => (calls++, Promise.reject(new Error("no window"))), h });
+  const button = parts(row)[1];
+  await button.click(); // resolves: the failure does not escape the click handler
+  assert.equal(row.value(), "/a");
+  assert.equal(parts(row)[0].textContent, "/a");
+  assert.equal(warned.length, 1);
+  assert.match(warned[0], /no window/);
+  await button.click();
+  assert.equal(calls, 2, "a pick is possible again afterwards");
+});
