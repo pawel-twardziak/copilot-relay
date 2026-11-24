@@ -86,7 +86,7 @@ ACP mode, so the app connects its sessions to the broker itself, with the same n
 
 In the app, a session can also ask for a *delegated* session for one task (`create_session`), optionally with its own
 agent, model, folder, context size, prompt part and `copilot` arguments. Every creation needs a click on **Approve**
-in the app, where each value can be changed. The child is an ordinary session in the
+in the app, where every value except the name and the task can be changed. The child is an ordinary session in the
 **same folder and branch as its parent by default, with no isolation**, and sends its result back with `report_result`. A child
 can create children of its own, to any depth, with no limit on their number. The app shows them as a tree, in the
 session list and in a relation bar in each session. Session names are unique and permanent (`<base>-<6 hex>`).

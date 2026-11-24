@@ -5,7 +5,8 @@ It runs on Windows, macOS and Linux.
 
 - **Resume** any existing Copilot CLI session, including sessions started in a terminal. The list comes from
   ACP `session/list` and is grouped by folder. Opening a session replays its history.
-- **Start** a new session in any folder: use **+ New session**, `Ctrl/Cmd+N`, or the `+` next to a folder in the list.
+- **Start** a new session in any folder: use **+ New session**, `Ctrl/Cmd+N`, or the `+` next to a folder in the list;
+  the dialog's folder row has **Change…**.
 - **Collapse** a folder in the list by clicking its name (▸ / ▾, the number is its session count). **Pin** a session
   with 📌 (on hover): pinned sessions are listed on top, above the folders. Both are remembered. While you filter the
   list every folder is shown expanded.
@@ -205,12 +206,17 @@ an ordinary session: it appears in the list, you can open it, read what it did, 
   **Every creation needs your click**: there is no "always allow", and no model or message can answer the card. The
   parent is marked `!` in the list, and an OS notification fires if the window is not focused. The tool returns at
   once; the outcome arrives later as a message from `relay`, so the parent can keep working. If the child's Copilot
-  does not start (a mistyped command, say), the card says why and stays open: change the command and **Approve**
-  again, or **Reject**. The parent hears nothing until then.
+  does not start (a mistyped command, say), the picked folder was removed, or the child's lists refuse the card's agent
+  or model, the card says why and stays open: fix the value and **Approve** again, or **Reject**. The parent hears
+  nothing until then. The agent and model lists on the card are the parent's; a child in another folder can offer
+  other agents, which shows only after **Approve**.
+  A parent can propose any `copilot` flag, including ones that widen what the child may do without asking: the
+  card's warning and your **Approve** are the guard. An argument already in the parent's command line reaches
+  Copilot twice, and which one wins is Copilot's rule.
 - **The child** gets only its task, not the parent's history, so the parent has to put the context it needs in the
   task. If `model` is left out, the child uses the parent's current model. If `agent` is left out, it uses the
-  default Copilot agent; the parent's agent is not inherited. A model or agent the session doesn't offer creates no
-  child, and the parent is told the valid values. A child appears in the list without taking you away from what is
+  default Copilot agent; the parent's agent is not inherited. An agent or model the parent's session does not offer
+  falls back to the default, with a note on the card. A child appears in the list without taking you away from what is
   on screen. It can create children of its own, to any depth; there is no limit on their number.
 - **`report_result(text)`** is called by the child, once, when it is done. It has no recipient: the broker knows
   the parent. The report wakes the parent as a "from …" bubble and is kept on disk until the parent's prompt has
@@ -256,8 +262,8 @@ an ordinary session: it appears in the list, you can open it, read what it did, 
 - **Permissions.** A child starts with no automatic approvals beyond the relay tools, and asks like any other session.
   While it waits, it has a `!` in the list and an OS notification fires if the window is not focused. Nothing is
   answered for you.
-- **No isolation.** A child works in **the same folder and on the same branch as its parent**. There is no worktree or
-  sandbox, and the tool has no folder parameter. Children that edit files can get in each other's way or in the
+- **No isolation.** By default a child works in **the parent's folder and on its branch**; the parent can propose
+  another folder and you can change it on the card. There is still no worktree or sandbox. Children that edit files can get in each other's way or in the
   parent's.
 - **Budget.** Messages between a parent and its child have their own budget of 12, refilled by a human prompt in
   either session; reports and relay notices are charged to nothing. It is `maxAgentMessagesPerPair` in the broker's
@@ -308,10 +314,11 @@ linked, so editing or deleting a template later changes no session.
 
 **Where you edit the own part:**
 
-- On creation: **New session** opens the editor before Start; a forked session starts with a copy of its source's
+- On creation: **New session** opens the editor before Start, with the folder row (**Change…** opens the system
+  folder picker; the folder of an existing session cannot be changed); a forked session starts with a copy of its source's
   own part.
 - On a child's card: the card that asks you to approve a new child has the editor, so you can add to the child's
-  prompt before you click **Approve**.
+  prompt before you click **Approve**. It can start with the parent's proposed prompt, marked "from …".
 - In a running session: the **Setup** button. **Save and restart** restarts that session's Copilot with the new
   prompt; the history is kept. It needs no running turn, and the session's subagents and shell commands stop.
 
@@ -482,8 +489,7 @@ the shell is `cmd`, where only double quotes group an argument: write `--allow-t
 
 The `COPILOT_PATH` environment variable works too, and is such a line as well.
 
-**A command per session.** In the dialog of a new session (which also has the folder row with **Change…**; the folder of an existing session
-cannot be changed), or later in the session's **Setup**, a session can have its
+**A command per session.** In the dialog of a new session, or later in the session's **Setup**, a session can have its
 own Copilot command. It replaces the Settings command for that session; empty means the Settings command. The card
 that approves a delegated child has the same field: it starts with the parent's command, and what it holds when you
 approve becomes the child's command (cleared: the Settings command). If a session's command is broken, repair it
