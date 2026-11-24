@@ -8,8 +8,11 @@ import { test } from "node:test";
 import { SERVER, startBroker } from "./broker-helper.mjs";
 
 const health = async (b) => (await fetch(`${b.url}/health`)).json();
+// fetch only says "fetch failed": the cause (ECONNRESET, UND_ERR_SOCKET…) is what tells a lost answer apart
 const post = (b, headers = { "content-type": "application/json" }) =>
-  fetch(`${b.url}/api/shutdown`, { method: "POST", headers, body: "{}" });
+  fetch(`${b.url}/api/shutdown`, { method: "POST", headers, body: "{}" }).catch((e) => {
+    throw new Error(`${e.message}: ${e.cause?.code ?? e.cause?.message ?? "no cause"}`, { cause: e });
+  });
 
 test("health reports the pid, start time, folder and web sessions", async (t) => {
   const b = await startBroker(t);

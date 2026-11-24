@@ -1,6 +1,7 @@
-# TEMPORARY (branch fix/broker-shutdown-flush only): runs the POST /api/shutdown test many times on Windows, under
-# load (12 at a time, as in the full suite where the test files run in parallel), with main's server.mjs (baseline)
-# and with the fixed one. Removed before the branch is merged.
+# TEMPORARY (branch fix/broker-shutdown-flush only): runs the whole broker-shutdown test file many times on Windows,
+# under load (6 at a time, as in the full suite where the test files run in parallel), with main's server.mjs
+# (baseline) and with the fixed one, and counts how often "POST /api/shutdown answers…" fails. Removed before the
+# branch is merged.
 name: Shutdown stress
 
 on:
@@ -34,24 +35,26 @@ jobs:
         run: |
           git fetch --depth=1 origin main
           git checkout FETCH_HEAD -- server.mjs
-          grep -c "SHUTDOWN_GRACE_MS" server.mjs || true
-      - name: POST /api/shutdown, 12 workers x 60 runs (${{ matrix.variant }})
+      - name: broker-shutdown.test.mjs, 6 workers x 40 runs (${{ matrix.variant }})
         shell: bash
         run: |
+          set +e
           worker() {
             local fail=0
-            for i in $(seq 1 60); do
-              if ! node --test --test-name-pattern="POST /api/shutdown answers" electron/test/broker-shutdown.test.mjs > "out-$1.txt" 2>&1; then
+            for i in $(seq 1 40); do
+              node --test electron/test/broker-shutdown.test.mjs > "out-$1.txt" 2>&1
+              if grep -q "^not ok [0-9]* - POST /api/shutdown answers" "out-$1.txt"; then
                 fail=$((fail+1))
-                grep -E "error:|cause|ECONN|UND_ERR" "out-$1.txt" | head -4 >> "errors-$1.txt"
+                grep -A12 "^not ok [0-9]* - POST /api/shutdown answers" "out-$1.txt" | grep -E "error:" >> "errors-$1.txt"
               fi
             done
             echo "$fail" > "fail-$1.txt"
           }
-          for w in $(seq 1 12); do worker "$w" & done
+          for w in $(seq 1 6); do worker "$w" & done
           wait
           total=0
-          for w in $(seq 1 12); do total=$((total + $(cat "fail-$w.txt"))); done
+          for w in $(seq 1 6); do total=$((total + $(cat "fail-$w.txt"))); done
           cat errors-*.txt 2>/dev/null | sort | uniq -c | head -10
-          echo "variant=${{ matrix.variant }} runs=720 failed=$total"
-          if [ "${{ matrix.variant }}" = "fix" ]; then test "$total" -eq 0; fi
+          echo "variant=${{ matrix.variant }} runs=240 failed=$total"
+          if [ "${{ matrix.variant }}" = "fix" ] && [ "$total" -ne 0 ]; then exit 1; fi
+          exit 0
