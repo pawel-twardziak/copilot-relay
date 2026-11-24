@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { realpathSync } from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import path from "node:path";
 import { test } from "node:test";
 import { SERVER, startBroker } from "./broker-helper.mjs";
@@ -28,6 +29,26 @@ test("POST /api/shutdown answers with the pid and the broker exits", async (t) =
   assert.deepEqual(await r.json(), { ok: true, pid: b.proc.pid });
   assert.equal(await b.exited, 0);
   await assert.rejects(fetch(`${b.url}/health`));
+});
+
+test("the broker answers a shutdown only after the whole request, closes the connection, then exits", async (t) => {
+  const b = await startBroker(t);
+  const sock = net.connect(b.port, "127.0.0.1");
+  t.after(() => sock.destroy());
+  let got = "";
+  sock.setEncoding("utf8").on("data", (d) => (got += d));
+  const closed = new Promise((resolve) => sock.once("close", resolve));
+  // the head of the request without its body: an answer now would leave the body unread when the process exits
+  sock.write(`POST /api/shutdown HTTP/1.1\r\nHost: 127.0.0.1:${b.port}\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n`);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(got, "", "no answer before the body arrived");
+  assert.equal(b.proc.exitCode, null, "the broker still runs");
+  sock.write("{}");
+  await closed; // the broker closes the connection itself (Connection: close)
+  assert.match(got, /^HTTP\/1\.1 200 /);
+  assert.match(got, /\r\nconnection: close\r\n/i);
+  assert.ok(got.includes(JSON.stringify({ ok: true, pid: b.proc.pid })), "the answer's body arrived");
+  assert.equal(await b.exited, 0);
 });
 
 test("a foreign shutdown request is refused and the broker keeps running", async (t) => {

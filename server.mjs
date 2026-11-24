@@ -17,6 +17,7 @@ const config = JSON.parse(await readFile(configPath, "utf8").catch(() => "{}"));
 
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.COPILOT_RELAY_PORT ?? config.port ?? 7777);
+const SHUTDOWN_GRACE_MS = 2000; // POST /api/shutdown: the longest wait for the caller to close its connection
 // Tool titles approved without asking (relay tools only by default).
 const AUTO_APPROVE = config.autoApproveTools ?? ["send_message", "list_sessions"];
 const DEFAULT_CWD = path.resolve(path.dirname(configPath), config.cwd ?? ".");
@@ -263,10 +264,16 @@ const server = http.createServer(async (req, res) => {
           acpSessions: acpAgents.size,
         });
 
-      // The desktop app's "Update and restart broker": the answer is flushed before the process exits.
-      case "POST /api/shutdown":
-        res.writeHead(200, { "content-type": "application/json" });
-        return res.end(JSON.stringify({ ok: true, pid: process.pid }), shutdown);
+      // The desktop app's "Update and restart broker". The process must not exit under the answer: the request is
+      // read to its end first (unread bytes turn the close into a reset), the connection is closed with the
+      // answer, and the exit follows the close. The timer is for a client that keeps the connection open.
+      case "POST /api/shutdown": {
+        await readBody(req);
+        res.socket.once("close", shutdown);
+        setTimeout(shutdown, SHUTDOWN_GRACE_MS).unref();
+        res.writeHead(200, { "content-type": "application/json", connection: "close" });
+        return res.end(JSON.stringify({ ok: true, pid: process.pid }));
+      }
 
       // ----- GUI -----
       case "GET /events":
