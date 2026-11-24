@@ -10,6 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { AcpConnection } from "./acp.mjs";
+import { isNotFoundExit, normalizeCommand, resolveCommand, startFailureText } from "./copilot-command.mjs";
 import { countUserMessages, deleteSession, describeCut, forkSession, isSessionId, messageTimes, purgeDeleted, sessionCreatedAt, sessionDir, truncateSession } from "./history.mjs";
 import { createLastActivity } from "./last-activity.mjs";
 import { createUsagePusher } from "./usage.mjs";
@@ -82,7 +83,8 @@ function saveSettings(s) {
   mkdirSync(path.dirname(settingsFile()), { recursive: true });
   writeFileSync(settingsFile(), JSON.stringify(s, null, 2));
 }
-const copilotCommand = () => loadSettings().copilotCommand || process.env.COPILOT_PATH || "copilot";
+/** The Settings command, else $COPILOT_PATH, else `copilot`, with where it comes from (see copilot-command.mjs). */
+const settingsCommand = () => resolveCommand({ settings: loadSettings().copilotCommand, envPath: process.env.COPILOT_PATH });
 
 // Context window per session (200k / 1M): an override per session, else the Settings default (see context-tier.mjs)
 const tiers = createTierStore(path.join(app.getPath("userData"), "context-tiers.json"));
@@ -305,10 +307,14 @@ for (const [channel, route] of [["links:forget", "/api/links/forget"], ["links:m
 
 // ---------- connections ----------
 
+const START_TIMEOUT_MS = Number(process.env.COPILOT_RELAY_START_TIMEOUT_MS) || 60_000; // the variable is for the UI checks
+const START_TIMEOUT_TEXT = `Copilot did not answer within ${START_TIMEOUT_MS / 1000} seconds.`;
+
 /** Start a Copilot process. A non-empty prompt goes into an instructions folder of this process's own (named in its
  *  environment, never on the command line), removed when the process exits; a folder that cannot be made fails the
- *  start, so no session runs without the prompt it was given. */
-async function connect(cwd, deadline, args = [], prompt = "") {
+ *  start, so no session runs without the prompt it was given. `command` is { command, source } (see
+ *  resolveCommand); the start ends at `deadline` (the caller's) or after START_TIMEOUT_MS, whichever comes first. */
+async function connect(cwd, { deadline, args = [], prompt = "", command = settingsCommand() } = {}) {
   let env = process.env;
   let promptDir = null;
   // never throws: it runs inside the exit event (before the session's own exit handling) and on failed starts, where
@@ -334,7 +340,7 @@ async function connect(cwd, deadline, args = [], prompt = "") {
       throw failure(e.message); // the data folder's path contains a comma
     }
   }
-  const conn = new AcpConnection({ command: copilotCommand(), cwd, args, env });
+  const conn = new AcpConnection({ command: command.command, cwd, args, env });
   const release = () => {
     promptProcs.delete(conn);
     removeDir();
@@ -344,22 +350,25 @@ async function connect(cwd, deadline, args = [], prompt = "") {
     conn.once("exit", release);
   }
   try {
-    await (deadline ? withDeadline(conn.start(), deadline, SETUP_TIMEOUT_TEXT) : conn.start());
+    const callers = deadline !== undefined && deadline <= Date.now() + START_TIMEOUT_MS;
+    await withDeadline(conn.start(), callers ? deadline : Date.now() + START_TIMEOUT_MS, callers ? SETUP_TIMEOUT_TEXT : START_TIMEOUT_TEXT);
   } catch (e) {
     conn.kill();
     // a process that never ran (spawn failed) sends no exit; one that runs removes its folder when it is gone
     if (promptDir && (conn.exited || !conn.proc?.pid)) release();
-    // A start can fail because Copilot is missing (wrong path), crashed, or is signed out and quit; the error text
+    // A start can fail because Copilot is missing (wrong command), crashed, or is signed out and quit; the error text
     // doesn't reliably say which, so unless Copilot answered auth_required both remedies are shown.
-    const detail = String(e?.message ?? e);
-    const hint =
-      needsLogin(e)
-        ? LOGIN_HINT
-        : e?.code === "ENOENT" // spawn: no such program
-          ? "GitHub Copilot CLI was not found. Install it, or set its full path in Settings."
-          : "If GitHub Copilot CLI is installed, check that you are signed in (`copilot login` in a terminal). " +
-          "Otherwise install it, or set its full path in Settings.";
-    const err = new Error(`Could not start "${conn.command}": ${detail}\n\n${hint}`);
+    const err = new Error(
+      startFailureText({
+        command: conn.command,
+        source: command.source,
+        detail: String(e?.message ?? e),
+        notFound: isNotFoundExit(e),
+        login: needsLogin(e),
+        loginHint: LOGIN_HINT,
+        generalHint: "If GitHub Copilot CLI is installed, check that you are signed in (`copilot login` in a terminal). Otherwise install it.",
+      }),
+    );
     err.startFailure = true;
     throw err;
   }
@@ -368,9 +377,11 @@ async function connect(cwd, deadline, args = [], prompt = "") {
 
 async function getLister() {
   if (lister && !lister.exited) return lister;
-  lister = await connect(os.homedir());
-  lister.on("exit", () => (lister = null));
-  return lister;
+  const conn = await connect(os.homedir());
+  lister = conn;
+  // an exit comes only when the whole group is gone (a moment after a kill): by then a newer lister may have replaced this one
+  conn.on("exit", () => lister === conn && (lister = null));
+  return conn;
 }
 
 // context/credits/quota figures for the window, debounced per session
@@ -482,7 +493,7 @@ const SETUP_TIMEOUT_TEXT = `Copilot did not answer within ${CHILD_SETUP_TIMEOUT_
 async function createSession(cwd, link = {}, deadline, tier = null, own = "") {
   requireDir(cwd);
   const prompt = promptFor(null, { own, isChild: Boolean(link.parentKey) });
-  const conn = await connect(cwd, deadline, tierArgs(tier ?? effectiveTier(null, loadSettings().contextTier)), prompt);
+  const conn = await connect(cwd, { deadline, args: tierArgs(tier ?? effectiveTier(null, loadSettings().contextTier)), prompt });
   const relay = relayPrepare();
   // the agent may send updates (available_commands_update…) before it answers session/new: keep them
   const early = [];
@@ -553,7 +564,7 @@ async function resumeSession(sessionId, cwd) {
 
 async function openSession(sessionId, cwd) {
   requireDir(cwd);
-  const conn = await connect(cwd, undefined, tierArgs(sessionTier(sessionId)), promptFor(sessionId));
+  const conn = await connect(cwd, { args: tierArgs(sessionTier(sessionId)), prompt: promptFor(sessionId) });
   const relay = relayPrepare();
   // the agent replays the history as session/update notifications before answering session/load
   const entry = attach(sessionId, conn, cwd, relay);
@@ -1073,9 +1084,7 @@ async function closeAndWait(sessionId) {
   const conn = await closeEntry(sessionId);
   await exited(conn);
   if (!conn || conn.exited) return;
-  // on Windows the process is a shell wrapper: kill() runs taskkill /T /F on the whole tree again
-  if (process.platform === "win32") conn.kill();
-  else conn.proc?.kill("SIGKILL");
+  conn.forceKill();
   await exited(conn, 2000);
   if (conn.exited) return;
   // until it is really gone, nothing may open, rewrite or delete the session (a second agent on the same files)
@@ -1243,7 +1252,7 @@ handle("dialog:pickDir", async (title) => {
 
 handle("settings:get", async () => ({
   copilotCommand: loadSettings().copilotCommand ?? "",
-  effective: copilotCommand(),
+  effective: settingsCommand().command,
   platform: process.platform,
   relay: loadSettings().relay !== false,
   relayAvailable: Boolean(RelayClient),
@@ -1259,7 +1268,10 @@ handle("settings:get", async () => ({
   childPartDefault: CHILD_PART,
 }));
 handle("settings:set", async (s) => {
-  const next = { ...loadSettings(), copilotCommand: String(s.copilotCommand ?? "").trim(), relay: s.relay !== false, contextTier: normalizeTier(s.contextTier) ?? "default", queueMidTurn: s.queueMidTurn === true, activityPanel: normalizePanelMode(s.activityPanel), brokerRepo: String(s.brokerRepo ?? "").trim() };
+  // a refused command keeps the stored one; the rest of the form is still saved
+  const typed = normalizeCommand(s.copilotCommand ?? "");
+  if (typed.refused) console.warn(`[settings] the Copilot command was not saved: ${typed.refused}`);
+  const next = { ...loadSettings(), ...(typed.refused ? {} : { copilotCommand: typed.command }), relay: s.relay !== false, contextTier: normalizeTier(s.contextTier) ?? "default", queueMidTurn: s.queueMidTurn === true, activityPanel: normalizePanelMode(s.activityPanel), brokerRepo: String(s.brokerRepo ?? "").trim() };
   // the prompt parts only when sent (a form without them keeps them); promptChild null: back to the built-in text
   saveSettings(applyPromptSettings(next, s));
   lister?.kill();
@@ -1771,6 +1783,18 @@ if (!app.requestSingleInstanceLock()) {
     e.preventDefault();
     Promise.all(live.map((c) => exited(c, 3500))).then(() => app.quit());
   });
+  // Copilot leads its own process group, so a signal to the app's group (Ctrl+C in the terminal that runs it, a
+  // kill of the app) does not reach it: the app stops every Copilot it started, then exits, without the question
+  // of the quit path. (A start still in flight is not in `open` yet and is not reached.)
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+    if (process.platform === "win32" && signal === "SIGHUP") continue;
+    process.on(signal, () => {
+      leavingConfirmed = true;
+      killAll();
+      scheduler?.abortAllSync();
+      app.quit();
+    });
+  }
   app.on("before-quit", (e) => {
     if (confirmLeavingChildren()) {
       killAll();

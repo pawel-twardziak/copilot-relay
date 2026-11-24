@@ -2422,6 +2422,9 @@ export const checks = [
       await app.ev(`(() => { const t = ${D}.querySelector(".pe-own"); t.value = "Keep me."; t.dispatchEvent(new Event("input", { bubbles: true })); })()`);
       await app.ev(`document.querySelector("#prompt-ok").click()`);
       await app.check(`${D}.querySelector("#prompt-note").textContent.startsWith("Could not start the session:")`, "the start error in the dialog");
+      const note = await app.ev(`${D}.querySelector("#prompt-note").textContent`);
+      assert.match(note, /The program was not found, or cannot be run\./);
+      assert.match(note, /This is the command from Settings\./);
       assert.equal(await app.ev(`${D}.open`), true, "the dialog stays open");
       assert.equal(await app.ev(`${D}.querySelector(".pe-own").value`), "Keep me.");
       assert.equal(await app.ev(`document.querySelector("#prompt-ok").disabled`), false, "Start can be pressed again");
@@ -2430,6 +2433,70 @@ export const checks = [
       assert.equal(await app.ev(`window.__newSession.then(() => true)`, "newSession to return"), true);
       assert.equal(await app.ev(`${D}.open`), false);
       assert.equal(await app.ev(`views.size`), shown, "no view");
+    },
+  },
+  {
+    // a start that never answers (a command that sleeps) ends at the start deadline: the note says so, the dialog
+    // stays open with Start and Cancel enabled, and the command's process is gone
+    name: "new-session-start-deadline",
+    modes: ["off"],
+    settings: { copilotCommand: "sh -c 'sleep 30' x" },
+    env: { COPILOT_RELAY_START_TIMEOUT_MS: "1000" },
+    async run(app) {
+      if (process.platform === "win32") return;
+      const work = path.join(app.dir, "work");
+      const D = `document.querySelector("#prompt-dialog")`;
+      const leftovers = () =>
+        readdirSync("/proc")
+          .filter((p) => /^\d+$/.test(p))
+          .filter((p) => {
+            try {
+              return readlinkSync(`/proc/${p}/cwd`) === work;
+            } catch {
+              return false; // gone, or not ours
+            }
+          });
+      await app.ev(`(window.__newSession = newSession(${JSON.stringify(work)}), true)`);
+      await app.check(`${D}.open`, "the prompt dialog");
+      await app.ev(`document.querySelector("#prompt-ok").click()`);
+      await app.check(`${D}.querySelector("#prompt-note").textContent.includes("Copilot did not answer within 1 seconds.")`, "the deadline text in the dialog");
+      assert.equal(await app.ev(`${D}.open`), true, "the dialog stays open");
+      assert.equal(await app.ev(`document.querySelector("#prompt-ok").disabled`), false, "Start can be pressed again");
+      assert.equal(await app.ev(`document.querySelector("#prompt-cancel").disabled`), false, "Cancel can be pressed");
+      await until(async () => leftovers().length === 0, "the command's process to be gone");
+      await app.ev(`document.querySelector("#prompt-cancel").click()`);
+      await app.ev(`window.__newSession.then(() => true)`, "newSession to return");
+    },
+  },
+  {
+    // a signal sent to the app's main process (Ctrl+C in a terminal, a kill) leaves no Copilot of the launch behind:
+    // each leads its own process group, so the signal does not reach it. (Electron's own SIGTERM handling also quits
+    // the app through the quit path, so this guards the outcome; it cannot tell the handler from that path.) The agent alone would end by itself when the
+    // app dies (its stdin closes), so the command leaves a `sleep` behind it in the same group: only a kill of the
+    // group removes it.
+    name: "signal-kills-copilots",
+    modes: ["off"],
+    settings: { copilotCommand: `sh -c '"$0" "$@"; sleep 60' ${path.join(ROOT, "electron", "test", "fixtures", "acp", "scripted-agent.mjs")}` },
+    async run(app) {
+      if (process.platform === "win32") return;
+      const work = path.join(app.dir, "work");
+      const inWork = () =>
+        readdirSync("/proc")
+          .filter((p) => /^\d+$/.test(p))
+          .filter((p) => {
+            try {
+              return readlinkSync(`/proc/${p}/cwd`) === work;
+            } catch {
+              return false; // gone, or not ours
+            }
+          });
+      await app.newSession();
+      assert.ok(app.agents().length >= 1, "an agent for the session");
+      const main = app.mainPid();
+      assert.ok(main, "the app's main process");
+      process.kill(main, "SIGTERM");
+      await until(async () => !existsSync(`/proc/${main}`), "the app to exit");
+      await until(async () => app.agents().length === 0 && inWork().length === 0, "no process of the session to be left after SIGTERM");
     },
   },
   {

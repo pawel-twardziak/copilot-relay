@@ -163,9 +163,10 @@ async function attach(port) {
  * sessionId: the id the scripted agent gives its session instead of scripted-work (a UUID: the app reads Copilot's
  * history files only for those; they go in <dir>/copilot-home/session-state/<id>/). broker: start a broker on the
  * app's relay port first (the app reaches it only with settings.relay true); without it nothing listens there.
+ * env: more variables for the app's environment.
  * @returns the driver; every method that waits throws after 20 s.
  */
-export async function launch({ scenario, settings = {}, width = 1280, height = 800, dir = null, sessionId: scriptedId = null, broker = false }) {
+export async function launch({ scenario, settings = {}, width = 1280, height = 800, dir = null, sessionId: scriptedId = null, broker = false, env: extraEnv = {} }) {
   // dir: the folder of an earlier launch kept with close({ keep: true }); this launch uses its settings and stored UI
   // state, and removes it
   const tmp = dir ?? mkdtempSync(path.join(os.tmpdir(), "ui-check-"));
@@ -202,7 +203,7 @@ export async function launch({ scenario, settings = {}, width = 1280, height = 8
   // Its own process group: close() stops xvfb, Electron and the agents it started together.
   const proc = spawn("xvfb-run", ["-a", ELECTRON, "electron", "--ozone-platform=x11", `--remote-debugging-port=${port}`], {
     cwd: ROOT,
-    env: { ...env, ...relayEnv, XDG_SESSION_TYPE: "x11", XDG_CONFIG_HOME: config, COPILOT_HOME: path.join(tmp, "copilot-home"), SCRIPTED_SCENARIO: path.resolve(scenario), ...(scriptedId ? { SCRIPTED_SESSION_ID: scriptedId } : {}) },
+    env: { ...env, ...relayEnv, XDG_SESSION_TYPE: "x11", XDG_CONFIG_HOME: config, COPILOT_HOME: path.join(tmp, "copilot-home"), SCRIPTED_SCENARIO: path.resolve(scenario), ...extraEnv, ...(scriptedId ? { SCRIPTED_SESSION_ID: scriptedId } : {}) },
     detached: true,
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -285,6 +286,18 @@ export async function launch({ scenario, settings = {}, width = 1280, height = 8
       ev,
       check,
       resize,
+      /** The pid of the app's main process (Electron's, not a helper's), or null. */
+      mainPid() {
+        for (const pid of readdirSync("/proc").filter((d) => /^\d+$/.test(d))) {
+          try {
+            const cmd = readFileSync(`/proc/${pid}/cmdline`, "utf8").replaceAll("\0", " "); // Electron joins its own arguments
+            if (/\/dist\/electron /.test(cmd) && cmd.includes(` --remote-debugging-port=${port} `) && !cmd.includes(" --type=")) return Number(pid);
+          } catch {} // gone meanwhile, or not ours to read
+        }
+        return null;
+      },
+      /** The scripted agents of this launch that still run. */
+      agents: () => agentsOf(namesFile),
       /** A real Enter key press on the focused element (not a synthetic event: it takes the browser's own
        *  handling, such as a form's implicit submit). */
       async pressEnter() {
