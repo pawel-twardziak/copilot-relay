@@ -1740,12 +1740,12 @@ async function confirmedReload(reload) {
     const reopens = [...reopenCards.values()].filter((c) => children.includes(c.sessionId)).length;
     const choice = dialog.showMessageBoxSync(parent, { type: "warning", buttons: ["Reload", "Cancel"], defaultId: 1, cancelId: 1, ...reloadWarning(children.length, pendingRequests.size, reopens) });
     if (choice !== 0) return;
+    // counted before the children are closed: a start that fails during that wait must already see the reload
+    windowReloads++;
     await Promise.all(children.map((id) => closeEntry(id).catch(() => {})));
     pendingRequests.clear();
-  }
-  if (parent.isDestroyed()) return;
-  windowReloads++;
-  reload(parent.webContents);
+  } else windowReloads++;
+  if (!parent.isDestroyed()) reload(parent.webContents);
 }
 
 function notifyIfUnfocused(title, body) {
