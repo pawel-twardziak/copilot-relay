@@ -88,3 +88,28 @@ Not covered: client mode `"empty"` (meant for multi-user servers), OAuth for MCP
 - A scenario hangs: Ctrl+C once finishes it and runs the cleanup; `--turn-timeout <seconds>` changes the limit.
 - Sessions left behind after a hard stop are named in `report.json` under the scenario that created them; the next
   full run does not remove them.
+
+## Cache TTL and compaction cost (`cache-ttl.mjs`)
+
+A separate, smaller check: how long the Copilot CLI keeps the prompt cache per model, and whether a compaction costs
+a premium request. It needs only Node and the installed Copilot CLI (no `npm install`).
+
+For an agent asked to run it, from the root of this repository:
+
+```
+git pull origin main
+cd scripts/sdk-probe
+node cache-ttl.mjs
+node cache-ttl.mjs --live
+```
+
+- `node cache-ttl.mjs` is free: it only reads the session history in `COPILOT_HOME` (`~/.copilot/session-state`,
+  the newest 300 sessions; `--sessions <n>` changes it).
+- `node cache-ttl.mjs --live` sends nothing either: it lists the models. Run the paid test only when the owner asks,
+  with a Claude model from that list: `node cache-ttl.mjs --live --model <id>`. It sends two prompts and `/compact`
+  in a temporary folder (2 premium requests × the model multiplier), then removes the test session (`--keep` keeps it).
+- Show the owner the whole output. It is also saved to `results/cache-ttl-<time>.md`, which git ignores. It holds
+  model names, endpoints and numbers only.
+
+What to read in it: `cacheTtlSeconds` per model (300 means the cache lives 5 minutes), and in the compactions
+table the `premium Δ` of the rows with "no turn in between" (0 means the compaction did not cost a premium request).
