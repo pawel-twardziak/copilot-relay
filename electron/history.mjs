@@ -84,7 +84,8 @@ export function cutIndex(events, { ordinal, text, where }) {
   const u = userIndex(events, ordinal, text);
   if (where === "beforeUser") return u;
   if (where === "beforeReply") return u + 1;
-  const next = events.findIndex((e, i) => i > u && isUser(e));
+  // any user.message ends the reply, a keep-alive ping too: a cut removes the pings that follow the target
+  const next = events.findIndex((e, i) => i > u && e.type === "user.message");
   return next === -1 ? events.length : next;
 }
 

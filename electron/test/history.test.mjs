@@ -659,8 +659,13 @@ describe("keep-alive pings", () => {
 
   test("a ping right after the cut target", () => {
     const events = pingEvents("x");
-    assert.equal(cutIndex(events, { ordinal: 1, text: "a", where: "afterReply" }), 5);
-    assert.equal(cutIndex(events, { ordinal: 2, text: "b", where: "beforeUser" }), 5);
-    assert.equal(countFrom(events, 5), 1);
+    assert.equal(cutIndex(events, { ordinal: 1, text: "a", where: "afterReply" }), 3); // the ping goes with what follows
+    assert.equal(countFrom(events, 3), 1);
+    assert.equal(cutIndex(events, { ordinal: 2, text: "b", where: "beforeUser" }), 5); // pings are not counted
+  });
+
+  test("a ping after the last real message is cut away", () => {
+    const events = [...pingEvents("x"), ev("user.message", { content: keepAliveText() }), ev("assistant.message", { content: "." })];
+    assert.equal(cutIndex(events, { ordinal: 2, text: "b", where: "afterReply" }), 7);
   });
 });

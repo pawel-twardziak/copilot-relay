@@ -271,8 +271,10 @@ must skip it:
   between a ping and its answer, because pings are never cut targets.
 - **Replay.** On `session/load` the CLI replays the history as updates. Main's `entry.update` already handles live
   and replayed updates in one path. There, a `user_message_chunk` whose text starts with the marker starts a
-  swallowed span. Every update up to the next `user_message_chunk` is swallowed: the ping's answer and anything it
-  did. The renderer needs no change.
+  swallowed span. Up to the next `user_message_chunk` only turn content is swallowed: the ping's answer, thoughts,
+  tool calls and plan. Session state (`available_commands_update`, `usage_update`, `config_option_update`,
+  `session_info_update`) still passes, because the command list and the context usage must arrive even when the
+  history ends with a ping. The renderer needs no change.
 - **`/compact`** writes no `user.message` (measured), so it needs no filtering. Whether its reply line comes back on
   replay is left to the builder to check; if it does, swallow it there too.
 

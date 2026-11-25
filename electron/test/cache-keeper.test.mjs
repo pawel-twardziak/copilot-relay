@@ -160,3 +160,14 @@ test("the replay filter swallows the compact reply", () => {
   assert.equal(f.pass(reply), false);
   assert.equal(f.pass(agent("Normal answer")), true);
 });
+
+test("the replay filter lets session state through inside a ping span", () => {
+  const f = createReplayFilter();
+  const state = [{ sessionUpdate: "available_commands_update", availableCommands: [] }, { sessionUpdate: "usage_update", used: 1, size: 2 }];
+  assert.equal(f.pass(user(keepAliveText())), false);
+  assert.equal(f.pass(agent(".")), false);
+  assert.equal(f.pass({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "t" } }), false);
+  assert.equal(f.pass({ sessionUpdate: "plan", entries: [] }), false);
+  assert.equal(f.pass({ sessionUpdate: "tool_call_update", toolCallId: "t" }), false);
+  for (const u of state) assert.equal(f.pass(u), true);
+});

@@ -82,8 +82,10 @@ export function next({ state, now, settings, facts, leads }) {
 }
 
 const COMPACT_REPLY = "Compacted conversation history";
+// what a turn produces; session state (command list, usage, config, title) is not turn content and always passes
+const TURN_CONTENT = new Set(["user_message_chunk", "agent_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update", "plan"]);
 
-/** Filter for the updates `session/load` replays: keep-alive prompts, whatever the session did in answer to them, and
+/** Filter for the updates `session/load` replays: keep-alive prompts, the turn content the session produced in answer to them, and
  *  the `/compact` reply are not part of the chat the user sees. One filter per replay. */
 export function createReplayFilter() {
   let swallowing = false;
@@ -94,7 +96,7 @@ export function createReplayFilter() {
         swallowing = isKeepAlive(text);
         return !swallowing;
       }
-      if (swallowing) return false;
+      if (swallowing && TURN_CONTENT.has(update?.sessionUpdate)) return false;
       return !(update?.sessionUpdate === "agent_message_chunk" && String(text ?? "").startsWith(COMPACT_REPLY));
     },
   };
