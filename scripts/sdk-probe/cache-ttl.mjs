@@ -3,6 +3,7 @@
 //
 //   node cache-ttl.mjs                      free: scans the session history in COPILOT_HOME, sends nothing
 //   node cache-ttl.mjs --live               lists the models the live test can use, sends nothing
+//   node cache-ttl.mjs --quota              free: billing mode of the account (account.getQuota; needs `npm install`)
 //   node cache-ttl.mjs --live --model <id>  two prompts + /compact over ACP in a temporary folder (2 premium requests × the model multiplier)
 //
 // Options: --sessions <n> (newest sessions scanned, default 300), --cli <path> (Copilot CLI), --keep (keep the test
@@ -227,6 +228,51 @@ function scan() {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// Billing mode (account.getQuota through the SDK)
+
+async function quota() {
+  let sdk;
+  try {
+    sdk = await import("@microsoft/copilot-sdk");
+  } catch (e) {
+    throw new Error(`Cannot load @microsoft/copilot-sdk (run \`npm install\` in scripts/sdk-probe first): ${e.message}`);
+  }
+  const cli = resolveCli(value("cli"));
+  // the SDK spawns a file directly: the CLI executable, or the JavaScript entry behind an npm shim (copilot.cmd)
+  const file = cli.executable ?? cli.script;
+  const runtime = file ? sdk.RuntimeConnection.forSpawnedStdio({ path: file }) : sdk.RuntimeConnection.forSpawnedStdio({});
+  const client = new sdk.CopilotClient({ mode: "coding-agent", runtime });
+  say("## Billing mode (account.getQuota)");
+  say();
+  say(`Runtime: ${file ?? "the one bundled with the SDK (no Copilot CLI file found)"}`);
+  try {
+    await withTimeout(client.start(), 90_000, "client.start()");
+    const answer = await withTimeout(client.rpc.account.getQuota({}), 30_000, "account.getQuota");
+    const pools = answer?.quotaSnapshots ?? {};
+    const other = Object.keys(answer ?? {}).filter((k) => k !== "quotaSnapshots");
+    if (other.length) say(`Other fields in the answer: ${other.join(", ")}`);
+    say();
+    const names = Object.keys(pools);
+    if (!names.length) {
+      say("The answer holds no quota pools.");
+      return;
+    }
+    // every field of every pool: they are counters, flags and the reset date
+    const fields = [...new Set(names.flatMap((n) => Object.keys(pools[n] ?? {})))];
+    say(`| field | ${names.join(" | ")} |`);
+    say(`|---|${names.map(() => "---").join("|")}|`);
+    for (const f of fields) say(`| ${f} | ${names.map((n) => (typeof pools[n]?.[f] === "object" ? JSON.stringify(pools[n][f]) : String(pools[n]?.[f] ?? "–"))).join(" | ")} |`);
+    say();
+    const metered = names.filter((n) => pools[n]?.entitlementRequests > 0 || pools[n]?.isUnlimitedEntitlement || pools[n]?.usedRequests > 0);
+    const tokens = metered.filter((n) => pools[n]?.tokenBasedBilling === true);
+    say(`Pools in use: ${metered.join(", ") || "none"}; with tokenBasedBilling = true: ${tokens.join(", ") || "none"}.`);
+    say(tokens.length ? "Reading: usage is billed by tokens (AI credits): the prompt cache changes the cost." : "Reading: no pool in use is billed by tokens: usage counts requests, the prompt cache does not change the cost.");
+  } finally {
+    await withTimeout(client.stop(), 25_000, "client.stop()").catch(() => client.forceStop().catch(() => {}));
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
 // Live test over ACP
 
 async function live() {
@@ -303,7 +349,8 @@ function cleanup(ws, sessionDir) {
 say(`# Cache TTL probe (${new Date().toISOString()}, ${process.platform})`);
 say();
 try {
-  if (flag("live")) await live();
+  if (flag("quota")) await quota();
+  else if (flag("live")) await live();
   else scan();
 } catch (e) {
   say(`ERROR: ${e?.message ?? e}`);
