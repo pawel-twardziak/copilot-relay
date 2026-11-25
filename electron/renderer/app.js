@@ -3096,6 +3096,7 @@ function setStatus(text, isError = false) {
 }
 
 async function refresh() {
+  loadQuota({ force: true });
   const known = links; // only links that existed before the list was asked for are checked against it
   let listed = [];
   let complete = false;
@@ -3884,17 +3885,21 @@ api.onDelegationClosed(({ sessionId }) => {
   renderList();
 });
 
+// the sidebar quota line: live figure from main ({ line, tooltip }), or nothing when there is none
+function showQuota(view) {
+  const q = $("#side-quota");
+  q.textContent = view ? view.line : "";
+  q.title = view ? view.tooltip : "";
+  q.hidden = !view;
+}
+const loadQuota = (opts) => api.quotaGet(opts).then(showQuota, () => {});
+api.onQuota(showQuota);
+loadQuota();
+
 // latest usage per session, so a re-opened/replaced view starts with it; sidebar shows the latest quota line
 const lastUsage = new Map();
-let lastQuota = null;
 api.onUsage(({ sessionId, view }) => {
   lastUsage.set(sessionId, view);
-  if (view?.quota) {
-    lastQuota = view.quota;
-    const q = $("#side-quota");
-    q.textContent = lastQuota;
-    q.hidden = false;
-  }
   forView(sessionId, (v) => v.usage(view));
 });
 

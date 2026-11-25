@@ -13,7 +13,8 @@ import { AcpConnection } from "./acp.mjs";
 import { isNotFoundExit, normalizeCommand, resolveCommand, shellLine, startFailureText } from "./copilot-command.mjs";
 import { countUserMessages, deleteSession, describeCut, forkSession, isSessionId, messageTimes, purgeDeleted, sessionCreatedAt, sessionDir, truncateSession } from "./history.mjs";
 import { createLastActivity } from "./last-activity.mjs";
-import { createUsagePusher } from "./usage.mjs";
+import { createCopilotRuntime } from "./copilot-runtime.mjs";
+import { createQuotaService, createUsagePusher, quotaView, readLiveQuota } from "./usage.mjs";
 import { JobScheduler } from "./scheduler.mjs";
 import { scheduleInfo } from "./jobs.mjs";
 import { PendingRequests, answerFields, cardStart, childPrompt, createdText, findModelOption, folderState, isRelayTool, linkCardOf, reloadWarning, resolveConfig, unreportedChildren, withDeadline } from "./delegation.mjs";
@@ -396,7 +397,13 @@ async function getLister() {
 }
 
 // context/credits/quota figures for the window, debounced per session
-const usage = createUsagePusher({ send: (sessionId, view) => send("usage:update", { sessionId, view }) });
+// The live quota comes from a Copilot CLI the runtime starts on demand (one at a time, stopped on quit)
+const runtime = createCopilotRuntime();
+const quota = createQuotaService({
+  readLive: () => readLiveQuota({ runtime, command: settingsCommand().command }),
+  onChange: (state) => send("quota:update", quotaView(state)),
+});
+const usage = createUsagePusher({ send: (sessionId, view) => send("usage:update", { sessionId, view }), quota: () => quota.get() });
 
 // Session folders seen so far: together with the home folder the only places a file mention is checked without a click
 const knownFolders = new Set();
@@ -474,6 +481,8 @@ function handle(channel, fn) {
     }
   });
 }
+
+handle("quota:get", async (o) => quotaView(await quota.get({ force: o?.force === true })));
 
 let purging = Promise.resolve(); // leftovers of failed deletes are removed before the first list (briefly waited for:
 // they have no workspace.yaml/events.jsonl left, so a slow purge of a big one must not hold up the sidebar)
@@ -1721,6 +1730,7 @@ function createWindow() {
   // set once the page has loaded (and again after a reload): before that it rejects ("Render frame was disposed")
   win.webContents.on("did-finish-load", () => win.webContents.setVisualZoomLevelLimits(1, 1).catch(() => {}));
   win.webContents.on("zoom-changed", () => win.webContents.setZoomFactor(1));
+  win.on("focus", () => quota.get().catch(() => {}));
   win.webContents.setWindowOpenHandler(({ url }) => {
     openWeb(url);
     return { action: "deny" };
@@ -1795,7 +1805,9 @@ function notifyIfUnfocused(title, body) {
   new Notification({ title, body }).show();
 }
 
+let runtimeStopping = Promise.resolve(); // the Copilot CLI of the quota query: quitting waits for it to be gone
 function killAll() {
+  runtimeStopping = runtime.stopAll().catch(() => {});
   for (const { conn, relay } of open.values()) {
     relay?.stop();
     conn.kill();
@@ -1863,10 +1875,10 @@ if (!app.requestSingleInstanceLock()) {
   let promptsAwaited = false;
   app.on("will-quit", (e) => {
     const live = [...promptProcs].filter((c) => !c.exited);
-    if (promptsAwaited || !live.length) return;
+    if (promptsAwaited || (!live.length && runtime.size() === 0)) return;
     promptsAwaited = true;
     e.preventDefault();
-    Promise.all(live.map((c) => exited(c, 3500))).then(() => app.quit());
+    Promise.all([runtimeStopping, ...live.map((c) => exited(c, 3500))]).then(() => app.quit());
   });
   app.on("before-quit", (e) => {
     if (confirmLeavingChildren()) {
