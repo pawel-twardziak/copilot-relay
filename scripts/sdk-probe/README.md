@@ -113,3 +113,23 @@ node cache-ttl.mjs --live
 
 What to read in it: `cacheTtlSeconds` per model (300 means the cache lives 5 minutes), and in the compactions
 table the `premium Δ` of the rows with "no turn in between" (0 means the compaction did not cost a premium request).
+
+Before running it:
+
+- Node 18 or newer (`node --version`).
+- The script starts `copilot` from `PATH`, like the app does by default. If the app uses another command
+  (Settings → Copilot command, or `COPILOT_PATH`), pass the same file: `--cli C:\path\to\copilot.exe` (an npm
+  `copilot.cmd` works too).
+- It reads the history from `COPILOT_HOME`, or `%USERPROFILE%\.copilot` when it is not set. If the app runs with
+  another `COPILOT_HOME`, set the same value in the shell first (PowerShell: `$env:COPILOT_HOME = "D:\copilot-home"`).
+
+If it fails:
+
+- `Cannot read …\session-state`: wrong `COPILOT_HOME` (see above).
+- `Session history: 0 of 0 sessions`: same cause, or Copilot has never been used under this account.
+- "No checkpoint with modelCacheState found": the CLI is too old to record the TTL (`copilot --version`; it was
+  seen with 1.0.116). The live test needs the same.
+- `timeout after … ms: ACP initialize` or `copilot --acp exited`: the CLI does not start from this shell (not logged
+  in, wrong `--cli`, proxy). Run `copilot --version` and `copilot` once by hand to check.
+- `unknown model <id>`: copy the id exactly as `--live` lists it.
+- `Could not remove …`: the test session stayed in `session-state`; delete that folder by hand or from the app.
