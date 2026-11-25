@@ -249,6 +249,35 @@ test("stopAll kills a start in progress", async () => {
   assert.equal(h.rt.size(), 0);
 });
 
+test("a call during stopAll is refused and spawns nothing", async () => {
+  const h = harness({ killExits: false });
+  const p = h.rt.withClient({ command: "copilot" }, async () => {});
+  await tick();
+  await h.port(h.children[0]);
+  await p;
+  const stopping = h.rt.stopAll();
+  await assert.rejects(h.rt.withClient({ command: "other" }, async () => {}), /Copilot is stopping/);
+  assert.equal(h.spawns.length, 1);
+  await h.advance(3_500);
+  await stopping;
+  assert.equal(h.rt.size(), 0);
+  assert.equal(h.spawns.length, 1);
+});
+
+test("a call after stopAll resolved starts a fresh process", async () => {
+  const h = harness();
+  const p = h.rt.withClient({ command: "copilot" }, async () => {});
+  await tick();
+  await h.port(h.children[0]);
+  await p;
+  await h.rt.stopAll();
+  const q = h.rt.withClient({ command: "copilot" }, async () => 5);
+  await tick();
+  assert.equal(h.spawns.length, 2);
+  await h.port(h.children[1]);
+  assert.equal(await q, 5);
+});
+
 test("stopAll resolves even if a process never exits", async () => {
   const h = harness({ killExits: false });
   const p = h.rt.withClient({ command: "copilot" }, async () => {});

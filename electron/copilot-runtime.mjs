@@ -30,6 +30,7 @@ export function createCopilotRuntime({
   const isWin = platform === "win32";
   const entries = new Map();
   let sdkPromise = null;
+  let stopping = 0; // stopAll() calls in progress: no start while any runs
 
   const timer = (fn, ms) => {
     const t = setTimer(fn, ms);
@@ -182,6 +183,7 @@ export function createCopilotRuntime({
   }
 
   async function withClient({ command }, fn) {
+    if (stopping > 0) throw new Error("Copilot is stopping");
     let entry = entries.get(command);
     if (entry?.failedAt != null) {
       if (now() - entry.failedAt < failureHoldMs) throw entry.error;
@@ -203,8 +205,12 @@ export function createCopilotRuntime({
 
   async function stopAll() {
     const all = [...entries.values()];
-    await Promise.all(all.map((e) => stop(e, { quick: true }).catch(() => {})));
-    entries.clear();
+    stopping++;
+    try {
+      await Promise.all(all.map((e) => stop(e, { quick: true }).catch(() => {})));
+    } finally {
+      stopping--;
+    }
   }
 
   return {
