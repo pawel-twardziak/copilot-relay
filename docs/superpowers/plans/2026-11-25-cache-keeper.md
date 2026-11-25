@@ -22,6 +22,8 @@ reasons).
 ## Global Constraints
 
 **Timing and text**
+- `LATE_MS = 30_000`: an action is too late when `expiresAt - now < LATE_MS`; a planned action whose time has passed
+  but is not too late is due now.
 - Leads, in ms: `PING_LEAD_MS = 60_000`, `COUNTDOWN_LEAD_MS = 120_000`, `COMPACT_LEAD_MS = 60_000`, all before the
   session's `cacheExpiresAt`.
 - `KEEPALIVE_MARKER = "[keep-alive]"`.
@@ -101,7 +103,7 @@ reasons).
     - `{ type: "notNow" }`
   - `next({ state, now, settings, facts, leads? }): { action: "none" | "ping" | "countdown" | "compact", at: number | null }`.
     - `facts = { enabled, busy, held, replaying, contextUsed }`.
-    - `leads` defaults to the three constants and is overridable (`{ ping, countdown, compact }`) for the UI checks.
+    - `leads` defaults to the three constants and is overridable (`{ ping, countdown, compact, late }`) for the UI checks.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -118,7 +120,7 @@ reasons).
   - `"no pings when pings is 0"`: right after `turnEnded`, the action is `countdown` at `exp - 120_000`.
   - `"the countdown starts at once when its time has passed but compaction still fits"`: `now = exp - 90_000`,
     `pings: 0` → `{ action: "countdown", at: now }`.
-  - `"too late does nothing"`: `now = exp - 59_000` → `{ action: "none", at: null }`. With `expiresAt: null` →
+  - `"too late does nothing"`: `now = exp - 29_000` → `{ action: "none", at: null }` (too late = `expiresAt - now < LATE_MS`, 30 s). With `expiresAt: null` →
     `none`.
   - `"each fact or setting can stop it"`: each of these alone gives `none`:
     - `enabled: false`, `busy: true`, `held: true`, `replaying: true`;
@@ -490,7 +492,7 @@ reasons).
     `exit` handler calls `keeper.closed(id)`.
 
   **Test hook**
-  - `COPILOT_RELAY_KEEPER_LEADS_MS="ping,countdown,compact"` (three numbers) overrides the leads, for the UI checks
+  - `COPILOT_RELAY_KEEPER_LEADS_MS="ping,countdown,compact,late"` (four numbers) overrides the leads, for the UI checks
     only.
   - `COPILOT_RELAY_KEEPER_RETRY_MS` overrides the retry gap.
 
@@ -603,7 +605,7 @@ reasons).
 
   Checks in `checks.mjs`, launched with:
   - settings `cacheKeeper: { enabled: true, pings: 1, minContext: 50000 }`;
-  - env `COPILOT_RELAY_KEEPER_LEADS_MS="6000,5000,3000"` and `COPILOT_RELAY_KEEPER_RETRY_MS=200`.
+  - env `COPILOT_RELAY_KEEPER_LEADS_MS="6000,5000,3000,1000"` and `COPILOT_RELAY_KEEPER_RETRY_MS=200`.
 
   The checks:
   - `keeper-ping-not-now`:
