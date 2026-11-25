@@ -1,0 +1,5 @@
+{"type":"session.start","id":"s0","timestamp":"2026-11-25T10:00:00.000Z","data":{}}
+{"type":"session.usage_checkpoint","id":"c1","timestamp":"2026-11-25T10:00:10.000Z","data":{"totalPremiumRequests":1,"modelCacheState":[{"modelId":"claude-opus-5.5","cacheExpiresAt":"2026-11-25T10:05:00.000Z","cacheTtlSeconds":300}]}}
+{"type":"user.message","id":"u1","timestamp":"2026-11-25T10:10:00.000Z","data":{"content":"hi"}}
+{"type":"session.usage_checkpoint","id":"c2","timestamp":"2026-11-25T10:10:10.000Z","data":{"totalPremiumRequests":2,"modelCacheState":[{"modelId":"claude-opus-5.5","cacheExpiresAt":"2026-11-25T10:15:00.000Z","cacheTtlSeconds":300},{"modelId":"claude-haiku-5.5","cacheExpiresAt":"2026-11-25T10:16:00.000Z","cacheTtlSeconds":300}]}}
+{"type":"session.usage_checkpoint","id":"c3","timestamp":"2026-11-25T10:10:20.000Z","data":{"totalPremiumRequests":2,"modelCacheState":[]}}
