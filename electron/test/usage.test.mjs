@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { createUsagePusher, formatTokens, readQuota, readSessionUsage, summarize } from "../usage.mjs";
+import { createUsagePusher, formatTokens, pickPool, quotaLine, readQuota, readSessionUsage, summarize } from "../usage.mjs";
 
 const FIX = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "usage");
 let root;
@@ -112,12 +112,25 @@ describe("readQuota", () => {
   test("returns the newest premium snapshot", async () => {
     put(fixture("events-quota.jsonl"));
     assert.deepEqual(await readQuota({ copilotHome: home }), {
-      used: 109,
-      total: 1500,
-      remainingPct: 92.7,
-      resetDate: "2026-12-01T00:00:00Z",
-      unlimited: false,
+      quota: { pool: "premium", used: 109, total: 1500, remainingPct: 92.7, resetDate: "2026-12-01T00:00:00Z", unlimited: false, tokenBased: false },
+      at: Date.parse("2026-11-01T10:03:00.000Z"),
     });
+  });
+
+  test("picks chat from a file snapshot when premium is 0", async () => {
+    const line = JSON.stringify({
+      type: "model.model_call_success",
+      timestamp: "2026-11-02T10:00:00.000Z",
+      data: { quotaSnapshots: {
+        premium_interactions: { isUnlimitedEntitlement: false, entitlementRequests: 0, usedRequests: 0, remainingPercentage: 0, resetDate: "2026-12-01T00:00:00Z" },
+        chat: { isUnlimitedEntitlement: false, entitlementRequests: 200, usedRequests: 13, remainingPercentage: 93.6, resetDate: "2026-12-01T00:00:00Z", tokenBasedBilling: true },
+      } },
+    }) + "\n";
+    put(line);
+    const r = await readQuota({ copilotHome: home });
+    assert.equal(r.quota.pool, "chat");
+    assert.equal(r.quota.total, 200);
+    assert.equal(r.at, Date.parse("2026-11-02T10:00:00.000Z"));
   });
 
   test("does not look beyond the tail of a large file", async () => {
@@ -128,18 +141,49 @@ describe("readQuota", () => {
 
   test("ignores snapshots with missing fields", async () => {
     const snap = (q) => JSON.stringify({ type: "model.model_call_success", data: { quotaSnapshots: { premium_interactions: q } } }) + "\n";
-    put(snap({ isUnlimitedEntitlement: false, usedRequests: 5 }));
+    put(snap({ isUnlimitedEntitlement: false, entitlementRequests: 1500, remainingPercentage: 5, resetDate: "2026-12-01T00:00:00Z" }));
     assert.equal(await readQuota({ copilotHome: home }), null);
     // an older complete snapshot is used when the newest is incomplete
     put(fixture("events-quota.jsonl") + snap({ isUnlimitedEntitlement: false }));
-    assert.equal((await readQuota({ copilotHome: home })).used, 109);
+    assert.equal((await readQuota({ copilotHome: home })).quota.used, 109);
     put(snap({ isUnlimitedEntitlement: true }).replace("{", '{"timestamp":"2027-01-01T00:00:00Z",'));
-    assert.equal((await readQuota({ copilotHome: home })).unlimited, true);
+    assert.equal((await readQuota({ copilotHome: home })).quota.unlimited, true);
   });
 
   test("returns null when no session has a snapshot", async () => {
     put(fixture("events-basic.jsonl"));
     assert.equal(await readQuota({ copilotHome: home }), null);
+  });
+});
+
+describe("pickPool", () => {
+  const snap = (o) => ({ isUnlimitedEntitlement: false, entitlementRequests: 1500, usedRequests: 533, remainingPercentage: 64.5, resetDate: "2026-12-01T00:00:00Z", ...o });
+  test("premium with an entitlement wins", () => {
+    assert.deepEqual(pickPool({ premium_interactions: snap(), chat: snap({ entitlementRequests: 200 }) }),
+      { pool: "premium", used: 533, total: 1500, remainingPct: 64.5, resetDate: "2026-12-01T00:00:00Z", unlimited: false, tokenBased: false });
+  });
+  test("premium 0 falls to chat", () => {
+    const p = pickPool({ premium_interactions: snap({ entitlementRequests: 0, usedRequests: 0 }), chat: snap({ entitlementRequests: 200, usedRequests: 13, remainingPercentage: 93.6, tokenBasedBilling: true }), completions: snap({ entitlementRequests: 2000 }) });
+    assert.equal(p.pool, "chat"); assert.equal(p.total, 200); assert.equal(p.tokenBased, true);
+  });
+  test("only completions → null", () => assert.equal(pickPool({ premium_interactions: snap({ entitlementRequests: 0 }), chat: snap({ entitlementRequests: 0 }), completions: snap() }), null));
+  test("unlimited premium", () => assert.equal(pickPool({ premium_interactions: { isUnlimitedEntitlement: true, entitlementRequests: -1 } }).unlimited, true));
+  test("a missing number makes a pool invalid", () => assert.equal(pickPool({ premium_interactions: snap({ usedRequests: undefined }) }), null));
+  test("a missing resetDate is allowed", () => assert.equal(pickPool({ premium_interactions: snap({ resetDate: undefined }) }).resetDate, ""));
+  test("null / non-object → null", () => { assert.equal(pickPool(null), null); assert.equal(pickPool("x"), null); });
+});
+
+describe("quotaLine", () => {
+  const P = { pool: "premium", used: 533, total: 1500, remainingPct: 64.5, resetDate: "2026-12-01T00:00:00Z", unlimited: false, tokenBased: false };
+  test("formats", () => {
+    assert.equal(quotaLine(P), "Premium: 533 / 1500 used · 64.5% left · resets Dec 1");
+    assert.equal(quotaLine({ ...P, pool: "chat", used: 13, total: 200, remainingPct: 93.6, tokenBased: true }), "Chat: 13 / 200 used · 93.6% left");
+    assert.equal(quotaLine({ ...P, used: 187.25 }), "Premium: 187.3 / 1500 used · 64.5% left · resets Dec 1");
+    assert.equal(quotaLine({ ...P, unlimited: true }), "Premium: unlimited");
+    assert.equal(quotaLine({ ...P, pool: "chat", unlimited: true }), "Chat: unlimited");
+    assert.equal(quotaLine(P, { at: Date.UTC(2026, 10, 25, 18, 5), timeZone: "UTC" }), "Premium: 533 / 1500 used · 64.5% left · resets Dec 1 · as of 18:05");
+    assert.equal(quotaLine({ ...P, resetDate: "nonsense" }), "Premium: 533 / 1500 used · 64.5% left");
+    assert.equal(quotaLine(null), null);
   });
 });
 
@@ -189,9 +233,9 @@ describe("summarize", () => {
   });
 
   test("quota", () => {
-    const q = { used: 109, total: 1500, remainingPct: 92.7, resetDate: "2026-12-01T00:00:00Z", unlimited: false };
-    assert.equal(summarize({ quota: q }).quota, "Premium: 109 / 1500 used · 92.7% left · resets Dec 1");
-    assert.equal(summarize({ quota: { ...q, unlimited: true } }).quota, "Premium: unlimited");
+    const q = { pool: "premium", used: 109, total: 1500, remainingPct: 92.7, resetDate: "2026-12-01T00:00:00Z", unlimited: false, tokenBased: false };
+    assert.equal(summarize({ quota: { quota: q, at: 0 } }).quota, "Premium: 109 / 1500 used · 92.7% left · resets Dec 1");
+    assert.equal(summarize({ quota: { quota: { ...q, unlimited: true }, at: 0 } }).quota, "Premium: unlimited");
     assert.equal(summarize({ quota: null }).quota, null);
   });
 

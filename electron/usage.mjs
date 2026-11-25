@@ -112,20 +112,37 @@ export async function readSessionUsage(sessionId, { copilotHome } = {}) {
   return usage;
 }
 
-/** A snapshot is usable if unlimited, or if every displayed field is present (never invent values). */
+const POOLS = [["premium_interactions", "premium"], ["chat", "chat"]]; // completions is never shown
+
+/** A snapshot is usable if unlimited, or if every number is present (never invent values; resetDate may be absent). */
 function validQuota(q) {
   if (!q || typeof q !== "object") return false;
   if (q.isUnlimitedEntitlement === true) return true;
-  return (
-    num(q.usedRequests) !== null &&
-    num(q.entitlementRequests) !== null &&
-    num(q.remainingPercentage) !== null &&
-    typeof q.resetDate === "string" &&
-    q.resetDate !== ""
-  );
+  return num(q.usedRequests) !== null && num(q.entitlementRequests) !== null && num(q.remainingPercentage) !== null;
 }
 
-/** Newest premium_interactions quota snapshot from the 5 most recently modified sessions; null if none. */
+/** The first pool (premium_interactions, then chat) that is valid and unlimited or has an entitlement; null if none. */
+export function pickPool(snapshots) {
+  if (!snapshots || typeof snapshots !== "object") return null;
+  for (const [key, pool] of POOLS) {
+    const q = snapshots[key];
+    if (!validQuota(q)) continue;
+    const unlimited = q.isUnlimitedEntitlement === true;
+    if (!unlimited && !(q.entitlementRequests > 0)) continue;
+    return {
+      pool,
+      used: num(q.usedRequests) ?? 0,
+      total: num(q.entitlementRequests) ?? 0,
+      remainingPct: num(q.remainingPercentage) ?? 0,
+      resetDate: typeof q.resetDate === "string" ? q.resetDate : "",
+      unlimited,
+      tokenBased: q.tokenBasedBilling === true,
+    };
+  }
+  return null;
+}
+
+/** Newest quota pick ({ quota, at }, at = event time in ms) from the 5 most recently modified sessions; null if none. */
 export async function readQuota({ copilotHome } = {}) {
   const dir = path.join(copilotHome ?? copilotHomeDefault(), "session-state");
   let names;
@@ -146,23 +163,12 @@ export async function readQuota({ copilotHome } = {}) {
   files.sort((a, b) => b.mtimeMs - a.mtimeMs);
   let best = null;
   for (const { file } of files.slice(0, QUOTA_FILES)) {
-    const found = await scan(file, '"quotaSnapshots"', (e) => {
-      const q = e?.data?.quotaSnapshots?.premium_interactions;
-      return validQuota(q) ? q : null;
-    }, { tailOnly: true });
+    const found = await scan(file, '"quotaSnapshots"', (e) => pickPool(e?.data?.quotaSnapshots), { tailOnly: true });
     if (!found) continue;
     const ts = Date.parse(found.e.timestamp) || 0;
     if (!best || ts > best.ts) best = { ts, q: found.hit };
   }
-  if (!best) return null;
-  const q = best.q;
-  return {
-    used: num(q.usedRequests) ?? 0,
-    total: num(q.entitlementRequests) ?? 0,
-    remainingPct: num(q.remainingPercentage) ?? 0,
-    resetDate: typeof q.resetDate === "string" ? q.resetDate : "",
-    unlimited: q.isUnlimitedEntitlement === true,
-  };
+  return best ? { quota: best.q, at: best.ts } : null;
 }
 
 /** 999 -> "999", 22899 -> "22.9k", 200000 -> "200k", 1250000 -> "1.25M". */
@@ -182,14 +188,23 @@ function contextView(context) {
   };
 }
 
-function quotaLine(quota) {
-  if (!quota) return null;
-  if (quota.unlimited) return "Premium: unlimited";
-  const d = new Date(quota.resetDate);
-  const reset = Number.isNaN(d.getTime())
-    ? ""
-    : ` · resets ${d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })}`;
-  return `Premium: ${quota.used} / ${quota.total} used · ${quota.remainingPct}% left${reset}`;
+const round1 = (n) => Math.round(n * 10) / 10;
+
+/** "Premium: 533 / 1500 used · 64.5% left · resets Dec 1 · as of 18:05"; the reset only for request-billed pools, "as of" only with `at`. */
+export function quotaLine(pick, { at = null, timeZone } = {}) {
+  if (!pick) return null;
+  const label = pick.pool === "chat" ? "Chat" : "Premium";
+  if (pick.unlimited) return `${label}: unlimited`;
+  const d = new Date(pick.resetDate);
+  const reset =
+    pick.tokenBased || Number.isNaN(d.getTime())
+      ? ""
+      : ` · resets ${d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })}`;
+  const asOf =
+    at === null
+      ? ""
+      : ` · as of ${new Date(at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone })}`;
+  return `${label}: ${round1(pick.used)} / ${round1(pick.total)} used · ${round1(pick.remainingPct)}% left${reset}${asOf}`;
 }
 
 /** Display strings for the context meter, session credits (+ tooltip) and premium quota. */
@@ -207,7 +222,7 @@ export function summarize({ context = null, session = null, quota = null } = {})
       parts.push(`Changes: +${session.linesAdded} −${session.linesRemoved}`);
     }
   }
-  return { context: contextView(context), credits, tooltip: parts.join(" · "), quota: quotaLine(quota) };
+  return { context: contextView(context), credits, tooltip: parts.join(" · "), quota: quotaLine(quota?.quota) };
 }
 
 /**
