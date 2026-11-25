@@ -2,8 +2,7 @@
 // (keep-alive ping, countdown, compaction) it fires. Every effect is injected (settings, facts, the expiry reader,
 // `run`, `emit`, the clock and the timers), so main wires it and the tests drive it with fake timers. Also the
 // per-session opt-out store.
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import path from "node:path";
+import { jsonFileMap } from "./json-file-map.mjs";
 import { COMPACT_LEAD_MS, compactText, initialState, keepAliveText, next, reduce } from "./cache-keeper.mjs";
 
 const STOPPED_NOTICE = "Keep-alive stopped: the agent started working.";
@@ -29,13 +28,15 @@ const compactedNotice = (text) => {
 export function createKeeperRunner(deps) {
   const retry = { tries: 3, ms: 1000, ...deps.retry };
   const compactLead = deps.leads?.compact ?? COMPACT_LEAD_MS;
-  /** id → { state, timer, wait, acting: "ping" | "compact" | null, inFlight, held, gen, lastCheckpoint, shown } */
+  /** id → { state, timer, wait, acting: "ping" | "compact" | null, held, gen, lastCheckpoint, started, shown } */
   const sessions = new Map();
+  /** id → the settling of a running `run`. Outlives `closed`: a session reopened under the same id waits for it. */
+  const inFlight = new Map();
 
   const entryOf = (id) => {
     let e = sessions.get(id);
     if (!e) {
-      e = { state: initialState(), timer: null, wait: null, acting: null, inFlight: null, held: false, gen: 0, lastCheckpoint: undefined, shown: null };
+      e = { state: initialState(), timer: null, wait: null, acting: null, held: false, gen: 0, lastCheckpoint: undefined, started: null, shown: null };
       sessions.set(id, e);
     }
     return e;
@@ -103,7 +104,7 @@ export function createKeeperRunner(deps) {
     const s = deps.settings();
     const facts = {
       enabled: Boolean(s.enabled) && !deps.optedOut(id),
-      busy: Boolean(f.busy) || e.acting != null,
+      busy: Boolean(f.busy) || e.acting != null || inFlight.has(id),
       held: e.held,
       replaying: Boolean(f.replaying),
       contextUsed: f.contextUsed,
@@ -111,10 +112,10 @@ export function createKeeperRunner(deps) {
     return next({ state: e.state, now: deps.now(), settings: s, facts, leads: deps.leads });
   };
 
-  /** Arms the one timer of a session from `next`, or none; never while its action runs. */
+  /** Arms the one timer of a session from `next`, or none; never while an action of this id runs. */
   const plan = (id, e) => {
     clearTimer(e);
-    if (!e.acting) {
+    if (!e.acting && !inFlight.has(id)) {
       const r = decide(id, e);
       if (r.action !== "none") e.timer = deps.setTimer(() => fire(id, e), Math.max(0, r.at - deps.now()));
     }
@@ -135,7 +136,8 @@ export function createKeeperRunner(deps) {
     act(id, e, r.action);
   };
 
-  /** The expiry of a checkpoint newer than the last one seen, re-read up to `retry.tries` times; null when none
+  /** The expiry of a checkpoint other than the last one seen (the baseline of `turnStarted`, the one a turn or ping
+   *  gave), re-read up to `retry.tries` times; null when none
    *  arrives or the pause went stale meanwhile. */
   const readNewExpiry = async (id, e, gen) => {
     const current = () => isOpen(id, e) && e.gen === gen;
@@ -174,9 +176,11 @@ export function createKeeperRunner(deps) {
     e.acting = kind;
     publish(id, e);
     const running = runSafely(id, text, kind);
-    e.inFlight = running.then(() => {
-      e.inFlight = null;
+    // registered before the await below, so it is cleared before this action's own ending runs
+    const settled = running.then(() => {
+      if (inFlight.get(id) === settled) inFlight.delete(id);
     });
+    inFlight.set(id, settled);
     const res = await running;
     try {
       if (!isOpen(id, e)) return;
@@ -196,17 +200,35 @@ export function createKeeperRunner(deps) {
       e.state = expiresAt == null ? reduce(e.state, { type: "activity" }) : reduce(e.state, { type: "pingEnded", expiresAt });
     } finally {
       e.acting = null;
-      if (isOpen(id, e)) plan(id, e);
+      const now = sessions.get(id); // this entry, or one created after a close, which could not arm until now
+      if (now) plan(id, now);
     }
   };
 
   return {
+    /** A turn that is not the keeper's own starts: its checkpoint is the baseline the end of the turn must differ
+     *  from. Always overwrites, also a baseline a cut-short ping re-read left behind. */
+    turnStarted(id) {
+      const e = entryOf(id);
+      const reading = (async () => {
+        let r = null;
+        try {
+          r = await deps.readExpiry(id, deps.facts(id)?.modelId ?? null);
+        } catch {
+          r = null;
+        }
+        if (isOpen(id, e) && e.started === reading) e.lastCheckpoint = r?.checkpointId ?? null;
+      })();
+      e.started = reading;
+      return reading;
+    },
     /** A turn of the user or the relay ended: a new pause starts with the expiry of the checkpoint that turn wrote. */
     async turnEnded(id) {
       const e = entryOf(id);
       reset(e);
       publish(id, e);
       const gen = e.gen;
+      if (e.started) await e.started; // a short turn can end before its baseline is read
       const expiresAt = await readNewExpiry(id, e, gen);
       if (!isOpen(id, e) || e.gen !== gen) return;
       e.state = reduce(e.state, { type: "turnEnded", expiresAt });
@@ -236,7 +258,8 @@ export function createKeeperRunner(deps) {
     replan(id) {
       for (const [sid, e] of sessions) if (id === undefined || sid === id) plan(sid, e);
     },
-    /** The session closed or its connection exited: no timer, no state; a running action's result is dropped. */
+    /** The session closed or its connection exited: no timer, no state; a running action's result is dropped, but
+     *  `whenIdle` still waits for it and a reopened session does not act before it settles. */
     closed(id) {
       const e = sessions.get(id);
       if (!e) return;
@@ -248,7 +271,7 @@ export function createKeeperRunner(deps) {
     },
     /** Resolves when no ping or compaction of this session is in flight. */
     whenIdle(id) {
-      return sessions.get(id)?.inFlight ?? Promise.resolve();
+      return inFlight.get(id) ?? Promise.resolve();
     },
     state(id) {
       return view(sessions.get(id) ?? null);
@@ -260,19 +283,7 @@ export function createKeeperRunner(deps) {
  *  when the file can't be written; `copy` and `delete` are bookkeeping after a fork / delete that already succeeded,
  *  so a failed write there is only logged. */
 export function createKeeperOptOut(file) {
-  const read = () => {
-    try {
-      const data = JSON.parse(readFileSync(file, "utf8"));
-      return data && typeof data === "object" && !Array.isArray(data) ? data : {};
-    } catch {
-      return {};
-    }
-  };
-  const write = (data) => {
-    mkdirSync(path.dirname(file), { recursive: true });
-    writeFileSync(`${file}.tmp`, JSON.stringify(data, null, 2));
-    renameSync(`${file}.tmp`, file);
-  };
+  const { read, write, bestEffort } = jsonFileMap(file, "cache-keeper");
   const store = (id, off) => {
     const data = read();
     if (off) data[id] = true;
@@ -281,13 +292,6 @@ export function createKeeperOptOut(file) {
       delete data[id];
     }
     write(data);
-  };
-  const bestEffort = (fn) => {
-    try {
-      fn();
-    } catch (e) {
-      console.warn(`[cache-keeper] could not write ${file}: ${e.message}`);
-    }
   };
   return {
     get: (id) => read()[id] === true,

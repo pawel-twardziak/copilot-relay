@@ -41,6 +41,7 @@
       "prompt-count.mjs",
       "links-cache.mjs",
       "held-replies.mjs",
+      "json-file-map.mjs",
       "repo-git.mjs",
       "repo-records.mjs",
       "repo-changes.mjs",

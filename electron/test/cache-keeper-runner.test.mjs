@@ -284,6 +284,54 @@ test("a checkpoint that lands late is taken on a retry", async () => {
   assert.deepEqual(h.timers.map((t) => t.at), [T0 + 5 * MIN]);
 });
 
+test("turnStarted sets the baseline the end of the turn must differ from", async () => {
+  const h = harness();
+  h.expiries.push({ expiresAt: T0 + 2 * MIN, checkpointId: "before" });
+  await h.runner.turnStarted(ID);
+  assert.deepEqual(h.timers, []);
+  h.expiries.push(
+    { expiresAt: T0 + 2 * MIN, checkpointId: "before" },
+    { expiresAt: T0 + 2 * MIN, checkpointId: "before" },
+    { expiresAt: T0 + 7 * MIN, checkpointId: "after" },
+  );
+  const ended = h.runner.turnEnded(ID);
+  await h.advance(T0 + 2000);
+  await ended;
+  assert.equal(h.reads.length, 4);
+  assert.deepEqual(h.timers.map((t) => t.at), [T0 + 6 * MIN]);
+});
+
+test("turnEnded waits for a turnStarted read still in flight", async () => {
+  const h = harness();
+  h.expiries.push({ expiresAt: T0 + 2 * MIN, checkpointId: "before" }, { expiresAt: T0 + 7 * MIN, checkpointId: "after" });
+  void h.runner.turnStarted(ID);
+  await h.runner.turnEnded(ID);
+  assert.deepEqual(h.timers.map((t) => t.at), [T0 + 6 * MIN]);
+});
+
+test("without turnStarted the first checkpoint read counts", async () => {
+  const h = harness();
+  h.expiries.push({ expiresAt: T0 + 5 * MIN, checkpointId: "c0" });
+  await h.runner.turnEnded(ID);
+  assert.equal(h.reads.length, 1);
+  assert.deepEqual(h.timers.map((t) => t.at), [T0 + 4 * MIN]);
+});
+
+test("a ping that fails stops the pause quietly", async () => {
+  const h = harness();
+  h.expiry("c1");
+  await h.runner.turnEnded(ID);
+  await h.advance(T0 + 4 * MIN);
+  const reads = h.reads.length;
+  await h.finish({ text: "", toolCalled: false, error: "connection lost" });
+  assert.equal(h.phases().at(-1), "off");
+  assert.equal(h.timers.length, 0);
+  assert.deepEqual(h.notices(), []);
+  assert.equal(h.reads.length, reads);
+  h.runner.replan(ID);
+  assert.equal(h.timers.length, 0, "skipped for the rest of this pause");
+});
+
 test("close clears the timer and the state", async () => {
   const h = harness();
   h.expiry("c1");
@@ -305,6 +353,44 @@ test("close during an action drops its result", async () => {
   await h.finish({ text: "Compacted conversation history and removed 4 messages.", toolCalled: false, error: null });
   assert.equal(h.emitted.length, emitted);
   assert.equal(h.timers.length, 0);
+});
+
+test("a session reopened during a run waits for it", async () => {
+  const h = harness();
+  h.expiry("c1");
+  await h.runner.turnEnded(ID);
+  await h.advance(T0 + 4 * MIN);
+  assert.equal(h.runs.length, 1);
+  h.runner.closed(ID);
+  let idle = false;
+  const waited = h.runner.whenIdle(ID).then(() => {
+    idle = true;
+  });
+  h.expiry("c2", 2 * MIN); // the next ping would be due at once
+  await h.runner.turnEnded(ID);
+  assert.equal(h.timers.length, 0);
+  await h.advance(h.clock.t + 10 * MIN);
+  assert.equal(h.runs.length, 1);
+  assert.equal(idle, false);
+
+  h.runs[0].resolve(PING_OK);
+  await waited;
+  assert.equal(idle, true);
+  await h.advance(h.clock.t);
+  assert.equal(h.runs.length, 1, "the reopened session's ping time has passed by now: too late");
+});
+
+test("a session reopened during a run arms once it settles", async () => {
+  const h = harness();
+  h.expiry("c1");
+  await h.runner.turnEnded(ID);
+  await h.advance(T0 + 4 * MIN);
+  h.runner.closed(ID);
+  h.expiry("c2");
+  await h.runner.turnEnded(ID);
+  assert.equal(h.timers.length, 0);
+  await h.finish();
+  assert.deepEqual(h.timers.map((t) => t.at), [T0 + 8 * MIN]);
 });
 
 test("close during the checkpoint re-read stops the retries", async () => {
