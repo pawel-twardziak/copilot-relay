@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  PING_LEAD_MS, COUNTDOWN_LEAD_MS, COMPACT_LEAD_MS, KEEPALIVE_MARKER,
+  PING_LEAD_MS, LATE_MS, COUNTDOWN_LEAD_MS, COMPACT_LEAD_MS, KEEPALIVE_MARKER,
   isKeepAlive, keepAliveText, compactText, normalizeKeeperSettings, initialState, reduce, next,
 } from "../cache-keeper.mjs";
 
@@ -39,7 +39,9 @@ test("the countdown starts at once when its time has passed but compaction still
 });
 
 test("too late does nothing", () => {
-  assert.deepEqual(next({ state: started(), now: exp - 59_000, settings: S, facts: F }), NONE);
+  assert.deepEqual(next({ state: started(), now: exp - 29_000, settings: S, facts: F }), NONE);
+  assert.deepEqual(next({ state: started(), now: exp - 29_000, settings: { ...S, pings: 0 }, facts: F }), NONE);
+  assert.equal(LATE_MS, 30_000);
   assert.deepEqual(next({ state: initialState(), now: T, settings: S, facts: F }), NONE);
 });
 
@@ -52,6 +54,7 @@ test("each fact or setting can stop it", () => {
   assert.deepEqual(run({ settings: { ...S, enabled: false } }), NONE);
   assert.deepEqual(run({ state: { ...st, skipped: true } }), NONE);
   assert.deepEqual(run({ state: { ...st, phase: "done" } }), NONE);
+  assert.deepEqual(run({ facts: { contextUsed: undefined } }), NONE);
   assert.equal(run({ facts: { contextUsed: 50_000 } }).action, "ping");
 });
 
@@ -113,4 +116,26 @@ test("leads can be overridden", () => {
   assert.deepEqual(next({ state: st, now: T, settings: { ...S, pings: 0 }, facts: F, leads }), { action: "countdown", at: exp - 5000 });
   assert.deepEqual(next({ state: { ...st, phase: "countdown" }, now: T, settings: S, facts: F, leads }),
     { action: "compact", at: exp - 2000 });
+});
+
+test("a late timer still acts", () => {
+  const st = started();
+  assert.deepEqual(next({ state: st, now: exp - 60_000 + 5, settings: S, facts: F }), { action: "ping", at: exp - 60_000 });
+  assert.deepEqual(next({ state: { ...st, phase: "countdown" }, now: exp - 60_000 + 5, settings: S, facts: F }),
+    { action: "compact", at: exp - 60_000 });
+});
+
+test("overridden late moves the cutoff", () => {
+  const leads = { ping: 3000, countdown: 5000, compact: 2000, late: 1000 };
+  assert.deepEqual(next({ state: started(), now: exp - 2500, settings: S, facts: F, leads }), { action: "ping", at: exp - 3000 });
+  assert.deepEqual(next({ state: started(), now: exp - 900, settings: S, facts: F, leads }), NONE);
+});
+
+test("one ping, then the countdown", () => {
+  const s1 = { ...S, pings: 1 };
+  let st = started();
+  assert.equal(next({ state: st, now: T, settings: s1, facts: F }).action, "ping");
+  const e2 = exp - 60_000 + 300_000;
+  st = reduce(st, { type: "pingEnded", expiresAt: e2 });
+  assert.deepEqual(next({ state: st, now: exp, settings: s1, facts: F }), { action: "countdown", at: e2 - 120_000 });
 });

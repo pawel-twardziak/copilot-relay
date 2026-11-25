@@ -178,7 +178,8 @@ Per-session state, kept by main: `{ expiresAt, pingsSent, skipped, phase }`. `ph
 Rules, in order:
 1. Phase `done`, not enabled, `skipped`, `busy`, `held`, `replaying`, `contextUsed < threshold`, or `expiresAt` missing →
    `none`.
-2. `expiresAt - now < COMPACT_LEAD_MS`: too late, and the cache may already be cold → `none`. The pause ends without
+2. `expiresAt - now < LATE_MS` (30 s): too late, and the cache may already be cold → `none`. Real timers fire late,
+   so the cutoff must sit before the action time. The pause ends without
    a compaction; the next turn starts a new one.
 3. `pingsSent < settings.pings` → `ping` at `expiresAt - PING_LEAD_MS`.
 4. Otherwise → `countdown` at `expiresAt - COUNTDOWN_LEAD_MS` (immediately if that is already past, as long as

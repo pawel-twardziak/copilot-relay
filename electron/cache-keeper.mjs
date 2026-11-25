@@ -5,6 +5,7 @@
 export const PING_LEAD_MS = 60_000; // a ping goes out this long before the cache expires
 export const COUNTDOWN_LEAD_MS = 120_000; // the "compacting soon" countdown starts this long before expiry
 export const COMPACT_LEAD_MS = 60_000; // compaction starts this long before expiry
+export const LATE_MS = 30_000; // closer to expiry than this, nothing is started (timers fire late, so this sits before the action times)
 export const KEEPALIVE_MARKER = "[keep-alive]";
 
 const DEFAULTS = { enabled: false, pings: 6, minContext: 50_000 };
@@ -64,20 +65,18 @@ export function reduce(state, event) {
 /** What to do next and when (`at`, epoch ms; at <= now means due now). */
 export function next({ state, now, settings, facts, leads }) {
   const none = { action: "none", at: null };
-  const lead = { ping: PING_LEAD_MS, countdown: COUNTDOWN_LEAD_MS, compact: COMPACT_LEAD_MS, ...leads };
+  const lead = { ping: PING_LEAD_MS, countdown: COUNTDOWN_LEAD_MS, compact: COMPACT_LEAD_MS, late: LATE_MS, ...leads };
   if (!facts.enabled || !settings.enabled) return none;
   if (facts.busy || facts.held || facts.replaying) return none;
   if (state.skipped || state.phase === "done" || state.phase === "off") return none;
-  if (state.expiresAt == null || facts.contextUsed < settings.minContext) return none;
+  if (state.expiresAt == null || !(facts.contextUsed >= settings.minContext)) return none;
 
+  // Too late: the cache may already be cold.
+  if (state.expiresAt - now < lead.late) return none;
+
+  // An action whose time has passed is due now (at <= now), as long as it is not too late.
   const compactAt = state.expiresAt - lead.compact;
-  if (state.phase === "countdown") return now <= compactAt ? { action: "compact", at: compactAt } : none;
-
-  if (state.pingsSent < settings.pings) {
-    const pingAt = state.expiresAt - lead.ping;
-    return now <= pingAt ? { action: "ping", at: pingAt } : none;
-  }
-  // Late countdown still starts at once, as long as compaction itself still fits.
-  if (now > compactAt) return none;
+  if (state.phase === "countdown") return { action: "compact", at: compactAt };
+  if (state.pingsSent < settings.pings) return { action: "ping", at: state.expiresAt - lead.ping };
   return { action: "countdown", at: Math.max(now, state.expiresAt - lead.countdown) };
 }
