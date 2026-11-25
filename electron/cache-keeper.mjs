@@ -80,3 +80,22 @@ export function next({ state, now, settings, facts, leads }) {
   if (state.pingsSent < settings.pings) return { action: "ping", at: state.expiresAt - lead.ping };
   return { action: "countdown", at: Math.max(now, state.expiresAt - lead.countdown) };
 }
+
+const COMPACT_REPLY = "Compacted conversation history";
+
+/** Filter for the updates `session/load` replays: keep-alive prompts, whatever the session did in answer to them, and
+ *  the `/compact` reply are not part of the chat the user sees. One filter per replay. */
+export function createReplayFilter() {
+  let swallowing = false;
+  return {
+    pass(update) {
+      const text = update?.content?.text;
+      if (update?.sessionUpdate === "user_message_chunk") {
+        swallowing = isKeepAlive(text);
+        return !swallowing;
+      }
+      if (swallowing) return false;
+      return !(update?.sessionUpdate === "agent_message_chunk" && String(text ?? "").startsWith(COMPACT_REPLY));
+    },
+  };
+}

@@ -33,6 +33,7 @@
       "main.mjs",
       "acp.mjs",
       "history.mjs",
+      "cache-keeper.mjs",
       "usage.mjs",
       "paths.mjs",
       "file-access.mjs",

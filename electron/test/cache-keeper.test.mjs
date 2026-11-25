@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   PING_LEAD_MS, LATE_MS, COUNTDOWN_LEAD_MS, COMPACT_LEAD_MS, KEEPALIVE_MARKER,
-  isKeepAlive, keepAliveText, compactText, normalizeKeeperSettings, initialState, reduce, next,
+  isKeepAlive, keepAliveText, createReplayFilter, compactText, normalizeKeeperSettings, initialState, reduce, next,
 } from "../cache-keeper.mjs";
 
 const T = Date.parse("2026-11-25T10:00:00Z");
@@ -138,4 +138,25 @@ test("one ping, then the countdown", () => {
   const e2 = exp - 60_000 + 300_000;
   st = reduce(st, { type: "pingEnded", expiresAt: e2 });
   assert.deepEqual(next({ state: st, now: exp, settings: s1, facts: F }), { action: "countdown", at: e2 - 120_000 });
+});
+
+const user = (text) => ({ sessionUpdate: "user_message_chunk", content: { type: "text", text } });
+const agent = (text) => ({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } });
+
+test("the replay filter swallows a ping span", () => {
+  const seq = [
+    user("a"), agent("A."),
+    user(keepAliveText()), agent("."), { sessionUpdate: "tool_call", toolCallId: "t" },
+    user("b"), agent("B."),
+  ];
+  const f = createReplayFilter();
+  assert.deepEqual(seq.filter((u) => f.pass(u)), [seq[0], seq[1], seq[5], seq[6]]);
+});
+
+test("the replay filter swallows the compact reply", () => {
+  const f = createReplayFilter();
+  const reply = agent("Compacted conversation history and removed 4 messages and 900 tokens.");
+  assert.equal(f.pass(user("a")), true);
+  assert.equal(f.pass(reply), false);
+  assert.equal(f.pass(agent("Normal answer")), true);
 });
