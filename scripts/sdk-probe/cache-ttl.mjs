@@ -58,12 +58,18 @@ function analyse(events) {
   const endpoints = []; // { model, vendor, api_endpoint, marks }
   const compactions = []; // { trigger, model, premiumDelta, aiuDelta, ownAiu, clean }
   const prices = []; // { model, type, per1M } nano-AIU per 1M tokens, from the compaction calls
+  const spend = []; // { id, month, premium, aiu }: what each checkpoint added since the one before
   let last = null; // last checkpoint
   let open = null; // compaction in progress
   let turnSinceCheckpoint = false; // a user turn after `last`: its premium request lands in the next checkpoint
   for (const e of events) {
     const d = e.data ?? {};
     if (e.type === "session.usage_checkpoint") {
+      if (e.timestamp) {
+        const premium = (d.totalPremiumRequests ?? 0) - (last?.totalPremiumRequests ?? 0);
+        const aiu = ((d.totalNanoAiu ?? 0) - (last?.totalNanoAiu ?? 0)) / 1e9;
+        spend.push({ id: e.id, month: e.timestamp.slice(0, 7), premium, aiu });
+      }
       for (const m of d.modelCacheState ?? []) {
         const observed = m.cacheExpiresAt && e.timestamp ? Math.round((Date.parse(m.cacheExpiresAt) - Date.parse(e.timestamp)) / 1000) : null;
         ttl.push({ model: m.modelId, ttl: m.cacheTtlSeconds, observed });
@@ -114,7 +120,7 @@ function analyse(events) {
     }
   }
   if (open?.complete) compactions.push({ ...open.complete, premiumDelta: null, aiuDelta: null, clean: false });
-  return { ttl, endpoints, compactions, prices };
+  return { ttl, endpoints, compactions, prices, spend };
 }
 
 const count = (items, key) => {
@@ -131,6 +137,9 @@ function report(results, title) {
   const endpoints = results.flatMap((r) => r.endpoints);
   const compactions = results.flatMap((r) => r.compactions);
   const prices = results.flatMap((r) => r.prices ?? []);
+  // a forked session carries copies of its parent's checkpoints (same event ids): count each checkpoint once
+  const seenIds = new Set();
+  const spend = results.flatMap((r) => r.spend ?? []).filter((x) => !x.id || (!seenIds.has(x.id) && seenIds.add(x.id)));
 
   say(`## ${title}`);
   say();
@@ -158,6 +167,22 @@ function report(results, title) {
     say("| model | vendor | api_endpoint | cache marks | checkpoints |");
     say("|---|---|---|---|---|");
     for (const [k, n] of count(endpoints, (e) => `${e.model}|${e.vendor}|${e.api_endpoint}|${e.marks}`)) say(`| ${k.split("|").join(" | ")} | ${n} |`);
+  }
+  say();
+  say("### Monthly totals (sum of what each checkpoint added, by UTC month)");
+  say();
+  if (!spend.length) say("None recorded.");
+  else {
+    say("Compare with `usedRequests` of the premium_interactions pool (`--quota`): the column that matches it is the unit of the pool.");
+    say();
+    say("| month | premium requests | AI credits (AIU) | checkpoints |");
+    say("|---|---|---|---|");
+    const months = [...new Set(spend.map((x) => x.month))].sort().slice(-4);
+    for (const m of months) {
+      const rows = spend.filter((x) => x.month === m);
+      const sum = (k) => rows.reduce((a, x) => a + (x[k] > 0 ? x[k] : 0), 0);
+      say(`| ${m} | ${Math.round(sum("premium"))} | ${Math.round(sum("aiu"))} | ${rows.length} |`);
+    }
   }
   say();
   say("### Token prices of the compaction calls (nano-AIU per 1M tokens)");
@@ -266,7 +291,7 @@ async function quota() {
     const metered = names.filter((n) => pools[n]?.entitlementRequests > 0 || pools[n]?.isUnlimitedEntitlement || pools[n]?.usedRequests > 0);
     const tokens = metered.filter((n) => pools[n]?.tokenBasedBilling === true);
     say(`Pools in use: ${metered.join(", ") || "none"}; with tokenBasedBilling = true: ${tokens.join(", ") || "none"}.`);
-    say(tokens.length ? "Reading: usage is billed by tokens (AI credits): the prompt cache changes the cost." : "Reading: no pool in use is billed by tokens: usage counts requests, the prompt cache does not change the cost.");
+    say("To tell the unit of a pool, compare its usedRequests with the monthly totals of the free scan (`node cache-ttl.mjs`).");
   } finally {
     await withTimeout(client.stop(), 25_000, "client.stop()").catch(() => client.forceStop().catch(() => {}));
   }
