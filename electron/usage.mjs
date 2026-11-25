@@ -165,8 +165,9 @@ export async function readQuota({ copilotHome } = {}) {
   for (const { file } of files.slice(0, QUOTA_FILES)) {
     const found = await scan(file, '"quotaSnapshots"', (e) => pickPool(e?.data?.quotaSnapshots), { tailOnly: true });
     if (!found) continue;
-    const ts = Date.parse(found.e.timestamp) || 0;
-    if (!best || ts > best.ts) best = { ts, q: found.hit };
+    const parsed = Date.parse(found.e.timestamp);
+    const ts = Number.isNaN(parsed) ? null : parsed; // unknown time: loses to any dated snapshot
+    if (!best || (ts ?? -Infinity) > (best.ts ?? -Infinity)) best = { ts, q: found.hit };
   }
   return best ? { quota: best.q, at: best.ts } : null;
 }
@@ -194,17 +195,109 @@ const round1 = (n) => Math.round(n * 10) / 10;
 export function quotaLine(pick, { at = null, timeZone } = {}) {
   if (!pick) return null;
   const label = pick.pool === "chat" ? "Chat" : "Premium";
-  if (pick.unlimited) return `${label}: unlimited`;
+  const asOf =
+    at === null
+      ? ""
+      : ` · as of ${new Date(at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone })}`;
+  if (pick.unlimited) return `${label}: unlimited${asOf}`;
   const d = new Date(pick.resetDate);
   const reset =
     pick.tokenBased || Number.isNaN(d.getTime())
       ? ""
       : ` · resets ${d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })}`;
-  const asOf =
-    at === null
-      ? ""
-      : ` · as of ${new Date(at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone })}`;
   return `${label}: ${round1(pick.used)} / ${round1(pick.total)} used · ${round1(pick.remainingPct)}% left${reset}${asOf}`;
+}
+
+/** Live quota from the Copilot SDK (account.getQuota), picked with pickPool; throws on a start/query error or after `deadlineMs`. */
+export async function readLiveQuota({ runtime, command, deadlineMs = 10_000 }) {
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Copilot did not answer in ${deadlineMs / 1000} s`)), deadlineMs);
+  });
+  try {
+    const query = runtime.withClient({ command }, async (client) => {
+      const answer = await client.rpc.account.getQuota({});
+      return pickPool(answer?.quotaSnapshots);
+    });
+    query.catch(() => {}); // a late failure after the deadline is not unhandled
+    return await Promise.race([query, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Quota with fallbacks, cached `ttlMs` (failures too): live; else the last live figure (<= maxAgeMs old); else a
+ * session-file figure (<= maxAgeMs old); else none. A live answer without a pool is a final "none".
+ * State: { quota, source: "live"|"earlier"|"file"|null, at, reason }. `onChange(state)` fires when the state differs.
+ */
+export function createQuotaService({
+  readLive,
+  readFile = readQuota,
+  now = Date.now,
+  ttlMs = 60_000,
+  maxAgeMs = 3_600_000,
+  onChange = () => {},
+}) {
+  let lastLive = null; // { quota, at }
+  let cache = null; // { at, state }
+  let inFlight = null;
+  let emitted;
+
+  async function compute() {
+    let reason;
+    try {
+      const quota = await readLive();
+      if (!quota) {
+        lastLive = null;
+        return { quota: null, source: "live", at: null, reason: null };
+      }
+      lastLive = { quota, at: now() };
+      return { quota, source: "live", at: null, reason: null };
+    } catch (e) {
+      reason = e?.message ?? String(e);
+    }
+    if (lastLive && now() - lastLive.at <= maxAgeMs) {
+      return { quota: lastLive.quota, source: "earlier", at: lastLive.at, reason };
+    }
+    const file = await Promise.resolve().then(() => readFile()).catch(() => null);
+    if (file?.quota && typeof file.at === "number" && now() - file.at <= maxAgeMs) {
+      return { quota: file.quota, source: "file", at: file.at, reason };
+    }
+    return { quota: null, source: null, at: null, reason };
+  }
+
+  async function run() {
+    const state = await compute();
+    cache = { at: now(), state };
+    const json = JSON.stringify(state);
+    if (json !== emitted) {
+      emitted = json;
+      onChange(state);
+    }
+    return state;
+  }
+
+  return {
+    async get({ force = false } = {}) {
+      if (!force && cache && now() - cache.at < ttlMs) return cache.state;
+      if (!inFlight) inFlight = run().finally(() => (inFlight = null));
+      return inFlight;
+    },
+  };
+}
+
+/** { line, tooltip } for the sidebar, or null when there is no quota. */
+export function quotaView(state, { timeZone } = {}) {
+  if (!state?.quota) return null;
+  const live = state.source === "live";
+  const line = quotaLine(state.quota, { at: live ? null : state.at, timeZone });
+  const tooltip = live
+    ? "Live from Copilot"
+    : state.source === "earlier"
+      ? `Last live figure; live query failed: ${state.reason}`
+      : `From a session file; live query failed: ${state.reason}`;
+  return { line, tooltip };
 }
 
 /** Display strings for the context meter, session credits (+ tooltip) and premium quota. */
@@ -222,30 +315,17 @@ export function summarize({ context = null, session = null, quota = null } = {})
       parts.push(`Changes: +${session.linesAdded} −${session.linesRemoved}`);
     }
   }
-  return { context: contextView(context), credits, tooltip: parts.join(" · "), quota: quotaLine(quota?.quota) };
+  return { context: contextView(context), credits, tooltip: parts.join(" · "), quota: quotaView(quota)?.line ?? null };
 }
 
 /**
  * Debounced per-session pusher: remembers the latest context numbers, reads the session's usage and the
  * (cached) quota, and calls send(sessionId, UsageView). Reader failures degrade to a view without those parts.
  */
-export function createUsagePusher({
-  send,
-  readSession = readSessionUsage,
-  readQuota: readQuotaFn = readQuota,
-  debounceMs = 300,
-  quotaTtlMs = 60_000,
-  now = Date.now,
-}) {
+export function createUsagePusher({ send, readSession = readSessionUsage, quota: readQuotaState = async () => null, debounceMs = 300 }) {
   const states = new Map(); // sessionId -> { context, timer }
-  let quotaCache = null; // { at, value }
 
-  async function quota() {
-    if (quotaCache && now() - quotaCache.at < quotaTtlMs) return quotaCache.value;
-    const value = await Promise.resolve().then(() => readQuotaFn()).catch(() => null);
-    quotaCache = { at: now(), value };
-    return value;
-  }
+  const quota = () => Promise.resolve().then(() => readQuotaState()).catch(() => null);
 
   async function push(sessionId, state) {
     const [session, q] = await Promise.all([
