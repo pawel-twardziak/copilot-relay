@@ -34,6 +34,7 @@
       "acp.mjs",
       "history.mjs",
       "cache-keeper.mjs",
+      "cache-keeper-runner.mjs",
       "usage.mjs",
       "paths.mjs",
       "file-access.mjs",

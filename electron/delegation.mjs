@@ -271,6 +271,12 @@ export class PendingRequests {
     this.#byId.clear();
   }
 
+  /** A request of this parent waits for the user's answer (its card is shown). */
+  hasParent(parentId) {
+    for (const req of this.#byId.values()) if (req.parentSessionId === parentId) return true;
+    return false;
+  }
+
   dropForParent(parentId) {
     for (const [id, req] of this.#byId) if (req.parentSessionId === parentId) this.#byId.delete(id);
   }

@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
 import { activityStamp, createLastActivity, readLastActivity } from "../last-activity.mjs";
+import { keepAliveText } from "../cache-keeper.mjs";
 
 let root;
 let home;
@@ -103,6 +104,46 @@ describe("readLastActivity", () => {
   test("a half-written last line and an event without a readable time are skipped", async () => {
     const id = put([START, ev("user.message", "2026-11-23T13:00:00.000Z"), ev("assistant.message", "not a date"), '{"type":"assistant.message","timest']);
     assert.equal(await read(id), "2026-11-23T13:00:00.000Z");
+  });
+
+  test("a keep-alive ping and the turn it started are not activity", async () => {
+    const id = put([
+      START,
+      ev("user.message", "2026-11-23T13:00:00.000Z", { content: "real" }),
+      ev("assistant.message", "2026-11-23T13:01:00.000Z"),
+      ev("user.message", "2026-11-23T13:30:00.000Z", { content: keepAliveText() }),
+      ev("assistant.turn_start", "2026-11-23T13:30:01.000Z"),
+      ev("tool.execution_start", "2026-11-23T13:30:02.000Z"),
+      ev("assistant.message", "2026-11-23T13:30:03.000Z"),
+      ev("session.usage_checkpoint", "2026-11-23T13:30:04.000Z"),
+    ]);
+    assert.equal(await read(id), "2026-11-23T13:01:00.000Z");
+  });
+
+  test("a message after a ping is activity", async () => {
+    const id = put([
+      START,
+      ev("user.message", "2026-11-23T13:30:00.000Z", { content: keepAliveText() }),
+      ev("assistant.message", "2026-11-23T13:30:03.000Z"),
+      ev("user.message", "2026-11-23T14:00:00.000Z", { content: "back" }),
+    ]);
+    assert.equal(await read(id), "2026-11-23T14:00:00.000Z");
+  });
+
+  test("only pings since the creation: the creation time", async () => {
+    const id = put([START, ev("user.message", "2026-11-23T13:30:00.000Z", { content: keepAliveText() }), ev("assistant.message", "2026-11-23T13:30:03.000Z")], { createdAt: "2026-11-23T10:00:00.000Z" });
+    assert.equal(await read(id), "2026-11-23T10:00:00.000Z");
+  });
+
+  test("a ping whose prompt lies before the first tail is still recognised", async () => {
+    const id = put([
+      START,
+      ev("user.message", "2026-11-23T13:00:00.000Z", { content: "real" }),
+      ev("assistant.message", "2026-11-23T13:01:00.000Z"),
+      ev("user.message", "2026-11-23T13:30:00.000Z", { content: keepAliveText(), transformedContent: "x".repeat(100 * 1024) }),
+      ev("assistant.message", "2026-11-23T13:30:03.000Z"),
+    ]);
+    assert.equal(await read(id), "2026-11-23T13:01:00.000Z");
   });
 
   test("nothing to read: null", async () => {
