@@ -101,10 +101,15 @@ git pull origin main
 cd scripts/sdk-probe
 node cache-ttl.mjs
 node cache-ttl.mjs --live
+npm install
+node cache-ttl.mjs --quota
 ```
 
 - `node cache-ttl.mjs` is free: it only reads the session history in `COPILOT_HOME` (`~/.copilot/session-state`,
   the newest 300 sessions; `--sessions <n>` changes it).
+- `node cache-ttl.mjs --quota` is free too: it asks the account how it is billed (`account.getQuota` through the
+  SDK, so `npm install` must have run here once). `tokenBasedBilling = true` on a pool in use means usage is billed
+  by tokens (AI credits); `false` means it counts requests.
 - `node cache-ttl.mjs --live` sends nothing either: it lists the models. Run the paid test only when the owner asks,
   with a Claude model from that list: `node cache-ttl.mjs --live --model <id>`. It sends two prompts and `/compact`
   in a temporary folder (2 premium requests × the model multiplier), then removes the test session (`--keep` keeps it).
@@ -125,6 +130,7 @@ Before running it:
 
 If it fails:
 
+- `Cannot load @microsoft/copilot-sdk` (`--quota` only): `npm install` in `scripts/sdk-probe` did not run or failed.
 - `Cannot read …\session-state`: wrong `COPILOT_HOME` (see above).
 - `Session history: 0 of 0 sessions`: same cause, or Copilot has never been used under this account.
 - "No checkpoint with modelCacheState found": the CLI is too old to record the TTL (`copilot --version`; it was
