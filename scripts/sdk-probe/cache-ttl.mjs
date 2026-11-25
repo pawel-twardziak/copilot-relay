@@ -56,8 +56,10 @@ function analyse(events) {
   const ttl = []; // { model, ttl, observed }
   const endpoints = []; // { model, vendor, api_endpoint, marks }
   const compactions = []; // { trigger, model, premiumDelta, aiuDelta, ownAiu, clean }
+  const prices = []; // { model, type, per1M } nano-AIU per 1M tokens, from the compaction calls
   let last = null; // last checkpoint
   let open = null; // compaction in progress
+  let turnSinceCheckpoint = false; // a user turn after `last`: its premium request lands in the next checkpoint
   for (const e of events) {
     const d = e.data ?? {};
     if (e.type === "session.usage_checkpoint") {
@@ -82,15 +84,22 @@ function analyse(events) {
         open = null;
       }
       last = d;
+      turnSinceCheckpoint = false;
     } else if (e.type === "session.compaction_start") {
-      open = { before: last, clean: true, complete: null };
+      // clean = no user turn between the checkpoint before and the one after (a threshold compaction often runs
+      // inside a turn, whose premium request would otherwise be counted as the compaction's)
+      open = { before: last, clean: !turnSinceCheckpoint, complete: null };
     } else if (e.type === "session.compaction_complete") {
       const used = d.compactionTokensUsed ?? {};
+      for (const t of used.copilotUsage?.tokenDetails ?? []) {
+        if (t?.batchSize) prices.push({ model: t.model ?? used.model ?? "?", type: t.tokenType, per1M: Math.round((t.costPerBatch * 1_000_000) / t.batchSize) });
+      }
       const entry = { trigger: d.trigger ?? "?", model: used.model ?? d.behaviorModelId ?? "?", ownAiu: used.copilotUsage?.totalNanoAiu ?? null, success: d.success };
       if (open) open.complete = entry;
       else compactions.push({ ...entry, premiumDelta: null, aiuDelta: null, clean: false });
-    } else if ((e.type === "user.message" || e.type === "assistant.turn_start") && open) {
-      open.clean = false; // a turn between the checkpoints: the deltas are not the compaction's alone
+    } else if (e.type === "user.message" || e.type === "assistant.turn_start") {
+      turnSinceCheckpoint = true;
+      if (open) open.clean = false; // a turn between the checkpoints: the deltas are not the compaction's alone
     } else if (e.type === "session.shutdown" && open?.complete) {
       const s = d.accountingSnapshot ?? {};
       const before = open.before;
@@ -104,7 +113,7 @@ function analyse(events) {
     }
   }
   if (open?.complete) compactions.push({ ...open.complete, premiumDelta: null, aiuDelta: null, clean: false });
-  return { ttl, endpoints, compactions };
+  return { ttl, endpoints, compactions, prices };
 }
 
 const count = (items, key) => {
@@ -120,6 +129,7 @@ function report(results, title) {
   const ttl = results.flatMap((r) => r.ttl);
   const endpoints = results.flatMap((r) => r.endpoints);
   const compactions = results.flatMap((r) => r.compactions);
+  const prices = results.flatMap((r) => r.prices ?? []);
 
   say(`## ${title}`);
   say();
@@ -127,13 +137,16 @@ function report(results, title) {
   say();
   if (!ttl.length) say("No checkpoint with modelCacheState found (the CLI version may not record it).");
   else {
-    say("| model | cacheTtlSeconds | expiresAt − checkpoint time (s) | checkpoints |");
-    say("|---|---|---|---|");
+    say("Negative differences are stale entries: a checkpoint written after the cache had already expired.");
+    say();
+    say("| model | cacheTtlSeconds | expiresAt − checkpoint time (s), fresh | stale | checkpoints |");
+    say("|---|---|---|---|---|");
     for (const [k, n] of count(ttl, (t) => `${t.model}|${t.ttl}`)) {
       const [model, t] = k.split("|");
-      const obs = ttl.filter((x) => x.model === model && String(x.ttl) === t && x.observed != null).map((x) => x.observed);
+      const all = ttl.filter((x) => x.model === model && String(x.ttl) === t && x.observed != null).map((x) => x.observed);
+      const obs = all.filter((o) => o >= 0);
       const range = obs.length ? `${Math.min(...obs)}–${Math.max(...obs)}` : "–";
-      say(`| ${model} | ${t} | ${range} | ${n} |`);
+      say(`| ${model} | ${t} | ${range} | ${all.length - obs.length} | ${n} |`);
     }
   }
   say();
@@ -146,19 +159,51 @@ function report(results, title) {
     for (const [k, n] of count(endpoints, (e) => `${e.model}|${e.vendor}|${e.api_endpoint}|${e.marks}`)) say(`| ${k.split("|").join(" | ")} | ${n} |`);
   }
   say();
+  say("### Token prices of the compaction calls (nano-AIU per 1M tokens)");
+  say();
+  if (!prices.length) say("None recorded.");
+  else {
+    say("| model | input | cache_read | cache_write | output | calls |");
+    say("|---|---|---|---|---|---|");
+    for (const model of [...new Set(prices.map((p) => p.model))]) {
+      const of = (type) => [...new Set(prices.filter((p) => p.model === model && p.type === type).map((p) => p.per1M))].join(" / ") || "–";
+      say(`| ${model} | ${of("input")} | ${of("cache_read")} | ${of("cache_write")} | ${of("output")} | ${prices.filter((p) => p.model === model && p.type === "input").length} |`);
+    }
+  }
+  say();
   say("### Compactions (premium requests and AI units around each one)");
   say();
   if (!compactions.length) say("No compaction found.");
   else {
-    say("| trigger | model | success | premium Δ | nano-AIU Δ | nano-AIU of the call | no turn in between |");
-    say("|---|---|---|---|---|---|---|");
-    for (const c of compactions.slice(0, 40)) {
-      say(`| ${c.trigger} | ${c.model} | ${c.success} | ${c.premiumDelta ?? "?"} | ${c.aiuDelta ?? "?"} | ${c.ownAiu ?? "?"} | ${c.clean ? "yes" : "no"} |`);
-    }
-    if (compactions.length > 40) say(`… and ${compactions.length - 40} more`);
+    const row = (c) => say(`| ${c.trigger} | ${c.model} | ${c.success} | ${c.premiumDelta ?? "?"} | ${c.aiuDelta ?? "?"} | ${c.ownAiu ?? "?"} |`);
+    const head = () => {
+      say("| trigger | model | success | premium Δ | nano-AIU Δ | nano-AIU of the call |");
+      say("|---|---|---|---|---|---|");
+    };
     const clean = compactions.filter((c) => c.clean && c.premiumDelta != null);
+    say("Summary (clean = no user turn between the checkpoints around the compaction, so the Δ is the compaction's own):");
     say();
-    say(`Compactions with no turn in between: ${clean.length}; with premium Δ > 0: ${clean.filter((c) => c.premiumDelta > 0).length}.`);
+    say("| trigger | all | clean | clean with premium Δ > 0 |");
+    say("|---|---|---|---|");
+    for (const [trigger, n] of count(compactions, (c) => c.trigger)) {
+      const cl = clean.filter((c) => c.trigger === trigger);
+      say(`| ${trigger} | ${n} | ${cl.length} | ${cl.filter((c) => c.premiumDelta > 0).length} |`);
+    }
+    say();
+    say(`Clean compactions (${clean.length}):`);
+    say();
+    if (clean.length) {
+      head();
+      clean.forEach(row);
+    } else say("None.");
+    say();
+    const manual = compactions.filter((c) => c.trigger === "manual" && !c.clean);
+    say(`Manual compactions with a turn in between (${manual.length}, Δ includes that turn):`);
+    say();
+    if (manual.length) {
+      head();
+      manual.slice(0, 40).forEach(row);
+    } else say("None.");
   }
   say();
 }
