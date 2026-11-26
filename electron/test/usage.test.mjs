@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { createUsagePusher, formatTokens, readCacheExpiry, readLastContext, readQuota, readSessionUsage, summarize } from "../usage.mjs";
+import { createQuotaService, createUsagePusher, formatTokens, pickPool, quotaLine, quotaView, readCacheExpiry, readLastContext, readLiveQuota, readQuota, readSessionUsage, summarize } from "../usage.mjs";
 
 const FIX = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "usage");
 let root;
@@ -169,12 +169,30 @@ describe("readQuota", () => {
   test("returns the newest premium snapshot", async () => {
     put(fixture("events-quota.jsonl"));
     assert.deepEqual(await readQuota({ copilotHome: home }), {
-      used: 109,
-      total: 1500,
-      remainingPct: 92.7,
-      resetDate: "2026-12-01T00:00:00Z",
-      unlimited: false,
+      quota: { pool: "premium", used: 109, total: 1500, remainingPct: 92.7, resetDate: "2026-12-01T00:00:00Z", unlimited: false, tokenBased: false },
+      at: Date.parse("2026-11-01T10:03:00.000Z"),
     });
+  });
+
+  test("a missing or unparseable timestamp gives at: null", async () => {
+    put(JSON.stringify({ type: "x", data: { quotaSnapshots: { premium_interactions: { isUnlimitedEntitlement: false, entitlementRequests: 10, usedRequests: 1, remainingPercentage: 90 } } } }) + "\n");
+    assert.equal((await readQuota({ copilotHome: home })).at, null);
+  });
+
+  test("picks chat from a file snapshot when premium is 0", async () => {
+    const line = JSON.stringify({
+      type: "model.model_call_success",
+      timestamp: "2026-11-02T10:00:00.000Z",
+      data: { quotaSnapshots: {
+        premium_interactions: { isUnlimitedEntitlement: false, entitlementRequests: 0, usedRequests: 0, remainingPercentage: 0, resetDate: "2026-12-01T00:00:00Z" },
+        chat: { isUnlimitedEntitlement: false, entitlementRequests: 200, usedRequests: 13, remainingPercentage: 93.6, resetDate: "2026-12-01T00:00:00Z", tokenBasedBilling: true },
+      } },
+    }) + "\n";
+    put(line);
+    const r = await readQuota({ copilotHome: home });
+    assert.equal(r.quota.pool, "chat");
+    assert.equal(r.quota.total, 200);
+    assert.equal(r.at, Date.parse("2026-11-02T10:00:00.000Z"));
   });
 
   test("does not look beyond the tail of a large file", async () => {
@@ -185,18 +203,180 @@ describe("readQuota", () => {
 
   test("ignores snapshots with missing fields", async () => {
     const snap = (q) => JSON.stringify({ type: "model.model_call_success", data: { quotaSnapshots: { premium_interactions: q } } }) + "\n";
-    put(snap({ isUnlimitedEntitlement: false, usedRequests: 5 }));
+    put(snap({ isUnlimitedEntitlement: false, entitlementRequests: 1500, remainingPercentage: 5, resetDate: "2026-12-01T00:00:00Z" }));
     assert.equal(await readQuota({ copilotHome: home }), null);
     // an older complete snapshot is used when the newest is incomplete
     put(fixture("events-quota.jsonl") + snap({ isUnlimitedEntitlement: false }));
-    assert.equal((await readQuota({ copilotHome: home })).used, 109);
+    assert.equal((await readQuota({ copilotHome: home })).quota.used, 109);
     put(snap({ isUnlimitedEntitlement: true }).replace("{", '{"timestamp":"2027-01-01T00:00:00Z",'));
-    assert.equal((await readQuota({ copilotHome: home })).unlimited, true);
+    assert.equal((await readQuota({ copilotHome: home })).quota.unlimited, true);
   });
 
   test("returns null when no session has a snapshot", async () => {
     put(fixture("events-basic.jsonl"));
     assert.equal(await readQuota({ copilotHome: home }), null);
+  });
+});
+
+describe("pickPool", () => {
+  const snap = (o) => ({ isUnlimitedEntitlement: false, entitlementRequests: 1500, usedRequests: 533, remainingPercentage: 64.5, resetDate: "2026-12-01T00:00:00Z", ...o });
+  test("premium with an entitlement wins", () => {
+    assert.deepEqual(pickPool({ premium_interactions: snap(), chat: snap({ entitlementRequests: 200 }) }),
+      { pool: "premium", used: 533, total: 1500, remainingPct: 64.5, resetDate: "2026-12-01T00:00:00Z", unlimited: false, tokenBased: false });
+  });
+  test("premium 0 falls to chat", () => {
+    const p = pickPool({ premium_interactions: snap({ entitlementRequests: 0, usedRequests: 0 }), chat: snap({ entitlementRequests: 200, usedRequests: 13, remainingPercentage: 93.6, tokenBasedBilling: true }), completions: snap({ entitlementRequests: 2000 }) });
+    assert.equal(p.pool, "chat"); assert.equal(p.total, 200); assert.equal(p.tokenBased, true);
+  });
+  test("only completions → null", () => assert.equal(pickPool({ premium_interactions: snap({ entitlementRequests: 0 }), chat: snap({ entitlementRequests: 0 }), completions: snap() }), null));
+  test("unlimited premium", () => assert.equal(pickPool({ premium_interactions: { isUnlimitedEntitlement: true, entitlementRequests: -1 } }).unlimited, true));
+  test("a missing number makes a pool invalid", () => assert.equal(pickPool({ premium_interactions: snap({ usedRequests: undefined }) }), null));
+  test("a missing resetDate is allowed", () => assert.equal(pickPool({ premium_interactions: snap({ resetDate: undefined }) }).resetDate, ""));
+  test("null / non-object → null", () => { assert.equal(pickPool(null), null); assert.equal(pickPool("x"), null); });
+});
+
+describe("quotaLine", () => {
+  const P = { pool: "premium", used: 533, total: 1500, remainingPct: 64.5, resetDate: "2026-12-01T00:00:00Z", unlimited: false, tokenBased: false };
+  test("formats", () => {
+    assert.equal(quotaLine(P), "Premium: 533 / 1500 used · 64.5% left · resets Dec 1");
+    assert.equal(quotaLine({ ...P, pool: "chat", used: 13, total: 200, remainingPct: 93.6, tokenBased: true }), "Chat: 13 / 200 used · 93.6% left");
+    assert.equal(quotaLine({ ...P, used: 187.25 }), "Premium: 187.3 / 1500 used · 64.5% left · resets Dec 1");
+    assert.equal(quotaLine({ ...P, unlimited: true }), "Premium: unlimited");
+    assert.equal(quotaLine({ ...P, pool: "chat", unlimited: true }), "Chat: unlimited");
+    assert.equal(quotaLine(P, { at: Date.UTC(2026, 10, 25, 18, 5), timeZone: "UTC" }), "Premium: 533 / 1500 used · 64.5% left · resets Dec 1 · as of 18:05");
+    assert.equal(quotaLine({ ...P, resetDate: "nonsense" }), "Premium: 533 / 1500 used · 64.5% left");
+    assert.equal(quotaLine(null), null);
+  });
+  test("unlimited keeps the age", () => {
+    assert.equal(quotaLine({ ...P, pool: "chat", unlimited: true }, { at: Date.UTC(2026, 10, 25, 18, 5), timeZone: "UTC" }), "Chat: unlimited · as of 18:05");
+  });
+});
+
+const snap = (o) => ({ isUnlimitedEntitlement: false, entitlementRequests: 1500, usedRequests: 533, remainingPercentage: 64.5, resetDate: "2026-12-01T00:00:00Z", ...o });
+const qpick = { pool: "chat", used: 13, total: 200, remainingPct: 93.6, resetDate: "", unlimited: false, tokenBased: true };
+const ppick = { pool: "premium", used: 533, total: 1500, remainingPct: 64.5, resetDate: "2026-12-01T00:00:00Z", unlimited: false, tokenBased: false };
+
+describe("createQuotaService", () => {
+  function svc(over = {}) {
+    let t = 1_000_000;
+    const calls = { live: 0, file: 0 };
+    const changes = [];
+    const clock = { advance: (ms) => (t += ms), now: () => t };
+    const liveFn = over.live ?? (async () => qpick);
+    const service = createQuotaService({
+      readLive: async () => (calls.live++, liveFn()),
+      readFile: async () => (calls.file++, over.file ?? null),
+      now: clock.now,
+      onChange: (s) => changes.push(s),
+    });
+    return { service, calls, changes, clock };
+  }
+  test("live wins", async () => {
+    const { service } = svc();
+    assert.deepEqual(await service.get(), { quota: qpick, source: "live", at: null, reason: null });
+  });
+  test("live fails -> last live with its time", async () => {
+    let fail = false;
+    const { service, clock } = svc({ live: async () => { if (fail) throw new Error("boom"); return qpick; } });
+    const t0 = clock.now();
+    await service.get();
+    fail = true;
+    clock.advance(61_000);
+    assert.deepEqual(await service.get(), { quota: qpick, source: "earlier", at: t0, reason: "boom" });
+  });
+  test("last live older than 1 h -> fresh file", async () => {
+    let fail = false;
+    const file = { quota: ppick, at: 0 };
+    const { service, clock } = svc({ live: async () => { if (fail) throw new Error("boom"); return qpick; }, file });
+    const t0 = clock.now();
+    await service.get();
+    fail = true;
+    clock.advance(3_600_001);
+    file.at = t0 + 3_590_000;
+    assert.deepEqual(await service.get(), { quota: ppick, source: "file", at: t0 + 3_590_000, reason: "boom" });
+  });
+  test("no live ever -> file under 1 h", async () => {
+    const { service, clock } = svc({ live: async () => { throw new Error("boom"); }, file: { quota: ppick, at: 1_000_000 - 60_000 } });
+    const s = await service.get();
+    assert.equal(s.source, "file");
+    assert.equal(s.at, clock.now() - 60_000);
+  });
+  test("file older than 1 h -> none", async () => {
+    const { service } = svc({ live: async () => { throw new Error("boom"); }, file: { quota: ppick, at: 1_000_000 - 3_600_001 } });
+    assert.deepEqual(await service.get(), { quota: null, source: null, at: null, reason: "boom" });
+  });
+  test("a file result with no time is too old", async () => {
+    const { service } = svc({ live: async () => { throw new Error("boom"); }, file: { quota: ppick, at: null } });
+    assert.equal((await service.get()).quota, null);
+  });
+  test("live none is final", async () => {
+    const { service, calls } = svc({ live: async () => null, file: { quota: ppick, at: 1_000_000 } });
+    assert.deepEqual(await service.get(), { quota: null, source: "live", at: null, reason: null });
+    assert.equal(calls.file, 0);
+  });
+  test("cached 60 s, success and failure", async () => {
+    for (const live of [async () => qpick, async () => { throw new Error("boom"); }]) {
+      const { service, calls, clock } = svc({ live });
+      await service.get();
+      clock.advance(59_999);
+      await service.get();
+      assert.equal(calls.live, 1);
+      clock.advance(1);
+      await service.get();
+      assert.equal(calls.live, 2);
+    }
+  });
+  test("force skips the cache", async () => {
+    const { service, calls } = svc();
+    await service.get();
+    await service.get({ force: true });
+    assert.equal(calls.live, 2);
+  });
+  test("onChange only on a different state", async () => {
+    let fail = false;
+    const { service, changes, clock } = svc({ live: async () => { if (fail) throw new Error("boom"); return qpick; } });
+    await service.get();
+    await service.get({ force: true });
+    assert.equal(changes.length, 1);
+    fail = true;
+    clock.advance(1);
+    await service.get({ force: true });
+    assert.equal(changes.length, 2);
+  });
+});
+
+describe("readLiveQuota", () => {
+  test("passes its deadline to the runtime (10 s by default)", async () => {
+    let got;
+    const runtime = { withClient: async (opts) => { got = opts; throw new Error("Copilot did not answer in 10 s"); } };
+    await assert.rejects(readLiveQuota({ runtime, command: "copilot" }), /did not answer in 10 s/);
+    assert.deepEqual(got, { command: "copilot", deadlineMs: 10_000 });
+  });
+  test("picks from quotaSnapshots", async () => {
+    const client = { rpc: { account: { getQuota: async () => ({ quotaSnapshots: { chat: snap({ entitlementRequests: 200 }) } }) } } };
+    const runtime = { withClient: async ({ command }, fn) => (assert.equal(command, "copilot"), fn(client)) };
+    assert.equal((await readLiveQuota({ runtime, command: "copilot" })).pool, "chat");
+  });
+  test("propagates a start error", async () => {
+    const runtime = { withClient: async () => { throw new Error("no start"); } };
+    await assert.rejects(readLiveQuota({ runtime, command: "c" }), /no start/);
+  });
+});
+
+describe("quotaView", () => {
+  test("live", () => {
+    assert.deepEqual(quotaView({ quota: qpick, source: "live", at: null, reason: null }), { line: "Chat: 13 / 200 used · 93.6% left", tooltip: "Live from Copilot" });
+  });
+  test("earlier and file", () => {
+    const at = Date.UTC(2026, 10, 25, 18, 5);
+    assert.equal(quotaView({ quota: qpick, source: "earlier", at, reason: "boom" }, { timeZone: "UTC" }).tooltip, "Last live figure; live query failed: boom");
+    const f = quotaView({ quota: ppick, source: "file", at, reason: "boom" }, { timeZone: "UTC" });
+    assert.equal(f.line, "Premium: 533 / 1500 used · 64.5% left · resets Dec 1 · as of 18:05");
+    assert.equal(f.tooltip, "From a session file; live query failed: boom");
+  });
+  test("none", () => {
+    assert.equal(quotaView({ quota: null, source: null, at: null, reason: "boom" }), null);
+    assert.equal(quotaView(null), null);
   });
 });
 
@@ -246,9 +426,10 @@ describe("summarize", () => {
   });
 
   test("quota", () => {
-    const q = { used: 109, total: 1500, remainingPct: 92.7, resetDate: "2026-12-01T00:00:00Z", unlimited: false };
-    assert.equal(summarize({ quota: q }).quota, "Premium: 109 / 1500 used · 92.7% left · resets Dec 1");
-    assert.equal(summarize({ quota: { ...q, unlimited: true } }).quota, "Premium: unlimited");
+    const q = { pool: "premium", used: 109, total: 1500, remainingPct: 92.7, resetDate: "2026-12-01T00:00:00Z", unlimited: false, tokenBased: false };
+    const live = (quota) => ({ quota, source: "live", at: null, reason: null });
+    assert.equal(summarize({ quota: live(q) }).quota, "Premium: 109 / 1500 used · 92.7% left · resets Dec 1");
+    assert.equal(summarize({ quota: live({ ...q, unlimited: true }) }).quota, "Premium: unlimited");
     assert.equal(summarize({ quota: null }).quota, null);
   });
 
@@ -265,7 +446,7 @@ describe("createUsagePusher", () => {
     const pusher = createUsagePusher({
       send: (id, view) => sent.push({ id, view }),
       readSession: async () => (calls.session++, null),
-      readQuota: async () => (calls.quota++, null),
+      quota: async () => (calls.quota++, null),
       readContext: async () => (calls.context++, null),
       ...over,
     });
@@ -296,20 +477,6 @@ describe("createUsagePusher", () => {
     await tick(300);
     assert.equal(sent.length, 2);
     assert.equal(sent[1].view.context.pct, 11);
-  });
-
-  test("pusher caches quota for 60 s", async (t) => {
-    const { calls, pusher, tick } = make(t);
-    pusher.refresh("s1");
-    await tick(300);
-    await tick(10_000);
-    pusher.refresh("s1");
-    await tick(300);
-    assert.equal(calls.quota, 1);
-    await tick(61_000);
-    pusher.refresh("s1");
-    await tick(300);
-    assert.equal(calls.quota, 2);
   });
 
   test("forget cancels pending sends", async (t) => {

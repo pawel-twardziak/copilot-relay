@@ -29,3 +29,9 @@ test("every module main.mjs loads is in build.files", () => {
   const missing = [...seen].filter((rel) => !listed(rel));
   assert.deepEqual(missing, [], `add to electron/package.json build.files: ${missing.join(", ")}`);
 });
+
+test("the SDK is pinned and its platform runtimes are excluded", () => {
+  const pkg = JSON.parse(readFileSync(path.join(ROOT, "package.json"), "utf8"));
+  assert.equal(pkg.dependencies["@microsoft/copilot-sdk"], "2.0.1");
+  assert.ok(pkg.build.files.includes("!node_modules/@microsoft/copilot-sdk-*/**"));
+});
