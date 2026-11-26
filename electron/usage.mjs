@@ -114,26 +114,39 @@ export async function readSessionUsage(sessionId, { copilotHome } = {}) {
 
 /**
  * Context figures for a session that is not running yet (the agent sends usage_update only after a turn, never on
- * session/load): currentTokens of the last session.shutdown whose run had a turn, with the maxPromptTokens of that
- * run's last session.usage_record as the size. A run without a turn is skipped, its currentTokens leaves out what a
- * turn adds (tool definitions). Null if the id is invalid, the file is missing, or the last run with a turn never
- * shut down (a crash: its figure would be stale).
+ * session/load): inputTokens and maxPromptTokens of the session's last main model call, the prompt it really sent.
+ * session.shutdown's currentTokens is not used for that: its toolDefinitionsTokens counts every available tool,
+ * deferred ones too (MCP tools behind tool search), which the model never receives (105k against 22k on the corp PC).
+ * A main call is one with interactionType "conversation-agent" (or none, older CLIs) and no other session as its
+ * source; events of sub-agents (agentId on the envelope) are skipped. If a successful compaction follows that call,
+ * the history shrank: the figure is then the system and conversation tokens of the first shutdown after the newest
+ * such compaction, plus the call's tool tokens. Null if the id is invalid, the file is missing, there is no usable
+ * main call, the context was cleared or truncated after it, or a compaction follows it with no shutdown after the
+ * compaction (or without the token fields that formula needs).
  */
 export async function readLastContext(sessionId, { copilotHome } = {}) {
   if (!isSessionId(sessionId)) return null;
   const file = path.join(copilotHome ?? copilotHomeDefault(), "session-state", sessionId, "events.jsonl");
   const tail = await readLines(file, false);
   if (!tail) return null;
-  const found = lastRunContext(tail.lines);
+  const found = lastContext(tail.lines, sessionId);
   if (found !== undefined || !tail.truncated) return found ?? null;
   const all = await readLines(file, true);
-  return all ? (lastRunContext(all.lines) ?? null) : null;
+  return all ? (lastContext(all.lines, sessionId) ?? null) : null;
 }
 
-/** Backward walk over the runs (start/resume … shutdown); undefined when the lines end before an answer. */
-function lastRunContext(lines) {
-  let shut = false; // the run being walked back through ended with a shutdown
-  let used = null; // that shutdown's currentTokens
+/** A model call of the session's own main conversation (not a sub-agent's, not a sampling call). */
+function isMainCall(usage, sessionId) {
+  const kind = usage?.interactionType;
+  const source = usage?.accounting?.sourceSessionId;
+  return (kind === undefined || kind === "conversation-agent") && (source === undefined || source === sessionId);
+}
+
+/** Backward walk to the last main call; undefined when the lines end before one. */
+function lastContext(lines, sessionId) {
+  let shutdown = null; // the oldest session.shutdown seen so far walking back, frozen at the newest compaction
+  let compacted = false; // a successful compaction lies after the call
+  let measured = true; // the newest such compaction has a shutdown after it
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i];
     if (!line.includes('"session.')) continue;
@@ -143,16 +156,28 @@ function lastRunContext(lines) {
     } catch {
       continue; // half-written or foreign line
     }
-    if (e?.type === "session.usage_record") {
-      // the newest run with a turn: its last call's prompt limit is the size, unless it never shut down
-      const size = num(e.data?.usage?.maxPromptTokens);
-      return shut && used !== null && used >= 0 && size > 0 ? { used, size } : null;
-    } else if (e?.type === "session.shutdown") {
-      shut = true;
-      used = num(e.data?.currentTokens);
-    } else if (e?.type === "session.start" || e?.type === "session.resume") {
-      shut = false; // a run without a turn: keep looking further back
-      used = null;
+    if (e?.agentId) continue; // a sub-agent's event: its calls, compactions and truncations are not the session's
+    const type = e?.type;
+    if (type === "session.usage_record") {
+      const usage = e.data?.usage;
+      if (!usage || typeof usage !== "object" || !isMainCall(usage, sessionId)) continue;
+      const input = num(usage.inputTokens);
+      const size = num(usage.maxPromptTokens);
+      if (!(input > 0 && size > 0)) continue; // unusable: an earlier call may still be
+      if (!compacted) return { used: input, size };
+      const sys = num(shutdown?.systemTokens);
+      const conv = num(shutdown?.conversationTokens);
+      const tools = num(usage.toolTokenCount);
+      return measured && sys !== null && conv !== null && tools !== null ? { used: sys + conv + tools, size } : null;
+    } else if (type === "session.shutdown") {
+      // the one right after the compaction: a later run without a turn reports smaller system/conversation figures
+      if (!compacted) shutdown = e.data ?? {};
+    } else if (type === "session.compaction_complete") {
+      if (e.data?.success !== true || compacted) continue;
+      compacted = true;
+      if (!shutdown) measured = false;
+    } else if (type === "session.context_cleared" || type === "session.truncation") {
+      return null; // the history after the call is unknown
     }
   }
   return undefined;

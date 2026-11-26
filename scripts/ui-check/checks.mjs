@@ -1379,14 +1379,15 @@ export const checks = [
       const at = "2026-11-26T10:00:00.000Z";
       const events = [
         { type: "session.start", data: {}, timestamp: at },
-        { type: "session.usage_record", data: { usage: { inputTokens: 22000, maxPromptTokens: 200000 } }, timestamp: at },
-        { type: "session.shutdown", data: { currentTokens: 22899 }, timestamp: at },
+        // the shutdown counts deferred tools the model never gets: the last call's prompt is the figure
+        { type: "session.usage_record", data: { usage: { inputTokens: 56402, maxPromptTokens: 200000, interactionType: "conversation-agent", toolTokenCount: 22215 } }, timestamp: at },
+        { type: "session.shutdown", data: { currentTokens: 138904, systemTokens: 18269, conversationTokens: 15126, toolDefinitionsTokens: 105504 }, timestamp: at },
       ];
       const dir = path.join(app.dir, "copilot-home", "session-state", HISTORY_ID);
       mkdirSync(dir, { recursive: true });
       writeFileSync(path.join(dir, "events.jsonl"), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
       await app.reload();
-      await app.check(`${v}.usageLabel.textContent.startsWith("22.9k / 200k · 11%")`, "the context meter from the file");
+      await app.check(`${v}.usageLabel.textContent.startsWith("56.4k / 200k · 28%")`, "the context meter from the file");
       assert.equal(await app.ev(`${v}.usageChip.classList.contains("ok")`), true);
     },
   },
