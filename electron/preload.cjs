@@ -68,6 +68,14 @@ contextBridge.exposeInMainWorld("api", {
   brokerStatus: () => call("broker:status"),
   brokerRestart: (repo) => call("broker:restart", repo),
   onBrokerRestart: on("broker:restart"),
+  // the cache keeper (electron/cache-keeper-runner.mjs): held = the queue or message box holds text; notNow = no pings
+  // and no compaction for this pause; optOut = the per-session switch; keeperGet → { optedOut, state }
+  keeperHeld: (sessionId, held) => call("keeper:held", sessionId, held),
+  keeperNotNow: (sessionId) => call("keeper:notNow", sessionId),
+  keeperOptOut: (sessionId, off) => call("keeper:optOut", sessionId, off),
+  keeperGet: (sessionId) => call("keeper:get", sessionId),
+  // { sessionId, phase ("off" | "idle" | "pinging" | "countdown" | "compacting" | "done"), pingsSent, pings, compactAt }
+  onKeeperState: on("keeper:state"),
   getSettings: () => call("settings:get"),
   setSettings: (s) => call("settings:set", s),
   openPath: (p) => call("shell:openPath", p),

@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { isKeepAlive } from "./cache-keeper.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const FORMAT_ERROR = "Unrecognized session history format";
@@ -59,7 +60,8 @@ export function readEvents(dir) {
 }
 
 const normalize = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
-const isUser = (e) => e.type === "user.message";
+/** A message the user wrote: the cache keeper's own keep-alive prompts are user.message events too, but not messages. */
+const isUser = (e) => e.type === "user.message" && !isKeepAlive(e.data?.content ?? "");
 
 /** Index of the user.message the bubble refers to: the ordinal-th if its text matches, else the only match. */
 function userIndex(events, ordinal, text) {
@@ -82,7 +84,8 @@ export function cutIndex(events, { ordinal, text, where }) {
   const u = userIndex(events, ordinal, text);
   if (where === "beforeUser") return u;
   if (where === "beforeReply") return u + 1;
-  const next = events.findIndex((e, i) => i > u && isUser(e));
+  // any user.message ends the reply, a keep-alive ping too: a cut removes the pings that follow the target
+  const next = events.findIndex((e, i) => i > u && e.type === "user.message");
   return next === -1 ? events.length : next;
 }
 
@@ -123,8 +126,9 @@ export async function messageTimes(id) {
       continue;
     }
     const t = Date.parse(e?.timestamp);
-    if (e?.type === "user.message") users.push(Number.isFinite(t) ? t : null);
-    else if (e?.type === "assistant.message") {
+    if (e?.type === "user.message") {
+      if (!isKeepAlive(e.data?.content ?? "")) users.push(Number.isFinite(t) ? t : null);
+    } else if (e?.type === "assistant.message") {
       const mid = e.data?.messageId;
       if (typeof mid === "string" && Number.isFinite(t) && !Object.hasOwn(agents, mid)) agents[mid] = t;
     }

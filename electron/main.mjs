@@ -13,7 +13,9 @@ import { AcpConnection } from "./acp.mjs";
 import { isNotFoundExit, normalizeCommand, resolveCommand, shellLine, startFailureText } from "./copilot-command.mjs";
 import { countUserMessages, deleteSession, describeCut, forkSession, isSessionId, messageTimes, purgeDeleted, sessionCreatedAt, sessionDir, truncateSession } from "./history.mjs";
 import { createLastActivity } from "./last-activity.mjs";
-import { createUsagePusher } from "./usage.mjs";
+import { createUsagePusher, readCacheExpiry } from "./usage.mjs";
+import { createReplayFilter, normalizeKeeperSettings, TURN_CONTENT } from "./cache-keeper.mjs";
+import { createKeeperOptOut, createKeeperRunner } from "./cache-keeper-runner.mjs";
 import { JobScheduler } from "./scheduler.mjs";
 import { scheduleInfo } from "./jobs.mjs";
 import { PendingRequests, answerFields, cardStart, childPrompt, createdText, findModelOption, folderState, isRelayTool, linkCardOf, reloadWarning, resolveConfig, unreportedChildren, withDeadline } from "./delegation.mjs";
@@ -100,6 +102,8 @@ const viewConfig = (sessionId, configOptions) => withContextOption(configOptions
 const prompts = createPromptStore(path.join(app.getPath("userData"), "session-prompts.json"));
 // The session's own Copilot command, kept the same way (see copilot-command.mjs)
 const commands = createPromptStore(path.join(app.getPath("userData"), "session-commands.json"), "session-commands");
+// Sessions whose prompt cache the keeper leaves alone (see cache-keeper-runner.mjs)
+const keeperOptOut = createKeeperOptOut(path.join(app.getPath("userData"), "cache-keeper.json"));
 /** The command a start of this session's Copilot uses: its own, else Settings (then $COPILOT_PATH, then `copilot`). */
 const commandFor = (sessionId) => resolveCommand({ own: commands.get(sessionId), settings: loadSettings().copilotCommand, envPath: process.env.COPILOT_PATH });
 const promptRoot = path.join(app.getPath("userData"), "session-prompts");
@@ -401,6 +405,87 @@ const usage = createUsagePusher({ send: (sessionId, view) => send("usage:update"
 // Session folders seen so far: together with the home folder the only places a file mention is checked without a click
 const knownFolders = new Set();
 
+// ---------- cache keeper ----------
+//
+// Keep-alive pings and an automatic /compact before an idle session's prompt cache expires (see cache-keeper.mjs for
+// the rules, cache-keeper-runner.mjs for the timers). Main gives it the facts of an open session and runs its turns.
+
+/** COPILOT_RELAY_KEEPER_LEADS_MS="ping,countdown,compact,late" and COPILOT_RELAY_KEEPER_RETRY_MS: shorter times, for
+ *  the UI checks only. A malformed value keeps the defaults. */
+function keeperTestTimes(env = process.env) {
+  const n = String(env.COPILOT_RELAY_KEEPER_LEADS_MS ?? "").split(",").map((x) => (x.trim() === "" ? NaN : Number(x)));
+  const ok = (x) => Number.isFinite(x) && x >= 0;
+  const retry = env.COPILOT_RELAY_KEEPER_RETRY_MS?.trim() ? Number(env.COPILOT_RELAY_KEEPER_RETRY_MS) : NaN;
+  return {
+    leads: n.length === 4 && n.every(ok) ? { ping: n[0], countdown: n[1], compact: n[2], late: n[3] } : undefined,
+    retry: ok(retry) ? { ms: retry } : undefined,
+  };
+}
+
+/** What the keeper's rules need to know of a session. One that is not open counts as busy: nothing is armed for it. */
+function keeperFacts(sessionId) {
+  const e = open.get(sessionId);
+  if (!e) return { busy: true, replaying: false, contextUsed: undefined, modelId: null, parent: false };
+  const card = pendingRequests.hasParent(sessionId) || [...reopenCards.values(), ...linkCards.values()].some((c) => c.sessionId === sessionId);
+  return {
+    busy: Boolean(e.prompting) || e.permissions.size > 0 || card,
+    replaying: Boolean(e.replaying),
+    contextUsed: e.contextUsed,
+    modelId: findModelOption(e.configOptions)?.currentValue ?? null,
+    // a child that has not reported back yet: open here, or its reply waits for the user's approval
+    parent: [...open.values()].some((c) => c.parentSessionId === sessionId && !c.reported) || heldCache.list(sessionId).some((m) => heldKind(m) === "child"),
+  };
+}
+
+/** A stray tool call (or permission request) in a keeper turn: the turn is stopped, the user is away. */
+function stopKeeperTurn(sessionId, entry, turn) {
+  turn.toolCalled = true;
+  if (turn.stopped) return;
+  turn.stopped = true;
+  cancelTurn(sessionId, entry);
+}
+
+/** The keeper's own turn (a ping or /compact), sent the way slashRename sends /rename. While `entry.keeping` is set
+ *  its updates and permission requests stay out of the window and the changes tracker (see attach). */
+async function keeperRun(sessionId, text, kind) {
+  const entry = open.get(sessionId);
+  if (!entry) return { text: "", toolCalled: false, error: "The session is not open." };
+  const turn = { kind, text: "", toolCalled: false, stopped: false };
+  entry.keeping = turn;
+  if (beginPrompt(entry)) entry.relay?.state(true);
+  let error = null;
+  try {
+    await entry.conn.request("session/prompt", { sessionId, prompt: [{ type: "text", text }] });
+  } catch (e) {
+    error = friendly(e);
+  } finally {
+    if (entry.keeping === turn) entry.keeping = null;
+    if (endPrompt(entry)) {
+      entry.relay?.state(false);
+      if (open.get(sessionId) === entry) usage.refresh(sessionId);
+    }
+  }
+  // the CLI answers a /compact it did not do with another line (e.g. too little to compact)
+  if (!error && kind === "compact" && !turn.text.includes("Compacted")) error = turn.text.trim().slice(0, 300) || "Copilot did not confirm it.";
+  return { text: turn.text, toolCalled: turn.toolCalled, error };
+}
+
+/** The keeper is on in Settings and this session is not opted out. */
+const keeperOn = (sessionId) => normalizeKeeperSettings(loadSettings().cacheKeeper).enabled && !keeperOptOut.get(sessionId);
+
+const keeper = createKeeperRunner({
+  settings: () => normalizeKeeperSettings(loadSettings().cacheKeeper),
+  optedOut: (sessionId) => keeperOptOut.get(sessionId),
+  facts: keeperFacts,
+  readExpiry: (sessionId, modelId) => readCacheExpiry(sessionId, { modelId }),
+  run: keeperRun,
+  emit: send,
+  now: Date.now,
+  setTimer: (fn, ms) => setTimeout(fn, ms),
+  clearTimer: (handle) => clearTimeout(handle),
+  ...keeperTestTimes(),
+});
+
 /** Wire a session's connection to the window. */
 function attach(sessionId, conn, cwd, relay, link) {
   if (cwd) knownFolders.add(cwd);
@@ -409,11 +494,25 @@ function attach(sessionId, conn, cwd, relay, link) {
   // one path for live and replayed updates (see sessions:new)
   entry.update = (u) => {
     if (u?.sessionUpdate === "tool_call" && u.title) entry.toolTitles.set(u.toolCallId, u.title);
-    if (u?.sessionUpdate === "usage_update" && open.get(sessionId) === entry) usage.context(sessionId, { used: u.used, size: u.size });
+    if (u?.sessionUpdate === "usage_update") {
+      entry.contextUsed = u.used; // for the cache keeper's minimum context
+      if (open.get(sessionId) === entry) usage.context(sessionId, { used: u.used, size: u.size });
+    }
     if (u?.sessionUpdate === "config_option_update" && Array.isArray(u.configOptions)) {
       entry.configOptions = u.configOptions;
       u = { ...u, configOptions: viewConfig(sessionId, u.configOptions) };
     }
+    // a keeper turn leaves no trace: its turn content stays out of the window, nothing reaches the changes tracker,
+    // and a tool call stops it. Session state (config, commands, title) still reaches the window.
+    const turn = entry.keeping;
+    if (turn) {
+      if (u?.sessionUpdate === "agent_message_chunk" && typeof u.content?.text === "string") turn.text += u.content.text;
+      if (u?.sessionUpdate === "tool_call") stopKeeperTurn(sessionId, entry, turn);
+      if (!TURN_CONTENT.has(u?.sessionUpdate)) send("acp:update", { sessionId, update: u });
+      return;
+    }
+    // replayed keep-alive pings and their turns, and the replayed /compact reply line
+    if (entry.replaying && !entry.replayFilter.pass(u)) return;
     // /rename answers with a chat line ("Session renamed to: …"); the new title arrives as session_info_update
     if (entry.renaming && u?.sessionUpdate === "agent_message_chunk") return;
     send("acp:update", { sessionId, update: u });
@@ -423,6 +522,13 @@ function attach(sessionId, conn, cwd, relay, link) {
     if (method === "session/update" && params?.sessionId === sessionId) entry.update(params.update);
   });
   conn.on("request:session/request_permission", (rpcId, params) => {
+    // in a keeper turn: refused at once, no card and no notification, and the turn is stopped
+    const turn = entry.keeping;
+    if (turn) {
+      conn.respond(rpcId, { outcome: { outcome: "cancelled" } });
+      return stopKeeperTurn(sessionId, entry, turn);
+    }
+    keeper.activity(sessionId);
     if (!entry.replaying) tracker.permission(sessionId, cwd, params.toolCall); // the start point before the edit runs
     // the relay's own tools run without asking, as with the terminal extension. The tool_call update carries
     // the server-prefixed name ("relay-send_message"), the permission request only the bare tool name.
@@ -444,6 +550,7 @@ function attach(sessionId, conn, cwd, relay, link) {
     entry.relay?.died(); // before stop(): the broker notifies the parent of an unreported child
     entry.relay?.stop();
     open.delete(sessionId);
+    keeper.closed(sessionId);
     dropReopenCards(sessionId);
     dropLinkCards(sessionId);
     heldCache.drop(sessionId);
@@ -585,6 +692,7 @@ async function openSession(sessionId, cwd) {
   // the agent replays the history as session/update notifications before answering session/load
   const entry = attach(sessionId, conn, cwd, relay);
   entry.replaying = true; // until session/load settles, also when it fails (see attach: the changes tracker)
+  entry.replayFilter = createReplayFilter(); // one per replay, used only while it runs
   try {
     const res = await conn.request("session/load", { sessionId, cwd, mcpServers: relay.mcpServers }).finally(() => (entry.replaying = false));
     entry.configOptions = res?.configOptions ?? entry.configOptions;
@@ -593,6 +701,7 @@ async function openSession(sessionId, cwd) {
   } catch (e) {
     entry.relay?.stop();
     open.delete(sessionId);
+    keeper.closed(sessionId);
     dropReopenCards(sessionId);
     dropLinkCards(sessionId);
     usage.forget(sessionId);
@@ -799,6 +908,8 @@ handle("sessions:prompt", async (sessionId, text, source = "relay") => {
   //         "relay" – sent by another session: neither
   // Images are only ever attached for "app": the broker can't prove who is behind a relay message, and reading
   // local files must never be triggered from outside this window.
+  await keeper.whenIdle(sessionId); // a running ping or compaction finishes first (Goal 10 of the cache keeper)
+  keeper.activity(sessionId); // a prompt of any source ends the keeper's pause
   const entry = getOpen(sessionId);
   const { conn, relay, cwd } = entry;
   if (source === "app" || source === "human") relay?.human();
@@ -807,6 +918,9 @@ handle("sessions:prompt", async (sessionId, text, source = "relay") => {
     imagesSupported: conn.init?.agentCapabilities?.promptCapabilities?.image === true,
   });
   for (const note of notes) send("acp:notice", { sessionId, text: note });
+  // the checkpoint before the turn, read before the request: a short turn can write its own before a later read.
+  // Not when the keeper can't act here: without a baseline the turn's end takes the first checkpoint it finds.
+  if (keeperOn(sessionId)) await keeper.turnStarted(sessionId);
   // fork/truncate refuse while a turn is running: the agent is still writing the history
   if (beginPrompt(entry)) entry.relay?.state(true);
   try {
@@ -815,7 +929,11 @@ handle("sessions:prompt", async (sessionId, text, source = "relay") => {
   } finally {
     if (endPrompt(entry)) {
       entry.relay?.state(false);
-      if (open.get(sessionId) === entry) usage.refresh(sessionId); // not after a close/truncate mid-turn
+      // not after a close/truncate mid-turn. Every end (done, cancelled, failed) starts the keeper's pause.
+      if (open.get(sessionId) === entry) {
+        usage.refresh(sessionId);
+        keeper.turnEnded(sessionId);
+      }
     }
   }
 });
@@ -829,6 +947,7 @@ handle("sessions:messageTimes", async (sessionId) => messageTimes(sessionId));
 // Copilot's own /rename command: it runs no model turn and isn't stored in the history, so turn numbers
 // used by fork/delete stay right. Copilot saves the name in workspace.yaml (user_named: true).
 handle("sessions:rename", async (sessionId, name) => {
+  await keeper.whenIdle(sessionId);
   const entry = getOpen(sessionId);
   if (entry.prompting) throw new Error("Wait until Copilot finishes this turn.");
   name = String(name ?? "").replace(/\s+/g, " ").trim();
@@ -838,14 +957,20 @@ handle("sessions:rename", async (sessionId, name) => {
   return name;
 });
 
+// For the cache keeper /rename is no turn (no model request, no checkpoint): its pause goes on, re-planned once the
+// session is free again (a timer that fired meanwhile found it busy).
 async function slashRename(sessionId, entry, name) {
+  await keeper.whenIdle(sessionId);
   entry.renaming = true;
   if (beginPrompt(entry)) entry.relay?.state(true);
   try {
     await entry.conn.request("session/prompt", { sessionId, prompt: [{ type: "text", text: `/rename ${name}` }] });
   } finally {
     entry.renaming = false;
-    if (endPrompt(entry)) entry.relay?.state(false);
+    if (endPrompt(entry)) {
+      entry.relay?.state(false);
+      if (open.get(sessionId) === entry) keeper.replan(sessionId);
+    }
   }
 }
 
@@ -864,6 +989,7 @@ async function closeEntry(sessionId) {
   if (!e) return;
   // removed from `open` first, so the connection's exit handler stays silent (no acp:exit)
   open.delete(sessionId);
+  keeper.closed(sessionId); // no timer, no state; a running ping's or compaction's result is dropped
   usage.forget(sessionId);
   pendingRequests.dropForParent(sessionId);
   dropReopenCards(sessionId);
@@ -876,6 +1002,8 @@ async function closeEntry(sessionId) {
 }
 
 handle("sessions:close", async (sessionId) => {
+  const e = open.get(sessionId);
+  if (e?.keeping) cancelTurn(sessionId, e); // a ping or compaction is cancelled, as delete cancels a turn
   await closeEntry(sessionId);
 });
 
@@ -938,6 +1066,7 @@ function reopenRequested(sessionId, { requestId, targetKey, targetName, fromName
 /** The session's relay connection is gone: the broker asks again when it registers anew. */
 function dropReopenCards(sessionId) {
   for (const [id, card] of reopenCards) if (card.sessionId === sessionId) reopenCards.delete(id);
+  keeper.replan(sessionId); // an open card kept the keeper from acting (a closed session has no keeper state left)
 }
 
 // reachable only from the window, like delegation:answer. `reason` "missing": the target no longer exists.
@@ -950,9 +1079,11 @@ handle("reopen:answer", async (sessionId, requestId, approved, reason) => {
   } catch (e) {
     if (e.status !== 404) throw e; // not answered: the card stays answerable
     reopenCards.delete(requestId);
+    keeper.activity(sessionId); // the user answered the card: they are here, the pause restarts with the next turn
     return false;
   }
   reopenCards.delete(requestId);
+  keeper.activity(sessionId);
   return true;
 });
 
@@ -967,6 +1098,7 @@ function linkRequested(sessionId, req) {
 /** The session's relay connection is gone: the broker asks again when it registers anew. */
 function dropLinkCards(sessionId) {
   for (const [id, card] of linkCards) if (card.sessionId === sessionId) linkCards.delete(id);
+  keeper.replan(sessionId);
 }
 
 // reachable only from the window, like reopen:answer. Resolves { result, text } (linked, released, rejected, refused).
@@ -980,9 +1112,11 @@ handle("link:answer", async (sessionId, requestId, approved) => {
   } catch (e) {
     if (e.status !== 404) throw e; // not answered: the card stays answerable
     linkCards.delete(requestId);
+    keeper.activity(sessionId); // the user answered the card: they are here, the pause restarts with the next turn
     return false;
   }
   linkCards.delete(requestId);
+  keeper.activity(sessionId);
   return answer;
 });
 
@@ -1084,6 +1218,7 @@ handle("delegation:answer", async (requestId, approved, own, command, fields) =>
   // taken while it is answered, so a second click cannot start a second child
   const req = pendingRequests.take(requestId);
   if (!req) return false;
+  keeper.activity(req.parentSessionId); // the user answered the parent's card: they are here, the pause restarts with the next turn
   if (approved !== true) {
     tellParent(req, "rejected", `The user rejected the request to create session "${req.name}".`);
     return { outcome: "rejected" };
@@ -1134,6 +1269,15 @@ handle("held:set", (sessionId, kind, on) => {
   holds.set(checkedSessionId(sessionId), kind, on !== false);
 });
 
+// the cache keeper, from the window: the queue or message box holds text, Not now, the per-session switch
+handle("keeper:held", (sessionId, held) => keeper.setHeld(checkedSessionId(sessionId), held === true));
+handle("keeper:notNow", (sessionId) => keeper.notNow(checkedSessionId(sessionId)));
+handle("keeper:optOut", (sessionId, off) => {
+  keeperOptOut.set(checkedSessionId(sessionId), off === true);
+  keeper.replan(sessionId);
+});
+handle("keeper:get", (sessionId) => ({ optedOut: keeperOptOut.get(checkedSessionId(sessionId)), state: keeper.state(sessionId) }));
+
 // ---------- history: fork / delete from a message ----------
 
 const CUT_POSITIONS = ["beforeUser", "beforeReply", "afterReply"];
@@ -1147,7 +1291,9 @@ function cutTarget(target) {
   return { ordinal, text, where };
 }
 
-function refuseWhilePrompting(sessionId) {
+/** Waits for a running ping or compaction of the cache keeper first: the window shows the session as idle. */
+async function refuseWhilePrompting(sessionId) {
+  await keeper.whenIdle(sessionId);
   if (open.get(sessionId)?.prompting) throw new Error("Wait until Copilot finishes this turn.");
 }
 
@@ -1204,10 +1350,11 @@ async function historyOp(sessionId, fn) {
 // copy of the history up to the target under a new session id; the source stays as it is (open or not)
 handle("sessions:fork", async (sessionId, target) => {
   target = cutTarget(target);
-  refuseWhilePrompting(sessionId);
+  await refuseWhilePrompting(sessionId);
   refuseWhileDeleting(sessionId);
   const res = forkSession(sessionId, target);
   holds.copy(sessionId, res.sessionId);
+  keeperOptOut.copy(sessionId, res.sessionId);
   tiers.copy(sessionId, res.sessionId); // a long history must not land in a smaller window
   prompts.copy(sessionId, res.sessionId);
   commands.copy(sessionId, res.sessionId);
@@ -1217,7 +1364,7 @@ handle("sessions:fork", async (sessionId, target) => {
 // cut the history in place; the session is closed first and the renderer reopens it via sessions:open
 handle("sessions:truncate", async (sessionId, target) => {
   target = cutTarget(target);
-  refuseWhilePrompting(sessionId);
+  await refuseWhilePrompting(sessionId);
   return historyOp(sessionId, async () => {
     describeCut(sessionId, target); // throws for a target that doesn't match, before anything is closed
     await closeAndWait(sessionId);
@@ -1251,6 +1398,7 @@ handle("sessions:delete", async (sessionId) => {
     // missingOk: a session that never wrote its dir (or is already gone) just has its store rows removed
     const res = await deleteSession(sessionId, { missingOk: true });
     holds.delete(sessionId);
+    keeperOptOut.delete(sessionId);
     tiers.delete(sessionId);
     prompts.delete(sessionId);
     commands.delete(sessionId);
@@ -1264,7 +1412,10 @@ handle("sessions:delete", async (sessionId) => {
 });
 
 handle("sessions:setConfig", async (sessionId, configId, value) => {
-  const updated = await setConfigOption(sessionId, getOpen(sessionId), configId, value);
+  await keeper.whenIdle(sessionId);
+  const entry = getOpen(sessionId);
+  keeper.activity(sessionId); // a new model or agent has no fresh cache entry: the keeper waits for a turn
+  const updated = await setConfigOption(sessionId, entry, configId, value);
   return updated && viewConfig(sessionId, updated);
 });
 
@@ -1273,6 +1424,7 @@ handle("sessions:setConfig", async (sessionId, configId, value) => {
 // with the session untouched: the window must not close and reopen it (a delegated child may still be set up).
 handle("sessions:setContextTier", async (sessionId, value) => {
   if (!isSessionId(sessionId)) return { refused: `Invalid session id: ${sessionId}` };
+  await keeper.whenIdle(sessionId);
   return switchTier({ sessionId, value, tiers, ...restartGuards(sessionId) });
 });
 
@@ -1288,6 +1440,7 @@ function restartGuards(sessionId) {
     return null;
   };
   const close = async () => {
+    keeper.activity(sessionId); // a new context window or prompt (the close below also ends the keeper's state)
     historyBusy.add(sessionId);
     try {
       await closeAndWait(sessionId);
@@ -1309,6 +1462,7 @@ handle("sessions:getPrompt", async (sessionId) => {
 // session); the same values change nothing
 handle("sessions:setPrompt", async (sessionId, own, command = "") => {
   if (!isSessionId(sessionId)) return { refused: `Invalid session id: ${sessionId}` };
+  await keeper.whenIdle(sessionId);
   return saveSetup({ ...restartGuards(sessionId), sessionId, own, command, prompts, commands });
 });
 
@@ -1348,14 +1502,18 @@ handle("settings:get", async () => ({
   promptChild: typeof loadSettings().promptChild === "string" ? loadSettings().promptChild : null,
   promptTemplates: normalizeTemplates(loadSettings().promptTemplates),
   childPartDefault: CHILD_PART,
+  cacheKeeper: normalizeKeeperSettings(loadSettings().cacheKeeper),
 }));
 handle("settings:set", async (s) => {
   // a refused command keeps the stored one; the rest of the form is still saved
   const typed = normalizeCommand(s.copilotCommand ?? "");
   if (typed.refused) console.warn(`[settings] the Copilot command was not saved: ${typed.refused}`);
   const next = { ...loadSettings(), ...(typed.refused ? {} : { copilotCommand: typed.command }), relay: s.relay !== false, contextTier: normalizeTier(s.contextTier) ?? "default", queueMidTurn: s.queueMidTurn === true, activityPanel: normalizePanelMode(s.activityPanel), brokerRepo: String(s.brokerRepo ?? "").trim() };
+  // the keeper's settings only when sent, as the prompt parts
+  if (s.cacheKeeper !== undefined) next.cacheKeeper = normalizeKeeperSettings(s.cacheKeeper);
   // the prompt parts only when sent (a form without them keeps them); promptChild null: back to the built-in text
   saveSettings(applyPromptSettings(next, s));
+  keeper.replan();
   lister?.kill();
   lister = null;
   return true;
@@ -1785,6 +1943,7 @@ async function confirmedReload(reload) {
     windowReloads++;
     await Promise.all(children.map((id) => closeEntry(id).catch(() => {})));
     pendingRequests.clear();
+    keeper.replan(); // the parents' cards are gone
   } else windowReloads++;
   if (!parent.isDestroyed()) reload(parent.webContents);
 }
@@ -1796,9 +1955,10 @@ function notifyIfUnfocused(title, body) {
 }
 
 function killAll() {
-  for (const { conn, relay } of open.values()) {
+  for (const [sessionId, { conn, relay }] of open) {
     relay?.stop();
     conn.kill();
+    keeper.closed(sessionId);
   }
   open.clear();
   lister?.kill();

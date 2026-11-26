@@ -1,8 +1,7 @@
 // Held messages (from a child, the parent, another session, a person) wait for the user's approval. Small pieces for the
 // main process: the per-session, per-kind switches (default on, only "off" is stored) and the cache of marked messages that
 // are not yet acknowledged to the broker, so a window that reopens a session can show them again.
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import path from "node:path";
+import { jsonFileMap } from "./json-file-map.mjs";
 
 export const HELD_KINDS = ["child", "parent", "other", "user"];
 
@@ -29,19 +28,7 @@ const entryOf = (off) => {
  *  means on. `set` throws on an unknown kind or when the file can't be written; `copy` and `delete` are bookkeeping
  *  after a fork / delete that already succeeded, so a failed write there is only logged. */
 export function createHoldStore(file) {
-  const read = () => {
-    try {
-      const data = JSON.parse(readFileSync(file, "utf8"));
-      return data && typeof data === "object" && !Array.isArray(data) ? data : {};
-    } catch {
-      return {};
-    }
-  };
-  const write = (data) => {
-    mkdirSync(path.dirname(file), { recursive: true });
-    writeFileSync(`${file}.tmp`, JSON.stringify(data, null, 2));
-    renameSync(`${file}.tmp`, file);
-  };
+  const { read, write, bestEffort } = jsonFileMap(file, "held-replies");
   const store = (id, off) => {
     const data = read();
     const entry = entryOf(off);
@@ -50,13 +37,6 @@ export function createHoldStore(file) {
       delete data[id];
     } else data[id] = entry;
     write(data);
-  };
-  const bestEffort = (fn) => {
-    try {
-      fn();
-    } catch (e) {
-      console.warn(`[held-replies] could not write ${file}: ${e.message}`);
-    }
   };
   return {
     get(id) {

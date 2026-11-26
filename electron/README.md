@@ -102,6 +102,11 @@ these run without a permission prompt.
 - Messages from other sessions appear as purple "from …" bubbles. By default they are held until you approve
   them (see **Messages wait for you** under [Delegated sessions](#delegated-sessions)); an approved message
   becomes a new turn as soon as the session is idle. The broker's own notices are never held.
+- Cache keeper: off by default (**⚙ Settings → Keep idle sessions' prompt cache warm, then compact them**, with the number
+  of keep-alive prompts and the minimum context in k tokens). While a session is idle the app sends a few cheap
+  keep-alive prompts to keep its prompt cache warm, then compacts it. The header chip shows "♻ Keeping the cache warm (n/N)"
+  or "⏳ Compacting in m:ss" with **Not now**; the status-bar switch **Keep cache** opts one session out; the list shows
+  ⏳ next to a session about to be compacted. Queued messages or text in the message box hold the keeper back.
 - Queue: off by default (**⚙ Settings → Deliver queued messages during a turn**). When on, messages and your own
   prompts sent while the session works are queued and delivered after the current tool step (never while a tool
   runs). This holds for approved messages and, with **My messages while busy** off, for your own prompts; with that

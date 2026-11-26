@@ -112,6 +112,41 @@ export async function readSessionUsage(sessionId, { copilotHome } = {}) {
   return usage;
 }
 
+/**
+ * Prompt-cache expiry from the session's last usage checkpoint that has a non-empty modelCacheState.
+ * With a modelId only that model's entry counts; with none (or "auto") the entry that expires last wins.
+ * Null for an invalid id, a missing file, no such checkpoint, no matching entry or an unparsable date.
+ */
+export async function readCacheExpiry(sessionId, { copilotHome, modelId } = {}) {
+  if (!isSessionId(sessionId)) return null;
+  const file = path.join(copilotHome ?? copilotHomeDefault(), "session-state", sessionId, "events.jsonl");
+  const found = await scan(file, '"session.usage_checkpoint"', (e) =>
+    e?.type === "session.usage_checkpoint" &&
+    Array.isArray(e.data?.modelCacheState) &&
+    e.data.modelCacheState.length > 0
+      ? e
+      : null,
+  );
+  if (!found) return null;
+  const any = modelId === undefined || modelId === null || modelId === "auto";
+  let best = null;
+  for (const entry of found.hit.data.modelCacheState) {
+    if (!entry || typeof entry !== "object") continue;
+    if (!any && entry.modelId !== modelId) continue;
+    const expiresAt = typeof entry.cacheExpiresAt === "string" ? Date.parse(entry.cacheExpiresAt) : NaN;
+    if (!Number.isFinite(expiresAt)) continue;
+    if (!best || expiresAt > best.expiresAt) {
+      best = {
+        expiresAt,
+        ttlSeconds: num(entry.cacheTtlSeconds) ?? 0,
+        modelId: String(entry.modelId ?? ""),
+        checkpointId: typeof found.hit.id === "string" ? found.hit.id : null,
+      };
+    }
+  }
+  return best;
+}
+
 /** A snapshot is usable if unlimited, or if every displayed field is present (never invent values). */
 function validQuota(q) {
   if (!q || typeof q !== "object") return false;
