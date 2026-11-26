@@ -51,6 +51,7 @@
       "session-list.mjs",
       "last-activity.mjs",
       "activity-panel.mjs",
+      "comms-forward.mjs",
       "context-tier.mjs",
       "copilot-command.mjs",
       "copilot-runtime.mjs",

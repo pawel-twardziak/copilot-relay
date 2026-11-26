@@ -48,7 +48,13 @@ contextBridge.exposeInMainWorld("api", {
   setPrompt: (sessionId, own, command = "") => call("sessions:setPrompt", sessionId, own, command),
   answerPermission: (sessionId, reqId, optionId) => call("permission:answer", sessionId, reqId, optionId),
   // a delivered report or notice has started its prompt: the broker may forget it
-  relayAck: (sessionId, id) => call("relay:ack", sessionId, id),
+  // outcome: "discarded" when the app drops it, absent = "taken"
+  relayAck: (sessionId, id, outcome) => call("relay:ack", sessionId, id, outcome),
+  // the communication log of the tree: { root, keys, events, peers } | { unsupported: true } (older broker) | { error }
+  getComms: (sessionId) => call("comms:get", sessionId),
+  // the stored text of one event: { text } | { error }
+  getCommsText: (sessionId, id) => call("comms:text", sessionId, id),
+  onCommsEvent: on("comms:event"),
   answerDelegation: (requestId, approved, own, command, fields) => call("delegation:answer", requestId, approved, own, command, fields),
   // the broker's sub-session links ({ key: "cli:<id>", parent, name, task, createdAt, reported, parentDeleted, online,
   // busy }): the cached snapshot at once, the fresh one follows through onLinks

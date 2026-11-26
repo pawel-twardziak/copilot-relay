@@ -10,6 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { AcpConnection } from "./acp.mjs";
+import { createCommsForward } from "./comms-forward.mjs";
 import { isNotFoundExit, normalizeCommand, resolveCommand, shellLine, startFailureText } from "./copilot-command.mjs";
 import { countUserMessages, deleteSession, describeCut, forkSession, isSessionId, messageTimes, purgeDeleted, sessionCreatedAt, sessionDir, truncateSession } from "./history.mjs";
 import { createLastActivity } from "./last-activity.mjs";
@@ -163,6 +164,9 @@ function relayPrepare() {
   return { cfg, alias, mcpServers: [{ type: "http", name: "relay", url: `${cfg.url}/mcp?peer=${encodeURIComponent(alias)}`, headers: [] }] };
 }
 
+// one forwarder for the whole app: every open session's client gets the same pushed event, the window once
+const forwardComms = createCommsForward({ send: (channel, payload) => send(channel, payload) }); // `send` is defined further down
+
 function relayStart(sessionId, cwd, { cfg, alias }, { name, parentKey } = {}) {
   if (!alias) return null;
   const status = (extra = {}) => send("relay:status", { sessionId, name: client.name, connected: client.connected, parentSessionId: open.get(sessionId)?.parentSessionId ?? null, ...extra });
@@ -188,6 +192,7 @@ function relayStart(sessionId, cwd, { cfg, alias }, { name, parentKey } = {}) {
         notifyIfUnfocused(HELD_NOTICE[kind], `${m.from} → ${client.name}`);
       }
     },
+    onComms: forwardComms,
     onSessionRequest: (req) => sessionRequested(sessionId, req).catch((e) => console.warn(`[delegation] session_request: ${e.message}`)),
     onReported: () => {
       const entry = open.get(sessionId);
@@ -269,6 +274,20 @@ async function brokerGetLinks(url) {
   const body = await r.json();
   const obj = (v) => (v && typeof v === "object" && !Array.isArray(v) ? v : {});
   return { links: body.links, held: obj(body.held), heldByKind: obj(body.heldByKind) };
+}
+
+/** GET JSON from the broker without an open session; throws an Error with `status` on a non-2xx answer. */
+async function brokerGetJson(route) {
+  const cfg = relayConfig();
+  if (!cfg.enabled) throw new Error("The relay is switched off in this app.");
+  let r;
+  try {
+    r = await fetch(cfg.url + route);
+  } catch (e) {
+    throw new Error(`The relay broker at ${cfg.url} could not be reached (${e.cause?.message ?? e.message}).`);
+  }
+  if (!r.ok) throw Object.assign(new Error(`The relay broker answered HTTP ${r.status}.`), { status: r.status });
+  return r.json();
 }
 
 /** POST to the broker without an open session (forget / missing take `cli:` keys); throws readable text. */
@@ -1251,14 +1270,15 @@ handle("delegation:answer", async (requestId, approved, own, command, fields) =>
   return { ...result, retry: false };
 });
 
-handle("relay:ack", async (sessionId, id) => {
+handle("relay:ack", async (sessionId, id, outcome) => {
+  const how = outcome === "discarded" ? "discarded" : undefined; // absent = "taken"
   const relay = open.get(sessionId)?.relay;
   if (!relay) {
     // a dead view (the process has exited): the broker's durable item is acknowledged through its HTTP route, so a
     // discarded reply does not come back when the view is closed instead of resumed
     if (!isSessionId(sessionId)) return false;
     try {
-      const answer = await brokerPost("/api/peer/ack", { key: `cli:${sessionId}`, id });
+      const answer = await brokerPost("/api/peer/ack", { key: `cli:${sessionId}`, id, ...(how ? { outcome: how } : {}) });
       if (answer?.ok !== true) return false;
     } catch {
       return false; // broker down: the renderer keeps the id in its discarded set
@@ -1266,7 +1286,7 @@ handle("relay:ack", async (sessionId, id) => {
     heldCache.ack(sessionId, id);
     return true;
   }
-  await relay.ack(id);
+  await relay.ack(id, how);
   heldCache.ack(sessionId, id);
   return true;
 });
@@ -1275,6 +1295,27 @@ const checkedSessionId = (sessionId) => {
   if (!isSessionId(sessionId)) throw new Error(`Invalid session id: ${sessionId}`);
   return sessionId;
 };
+// the communication log of the tree that holds this session: through the open view's client, else straight from the broker
+handle("comms:get", async (sessionId) => {
+  checkedSessionId(sessionId);
+  try {
+    const relay = open.get(sessionId)?.relay;
+    return relay ? await relay.fetchComms() : await brokerGetJson(`/api/comms?${new URLSearchParams({ key: `cli:${sessionId}` })}`);
+  } catch (e) {
+    return e.status === 404 ? { unsupported: true } : { error: e.message }; // 404: a broker older than the app
+  }
+});
+handle("comms:text", async (sessionId, id) => {
+  checkedSessionId(sessionId);
+  try {
+    const relay = open.get(sessionId)?.relay;
+    const text = relay ? await relay.fetchCommsText(String(id)) : (await brokerGetJson(`/api/comms/text?${new URLSearchParams({ id: String(id) })}`)).text;
+    return typeof text === "string" ? { text } : { error: "not found" };
+  } catch (e) {
+    return { error: e.status === 404 ? "not found" : e.message };
+  }
+});
+
 handle("held:get", (sessionId) => holds.get(checkedSessionId(sessionId)));
 handle("held:set", (sessionId, kind, on) => {
   if (!HELD_KINDS.includes(kind)) throw new Error(`unknown held kind: ${kind}`);

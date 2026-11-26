@@ -1347,7 +1347,7 @@ class SessionView {
   /** Acknowledges a discarded message; only a confirmed ack (not false, not an error) lets the id go. */
   ackDiscarded(id) {
     api
-      .relayAck(this.sessionId, id)
+      .relayAck(this.sessionId, id, "discarded")
       .then((ok) => ok !== false && this.discarded.delete(id))
       .catch(() => {});
   }
@@ -1401,7 +1401,7 @@ class SessionView {
     if (!this.queue.length) this.endPauseOnEmpty();
     if (item.kind === "relay") {
       // the broker must not deliver it again (a message without an id, such as a delegated task, has nothing to ack)
-      if (item.deliveryId) api.relayAck(this.sessionId, item.deliveryId).catch(() => {});
+      if (item.deliveryId) api.relayAck(this.sessionId, item.deliveryId, "discarded").catch(() => {});
       this.system(`Removed a queued message from ${item.from}.`);
     }
     this.renderQueue();
