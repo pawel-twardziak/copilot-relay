@@ -285,7 +285,8 @@ must skip it:
 - **Session header:** the status chip of Goal 4 with **Not now**. The countdown ticks every second from `compactAt`.
   The ping chip shows `pingsSent/pings`.
 - **Session list:** ⏳ next to a session in `countdown`.
-- **Session menu:** "Don't keep this session's cache" (checked = opted out).
+- **Per-session switch:** "Keep cache" in the status bar next to the hold switches ("Approve:"); checked = the keeper is on,
+  unchecked = this session is opted out. (The app has no session menu.)
 - **Activity reports:** the window sends `keeper:held` when a session's queue becomes non-empty or empty, and when
   its message box gets text or becomes empty, debounced.
 

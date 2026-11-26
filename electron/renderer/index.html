@@ -50,6 +50,18 @@
           <span><input id="set-queue" type="checkbox" /> Deliver queued messages during a turn</span>
         </label>
         <p class="hint">Messages for a working session are delivered after its current tool step. Off: they wait until the turn ends.</p>
+        <label class="check">
+          <span><input id="set-keeper" type="checkbox" /> Keep idle sessions' prompt cache warm, then compact them</span>
+        </label>
+        <label>
+          Keep-alive prompts before compacting
+          <input id="set-keeper-pings" type="number" min="0" step="1" />
+        </label>
+        <label>
+          Minimum context (k tokens)
+          <input id="set-keeper-min" type="number" min="0" step="1" />
+        </label>
+        <p class="hint">Spends a few AI credits per pause to save the cost of rewriting the cache. Compaction replaces the conversation with a summary.</p>
         <label>
           Tool and subagent details
           <select id="set-activity"><option value="off">In the chat</option><option value="subagents">Subagents in a side panel</option><option value="all">Everything in a side panel</option></select>
@@ -215,6 +227,7 @@
     <script src="changes-list.js"></script>
     <script src="file-preview.js"></script>
     <script src="broker-restart.js"></script>
+    <script src="cache-keeper.js"></script>
     <script src="folder-row.js"></script>
     <script src="prompt-editor.js"></script>
     <script src="app.js"></script>
