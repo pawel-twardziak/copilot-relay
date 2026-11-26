@@ -29,36 +29,56 @@ function assertMinimum(out) {
     assert.ok(n.h >= FONT * 3.2, `${n.id} height ${n.h}`);
   }
 }
-/** Points along an edge path (M/L polylines and M/Q arcs). */
-function samples(path) {
-  const nums = path.match(/-?\d+(\.\d+)?/g).map(Number);
-  const pts = [];
-  if (path.includes("Q")) {
-    const [x0, y0, cx, cy, x2, y2] = nums;
-    for (let t = 0; t <= 1.0001; t += 0.02) {
-      const u = 1 - t;
-      pts.push([u * u * x0 + 2 * u * t * cx + t * t * x2, u * u * y0 + 2 * u * t * cy + t * t * y2]);
-    }
-    return pts;
-  }
-  for (let i = 0; i + 3 < nums.length; i += 2) {
-    const [ax, ay, bx, by] = nums.slice(i, i + 4);
-    for (let t = 0; t <= 1.0001; t += 0.05) pts.push([ax + (bx - ax) * t, ay + (by - ay) * t]);
-  }
-  return pts;
+/** The segments [x1, y1, x2, y2] of an edge path ("M x y L x y ..."). */
+function segments(path) {
+  assert.match(path, /^M -?[\d.]+ -?[\d.]+( L -?[\d.]+ -?[\d.]+)+$/, `a polyline: ${path}`);
+  const n = path.match(/-?\d+(\.\d+)?/g).map(Number);
+  const out = [];
+  for (let i = 0; i + 3 < n.length; i += 2) out.push(n.slice(i, i + 4));
+  return out;
 }
-/** No edge passes through a box other than its two ends'. */
+/** Whether a segment meets the open rectangle r grown by m px (Liang-Barsky). */
+function meets([x1, y1, x2, y2], r, m = 0) {
+  const dx = x2 - x1, dy = y2 - y1;
+  let t0 = 0, t1 = 1;
+  for (const [p, q] of [[-dx, x1 - (r.x - m)], [dx, r.x + r.w + m - x1], [-dy, y1 - (r.y - m)], [dy, r.y + r.h + m - y1]]) {
+    if (p === 0) {
+      if (q <= 0) return false;
+      continue;
+    }
+    const t = q / p;
+    if (p < 0) t0 = Math.max(t0, t);
+    else t1 = Math.min(t1, t);
+    if (t0 >= t1) return false;
+  }
+  return true;
+}
+/** No edge comes within 1 px of a box other than its two ends'. */
 function assertEdgesClear(out) {
   for (const e of out.edges) {
-    for (const [x, y] of samples(e.path)) {
+    for (const seg of segments(e.path)) {
       for (const n of out.nodes) {
         if (n.id === e.from || n.id === e.to) continue;
-        const inside = x > n.x + 0.5 && x < n.x + n.w - 0.5 && y > n.y + 0.5 && y < n.y + n.h - 0.5;
-        assert.ok(!inside, `edge ${e.from}->${e.to} crosses ${n.id} at ${x},${y}`);
+        assert.ok(!meets(seg, n, 1), `edge ${e.from}->${e.to} [${seg}] grazes ${n.id}`);
       }
     }
   }
 }
+/** Every label (out.label sized, centred on its point) clear of the boxes, the other edges' lines and the other labels. */
+function assertLabelsClear(out) {
+  const rect = (e) => ({ x: e.labelX - out.label.w / 2, y: e.labelY - out.label.h / 2, w: out.label.w, h: out.label.h });
+  out.edges.forEach((e, i) => {
+    const r = rect(e);
+    assert.ok(r.x >= 0 && r.y >= 0 && r.x + r.w <= out.width && r.y + r.h <= out.height, `label ${e.from}->${e.to} inside`);
+    for (const n of out.nodes) assert.ok(!overlap(r, n), `label ${e.from}->${e.to} on box ${n.id}`);
+    out.edges.forEach((f, j) => {
+      if (j === i) return;
+      for (const seg of segments(f.path)) assert.ok(!meets(seg, r), `label ${e.from}->${e.to} on edge ${f.from}->${f.to}`);
+      if (j > i) assert.ok(!overlap(r, rect(f)), `labels ${e.from}->${e.to} and ${f.from}->${f.to} overlap`);
+    });
+  });
+}
+const axisAligned = (path) => segments(path).every(([x1, y1, x2, y2]) => x1 === x2 || y1 === y2);
 const byId = (out) => new Map(out.nodes.map((n) => [n.id, n]));
 
 test("root and two children at 420x300 fit without scroll, nodes larger than the minimum", () => {
@@ -99,6 +119,7 @@ test("twelve children at 280 px wrap into rows; node width >= 140; scroll only v
   const rows = new Set(out.nodes.filter((n) => n.id !== "root").map((n) => n.y));
   assert.ok(rows.size > 1, "the children wrap into several rows");
   assertEdgesClear(out);
+  assertLabelsClear(out);
   // the same group in a tall area: no scroll at all, still the minimum width fits
   const tall = run([node("root"), ...kids], kids.map((k) => edge("root", k.id, true)), 280, 2000);
   assert.equal(tall.scrollX, false);
@@ -137,7 +158,7 @@ test("a deep chain larger than the area scrolls; no node below the minimum", () 
   assertInside(narrow);
 });
 
-test("outside nodes sit right of the tree; their edges are arcs", () => {
+test("outside nodes sit right of the tree; their edges are routed clear of the boxes", () => {
   const nodes = [node("root"), node("c0", "root", 1), node("c1", "root", 1), outside("x1"), outside("x2")];
   const edges = [edge("root", "c0", true), edge("root", "x1"), edge("c1", "x2"), edge("x2", "c1"), edge("c0", "c1")];
   const out = run(nodes, edges, 420, 300);
@@ -149,21 +170,23 @@ test("outside nodes sit right of the tree; their edges are arcs", () => {
   assertMinimum(out);
   assertNoOverlap(out.nodes);
   assertInside(out);
-  for (const e of out.edges) {
-    if (e.from === "root" && e.to === "c0") assert.doesNotMatch(e.path, /Q/);
-    else assert.match(e.path, /^M [\d.]+ [\d.]+ Q [\d.]+ [\d.]+ [\d.]+ [\d.]+$/, `${e.from}->${e.to} is an arc`);
+  assert.equal(out.outsidePlacement, "right");
+  for (const e of out.edges.filter((x) => !(x.from === "root" && x.to === "c0"))) {
+    assert.ok(axisAligned(e.path), `${e.from}->${e.to} runs in right angles`);
   }
   assertEdgesClear(out);
-  // arcs start and end on box borders, not at the centres
-  for (const e of out.edges.filter((x) => x.path.includes("Q"))) {
-    const n = e.path.match(/[\d.]+/g).map(Number);
-    for (const [id, x, y] of [[e.from, n[0], n[1]], [e.to, n[4], n[5]]]) {
+  assertLabelsClear(out);
+  // routed edges start and end on box borders, not at the centres
+  for (const e of out.edges) {
+    const segs = segments(e.path);
+    const [x0, y0] = segs[0], [, , x1, y1] = segs[segs.length - 1];
+    for (const [id, x, y] of [[e.from, x0, y0], [e.to, x1, y1]]) {
       const b = m.get(id);
       const onBorder = Math.min(Math.abs(x - b.x), Math.abs(x - b.x - b.w), Math.abs(y - b.y), Math.abs(y - b.y - b.h)) <= 0.5;
       assert.ok(onBorder, `${e.from}->${e.to} end on ${id}'s border`);
     }
   }
-  // a nested tree beside the column at 420 px: no horizontal scroll, arcs clear of every box
+  // a nested tree with outside nodes at 420 px: no horizontal scroll (column right or rows below), all clear
   const nested = [node("root"), node("a", "root", 1), node("b", "root", 1), node("a1", "a", 2), node("a2", "a", 2), node("b1", "b", 2), outside("x"), outside("y")];
   const nestedEdges = [edge("root", "a", true), edge("a", "a1", true), edge("a1", "x"), edge("x", "a1"), edge("root", "y"), edge("b1", "a2")];
   const deep = run(nested, nestedEdges, 420, 400);
@@ -171,6 +194,31 @@ test("outside nodes sit right of the tree; their edges are arcs", () => {
   assertMinimum(deep);
   assertNoOverlap(deep.nodes);
   assertEdgesClear(deep);
+  assertLabelsClear(deep);
+});
+
+test("outside nodes move into rows below a tree the right-hand column would make too wide", () => {
+  const nodes = [node("root"), ...children(2), outside("x")];
+  const edges = [edge("root", "c0", true), edge("root", "c1", true), edge("c1", "x"), edge("x", "c1")];
+  const out = run(nodes, edges, 280, 400);
+  assert.equal(out.outsidePlacement, "below");
+  assert.equal(out.scrollX, false);
+  assert.equal(out.width, 280);
+  const m = byId(out);
+  const treeBottom = Math.max(...["root", "c0", "c1"].map((id) => m.get(id).y + m.get(id).h));
+  assert.ok(m.get("x").y > treeBottom, "below every tree node");
+  assertMinimum(out);
+  assertNoOverlap(out.nodes);
+  assertInside(out);
+  assertEdgesClear(out);
+  assertLabelsClear(out);
+  // several outside nodes below wrap into rows like children
+  const many = run([...nodes, outside("y"), outside("z")], edges, 280, 400);
+  assert.equal(many.outsidePlacement, "below");
+  assert.equal(many.scrollX, false);
+  assertNoOverlap(many.nodes);
+  // wide enough: they stay on the right
+  assert.equal(run(nodes, edges, 600, 400).outsidePlacement, "right");
 });
 
 test("a pair in both directions gets two offset edges with distinct label points", () => {
@@ -190,15 +238,16 @@ test("a pair in both directions gets two offset edges with distinct label points
   const [c1, d1, c0, d0] = upw.path.match(/[\d.]+/g).map(Number); // reversed: from the child to the root
   assert.ok(Math.abs((a1 - a0) * (d1 - d0) - (b1 - b0) * (c1 - c0)) < 40, "parallel");
   assert.ok(Math.abs(a0 - c0) > 2, "offset sideways");
-  // sibling arcs: two arcs
+  // siblings: two routed edges side by side
   check(out, "c0", "c1");
   assertEdgesClear(out);
+  assertLabelsClear(out);
   // a wrapped group's routed edges
   const kids = children(5);
   const wrapped = run([node("root"), ...kids], [edge("root", "c3", true), edge("c3", "root", true)], 280, 300);
   check(wrapped, "root", "c3");
   assertEdgesClear(wrapped);
-  // an outside node's arcs
+  // an outside node's routed edges
   const ext = run([node("root"), outside("x")], [edge("root", "x"), edge("x", "root")], 420, 300);
   check(ext, "root", "x");
 });
@@ -223,11 +272,60 @@ test("a larger area gives larger nodes (fit grows)", () => {
 
 test("no nodes: the area without scroll; edges to unknown nodes and to themselves are skipped", () => {
   const empty = run([], [edge("a", "b")], 300, 200);
-  assert.deepEqual(empty, { width: 300, height: 200, scrollX: false, scrollY: false, nodes: [], edges: [] });
+  assert.deepEqual(
+    { ...empty, label: undefined },
+    { width: 300, height: 200, scrollX: false, scrollY: false, outsidePlacement: "right", label: undefined, nodes: [], edges: [] },
+  );
+  assert.deepEqual(empty.label, { w: 28.5, h: 17 }, "the label pill: 2.2 x 1.3 font sizes, rounded to 0.5 px");
   const one = run([node("root"), outside("x")], [edge("root", "gone"), edge("x", "x"), edge("root", "x")], 300, 200);
   assert.deepEqual(one.edges.map((e) => `${e.from}>${e.to}`), ["root>x"]);
   // a ghost ("proposed") child is laid out under its parent like the others
   const ghost = run([node("root"), node("proposed:1", "root", 1, { state: "proposed" })], [], 420, 300);
   const m = byId(ghost);
   assert.ok(m.get("proposed:1").y > m.get("root").y + m.get("root").h);
+});
+
+test("seeded random trees: no edge grazes a box, no label sits on a box, another edge or another label", () => {
+  let seed = 20261126;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+  const pick = (list) => list[Math.floor(rnd() * list.length)];
+  for (let run_ = 0; run_ < 60; run_++) {
+    const dense = run_ % 3 === 2;
+    const count = dense ? 6 + Math.floor(rnd() * 14) : 2 + Math.floor(rnd() * 8);
+    const nodes = [node("n0")];
+    for (let i = 1; i < count; i++) {
+      const parent = !dense && i < 7 && rnd() < 0.8 ? "n0" : `n${Math.floor(rnd() * i)}`;
+      nodes.push(node(`n${i}`, parent, 1));
+    }
+    for (let i = 0, k = Math.floor(rnd() * 4); i < k; i++) nodes.push(outside(`x${i}`));
+    const edges = [];
+    const seen = new Set();
+    const add = (from, to) => {
+      if (from === to || seen.has(`${from}>${to}`)) return;
+      seen.add(`${from}>${to}`);
+      edges.push(edge(from, to));
+    };
+    for (const n of nodes) {
+      if (!n.parent) continue;
+      add(n.parent, n.id);
+      if (rnd() < 0.5) add(n.id, n.parent);
+    }
+    for (let i = 0, k = 1 + Math.floor(rnd() * 4); i < k; i++) {
+      const a = pick(nodes).id, b = pick(nodes).id;
+      add(a, b);
+      if (rnd() < 0.5) add(b, a);
+    }
+    for (const x of nodes.filter((n) => !n.inTree)) add(pick(nodes.filter((n) => n.inTree)).id, x.id);
+    const width = 280 + Math.floor(rnd() * 500), height = 200 + Math.floor(rnd() * 500);
+    const out = run(nodes, edges, width, height);
+    const what = `run ${run_} (${count} tree nodes, ${width}x${height})`;
+    assert.equal(out.edges.length, edges.length, what);
+    assert.equal(out.scrollX, out.width > width, what);
+    assert.equal(out.scrollY, out.height > height, what);
+    assertMinimum(out);
+    assertNoOverlap(out.nodes);
+    assertInside(out);
+    assertEdgesClear(out);
+    assertLabelsClear(out);
+  }
 });
