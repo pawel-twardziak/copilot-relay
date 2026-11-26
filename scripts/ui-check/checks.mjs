@@ -3854,4 +3854,46 @@ export const checks = [
   heldTypedCheck(true),
   heldTypedDeleteCheck,
   ...keeperChecks,
+  {
+    // the sidebar lists session trees, each session once: Pinned, Open in app, then projects
+    name: "sidebar-trees",
+    modes: ["off"],
+    async run(app) {
+      await app.newSession();
+      // one synchronous evaluation: no list refresh can come between setting the rows and reading the sidebar
+      const out = await app.ev(`(() => {
+        const keep = { sessions, links, pinned: new Set(ui.pinned) };
+        const S = (sessionId, cwd, updatedAt) => ({ sessionId, cwd, title: sessionId, updatedAt });
+        const read = () => [...document.querySelectorAll("#session-list > *")].flatMap((el) =>
+          el.classList.contains("group-title") ? ["# " + (el.querySelector(".name") ?? el.querySelector("span")).textContent]
+          : [...(el.classList.contains("item-row") ? [el] : el.querySelectorAll(".item-row"))].map((r) => {
+              const id = r.querySelector(".item").title.split("\\n")[2];
+              const depth = r.style.getPropertyValue("--depth") || "0";
+              return id + ":" + depth + (id === "C" ? " | " + r.querySelector(".m").textContent : "");
+            }));
+        try {
+          sessions = [S("P", "/x/a", "2026-11-20T10:00:00Z"), S("C", "/x/b", "2026-11-19T10:00:00Z"), S("Q", "/x/a", "2026-11-21T10:00:00Z"), S("R", "/x/a", "2026-11-01T10:00:00Z")];
+          ui.pinned.clear();
+          ui.pinned.add("Q");
+          setLinks([{ key: "cli:C", parent: "cli:P", createdAt: 1, parentDeleted: false }]);
+          const first = read();
+          ui.pinned.add("C");
+          renderList();
+          return { first, second: read() };
+        } finally {
+          sessions = keep.sessions;
+          ui.pinned.clear();
+          for (const id of keep.pinned) ui.pinned.add(id);
+          setLinks(keep.links);
+        }
+      })()`);
+      const strip = (rows) => rows.map((r) => r.split(" | ")[0]);
+      assert.deepEqual(strip(out.first), ["# 📌 Pinned", "Q:0", "# Open in app", "scripted-work:0", "# a", "P:0", "C:1", "R:0"]);
+      assert.equal(new Set(strip(out.first).filter((r) => !r.startsWith("#")).map((r) => r.split(":")[0])).size, 5, "no session twice");
+      const meta = out.first.find((r) => r.startsWith("C:")).split(" | ")[1];
+      assert.match(meta, /^b · /, "the child shows its own folder");
+      assert.doesNotMatch(meta, /child of/);
+      assert.deepEqual(strip(out.second), ["# 📌 Pinned", "Q:0", "P:0", "C:1", "# Open in app", "scripted-work:0", "# a", "R:0"]);
+    },
+  },
 ];
