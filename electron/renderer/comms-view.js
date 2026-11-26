@@ -22,7 +22,8 @@ const MIN_NODE = 140, MAX_NODE = 320, PADS = 1.26; // the layout's box width lim
 /**
  * The panel in `el` (the view's comms-body).
  *   h: the app's element helper; on = { openSession(id), fetchText(id) -> Promise<string>, filter(f | null),
- *   split(ratio, done) }  (split: the graph's share while dragging, done on pointer up)
+ *   split(ratio, done), autoSplit() }  (split: the graph's share while dragging, done on pointer up after a drag;
+ *   autoSplit: the bar was double-clicked, back to the height the graph needs)
  * -> { render(model, opts), destroy() }; opts = { split (0..1), autoSplit (the bar was never dragged: the graph
  *    gets the height it needs, up to the largest share the log allows), filter, note (a log line instead of the rows:
  *    loading, an error) }
@@ -41,7 +42,7 @@ function create({ h, el, on }) {
   svgEl.append(defs, edgeLayer, labelLayer);
   const canvas = h("div", { class: "comms-canvas" }, svgEl);
   const graph = h("div", { class: "comms-graph" }, canvas);
-  const bar = h("div", { class: "comms-split", title: "Drag to share the height between graph and log" });
+  const bar = h("div", { class: "comms-split", title: "Drag to share the height between graph and log; double-click to give the graph the height it needs" });
   const chip = h("button", { class: "comms-filter", hidden: true, title: "Clear the filter" });
   const totals = h("span", { class: "comms-totals" });
   const summary = h("div", { class: "comms-summary" }, totals, chip);
@@ -74,8 +75,11 @@ function create({ h, el, on }) {
     const { top, bottom } = graph.getBoundingClientRect();
     const grab = e.clientY - bottom; // where on the bar it was grabbed: the bar moves with the pointer, no jump
     const total = graphTotal();
-    manual = true; // the stored share from now on, not the height the graph needs
+    let moved = false; // a click (or a double click) is no drag: auto height stays
     const move = (m) => {
+      if (!moved && Math.abs(m.clientY - e.clientY) < 3) return;
+      moved = true;
+      manual = true; // the stored share from now on, not the height the graph needs
       ratio = UiState.clampSplit((m.clientY - grab - top) / total, total);
       graph.style.height = `${Math.round(ratio * total)}px`;
       on.split?.(ratio, false);
@@ -86,13 +90,18 @@ function create({ h, el, on }) {
       removeEventListener("pointercancel", end);
       document.body.classList.remove("comms-resizing");
       dragging = false;
-      on.split?.(ratio, true);
+      if (moved) on.split?.(ratio, true);
     };
     dragging = true;
     addEventListener("pointermove", move);
     addEventListener("pointerup", end);
     addEventListener("pointercancel", end);
     document.body.classList.add("comms-resizing");
+  });
+  // a double click on the bar: the graph gets the height it needs again
+  bar.addEventListener("dblclick", () => {
+    manual = false;
+    on.autoSplit?.();
   });
 
   // clicks: a node or an edge filters the log, empty space clears; a double click on a session opens it
@@ -379,6 +388,7 @@ function create({ h, el, on }) {
       model = next;
       opts = nextOpts;
       if (!dragging && Number.isFinite(opts.split)) ratio = opts.split;
+      if (!dragging && opts.autoSplit) manual = false; // auto again (a double click in this or another view)
       drawGraph();
       drawSummary();
       drawLog();

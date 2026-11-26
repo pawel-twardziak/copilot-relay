@@ -32,7 +32,14 @@ const delegationStore = new DelegationStore();
 const names = new NameStore(process.env.COPILOT_RELAY_NAMES_FILE || undefined, {
   keep: (k) => delegationStore.parentOf(k) != null || delegationStore.childrenOf(k).length > 0,
 });
-const comms = new CommsLog();
+// The communication log is diagnostics only: one that cannot be read (or capped) must not stop relaying, so the broker
+// runs without it (no events written, /api/comms answers an empty log).
+let comms = null;
+try {
+  comms = new CommsLog();
+} catch (e) {
+  console.warn(`comms: the communication log cannot be used, running without it: ${e.message}`);
+}
 registry.comms = comms;
 const delegation = new Delegation({ registry, store: delegationStore, comms, nameOf: (k) => names.get(k)?.name });
 registry.offlineRelative = (f, n, t) => delegation.messageClosed(f, n, t);
@@ -60,7 +67,7 @@ delegation.onChange(() => {
 });
 
 // Push every new communication event (preview only) to the app connections, no debounce.
-comms.onAppend((event) => {
+comms?.onAppend((event) => {
   for (const p of registry.list()) {
     try {
       const peer = registry.get(p.key);
@@ -467,7 +474,7 @@ server.listen(PORT, HOST, () => {
 
 const shutdown = () => {
   for (const a of acpAgents.values()) a.stop();
-  comms.flush(); // a purge waiting in the rewrite debounce must not be lost
+  comms?.flush(); // a purge waiting in the rewrite debounce must not be lost
   process.exit(0);
 };
 process.on("SIGINT", shutdown);

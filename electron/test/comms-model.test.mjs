@@ -284,6 +284,19 @@ test("live online/busy from an open view override links and peers", () => {
   assert.equal(node(build({ comms: comms("r", [], peers), links, live: { r: { online: true, busy: true } } }), "r").state, "working");
 });
 
+test("names: an empty peer name falls back to the event's name; a root without peers takes the open view's name", () => {
+  const events = [ev("message", "ext:9", "r", 10, { from: "terminal-a" })];
+  const m = build({ comms: comms("r", events, { ...rootPeer, "ext:9": { name: "", online: false, busy: false, kind: "extension" } }), links: [link("a", "r")] });
+  assert.equal(node(m, "ext:9").name, "terminal-a", "a peer that left the registry");
+  // an older broker (no peers): the root has no link, its open view knows its relay name
+  const old = build({ links: [link("a", "r")], current: "a", live: { r: { online: true, name: "mama-1a2b" } } });
+  assert.equal(node(old, "r").name, "mama-1a2b");
+  assert.equal(node(build({ links: [link("a", "r")], current: "a" }), "r").name, "r", "nothing knows it: its id");
+  // the broker's and the link's names come first
+  assert.equal(node(build({ comms: comms("r", [], rootPeer), links: [link("a", "r")], live: { r: { name: "view" } } }), "r").name, "Root");
+  assert.equal(node(build({ links: [link("a", "r")], current: "a", live: { a: { name: "view" } } }), "a").name, "a");
+});
+
 test("inTree: a session with a parent or children", () => {
   const tree = SessionTree.index([link("a", "r"), link("o", "gone", { parentDeleted: true })]);
   assert.equal(CommsModel.inTree(tree, "a"), true);

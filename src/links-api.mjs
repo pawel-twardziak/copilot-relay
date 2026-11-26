@@ -32,11 +32,10 @@ export function linksRoutes({ delegation, comms, registry, log = console.log }) 
     "GET /api/links": () => ({ status: 200, json: { links: delegation.snapshot(), held: delegation.heldCounts(), heldByKind: delegation.heldByKind() } }),
     "GET /api/comms": ({ key } = {}) => {
       if (!isKey(key)) return bad("key required");
-      if (!comms) return { status: 404, json: { error: "no communication log" } };
       const root = rootOf(key);
       const linked = [root, ...delegation.store.descendantsOf(root)];
       const keys = linked.includes(key) ? linked : [key]; // an unknown key is a tree of its own
-      const events = comms.eventsOf(keys);
+      const events = comms ? comms.eventsOf(keys) : []; // a broker running without its log: an empty one, not "older broker"
       const peers = {};
       for (const k of new Set([...keys, ...events.flatMap((e) => [e.fromKey, e.toKey])]))
         if (isKey(k) && (k !== key || events.length || delegation.store.linkOf(k) || registry?.get(k))) peers[k] = peerInfo(k);

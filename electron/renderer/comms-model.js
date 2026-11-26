@@ -52,7 +52,8 @@ function messagesOf(events) {
 
 /**
  * input = { comms: {root, keys, events, peers} | null, links, heldByKind, current, live, now, filter };
- *   live[id] = { online?, busy?, ctx?, keeper?, cards? } (online/busy from a view open in this app override links/peers)
+ *   live[id] = { online?, busy?, ctx?, keeper?, cards?, name? } (online/busy from a view open in this app override
+ *   links/peers; name: its relay name or title, used when the broker's peers and links have none)
  * -> { nodes, edges, rows, stats, unsupported }  (see the Communication panel design, section 6)
  *   node.held = { child, parent, other }: the node's unacknowledged held messages by kind (heldByKind is per
  *   recipient, not per sender); edge.held = the target's `parent` count on a parent->child edge, else 0.
@@ -138,7 +139,8 @@ function build(input = {}) {
     if (inTreeNode) depth.set(id, parent == null ? 0 : depth.get(parent) + 1);
     const c = count(id);
     const node = {
-      id, name: comms?.peers?.[keyOf.get(id)]?.name ?? tree.link.get(id)?.name ?? lastName.get(id) ?? id,
+      // "" (a peer nobody knows any more) is no name: the next source is asked
+      id, name: comms?.peers?.[keyOf.get(id)]?.name || tree.link.get(id)?.name || live[id]?.name || lastName.get(id) || id,
       inTree: inTreeNode, released: released.has(id), parent, depth: inTreeNode ? depth.get(id) : null, state: stateOf(id),
     };
     if (node.state === "waiting-task" && lastReport.has(id)) node.waitingSince = lastReport.get(id);

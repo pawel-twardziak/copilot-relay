@@ -253,9 +253,12 @@ let heldByKey = {}; // the broker's count of held messages per key "cli:<session
 let heldByKindKey = {}; // the same by kind: { "cli:<sessionId>": { child, parent, other } }
 // the Communication panel's data, per tree (key = its root's "cli:<id>"): the broker's { root, keys (Set), events,
 // peers, ids (Set of event ids) }, or { loading, keys } before the first answer, { unsupported } (an older broker),
-// { error }; fetched when a panel of the tree is first shown and when the tree changes, then fed by comms events
+// { error }; fetched when a panel of the tree is first shown, when the tree changes and (throttled) on every links
+// change while a panel shows it (commsLinksChanged), then fed by comms events
 const commsByRoot = new Map();
 const commsFetching = new Map(); // root key -> the events pushed while its fetch runs (merged into the answer)
+const commsSoon = new Map(); // root key -> the timer of its refetch after a links change (at most one per 2 s)
+const commsStale = new Set(); // root keys whose links changed while their fetch ran: fetched again once it answers
 let commsQueued = false; // a redraw of the shown Communication panels is due
 let commsTicker = null; // the 1 s redraw while a shown graph has a running timer
 const HOLD_TITLES = {
@@ -1515,6 +1518,7 @@ class SessionView {
     if (name && name !== this.relayName) {
       this.relayName = name;
       this.renderHoldSwitches(); // the switch of other sessions' messages shows once the session has a relay name
+      commsRefresh(); // its node's name when the broker gives none
     }
     if (parentChanged) {
       // the user linked or unlinked this session (adopt_session, release_session): null is a release
@@ -1973,6 +1977,7 @@ class SessionView {
     const closing = !open && this.row.classList.contains("drawer-open") && !!this.shownPanel()?.contains(document.activeElement);
     this.drawerOpen = open;
     this.layoutPanel();
+    if (open) commsRefresh(); // a Communication panel back on screen retries a failed load (drawComms)
     // the focus leaves the drawer it was in for the button that opens it again (not the message box, where the next
     // Esc would stop the turn)
     if (closing) (this.panelKind === "comms" ? this.commsBtn : this.activityBtn).focus();
@@ -3762,6 +3767,7 @@ function commsLive() {
     live[id] = {
       online: !v.dead, busy: !v.dead && v.busy === true, ctx: lastUsage.get(id)?.context ?? undefined,
       keeper: k && ["pinging", "countdown", "compacting"].includes(k.phase) ? k : undefined, cards: v.pendingCards,
+      name: v.relayName || (v.title ? shortTitle(v.title) : undefined), // for a node the broker names nowhere (an older one)
     };
   }
   return live;
@@ -3777,8 +3783,9 @@ function drawComms() {
     const rootKey = `cli:${commsRootOf(v.sessionId)}`;
     if (v.commsRoot !== rootKey) Object.assign(v, { commsRoot: rootKey, commsFilter: null }); // another tree: no filter
     const cached = commsByRoot.get(rootKey);
-    // not fetched yet, or a failed / older broker's answer of more than 5 s ago (the broker may be back or restarted)
-    if (!cached || ((cached.error || cached.unsupported) && Date.now() - cached.at > 5000)) fetchComms(rootKey);
+    // not fetched yet, or (in a panel on screen) a failed / older broker's answer of more than 5 s ago: the broker may
+    // be back or restarted; what the panel shows stays until the answer comes
+    if (!cached || ((cached.error || cached.unsupported) && Date.now() - cached.at > 5000 && commsOnScreen(v))) fetchComms(rootKey);
     const entry = commsByRoot.get(rootKey);
     const comms = entry?.events ? { root: rootKey, keys: [...entry.keys], events: entry.events, peers: entry.peers } : null;
     const model = CommsModel.build({ comms, links, heldByKind: heldByKindKey, current: v.sessionId, live, now: Date.now(), filter: v.commsFilter });
@@ -3798,6 +3805,11 @@ function drawComms() {
             commsRefresh(); // every view's panel takes the new split
           }
         },
+        autoSplit: () => {
+          ui.commsSplitSet = false; // the graph's needed height again, in every view
+          saveUi();
+          commsRefresh();
+        },
       },
     });
     const note = entry?.loading ? "Loading the message history…" : entry?.error ? `Could not load the message history: ${entry.error}` : null;
@@ -3806,44 +3818,67 @@ function drawComms() {
   }
   if (tick) commsTicker = setTimeout(commsRefresh, 1000);
 }
-/** Fetches the log of the tree whose root is rootKey; what it held stays shown until the answer comes. */
+/** The view's Communication panel is on the screen (its view active, the panel neither collapsed nor a closed drawer). */
+const commsOnScreen = (v) => v.panelKind === "comms" && v.el.classList.contains("active") && v.commsPanel.checkVisibility();
+/** Fetches the log of the tree whose root is rootKey; what it held (the events, a failure or an older broker's note)
+ *  stays shown until the answer comes; only the first load shows "Loading…". */
 function fetchComms(rootKey) {
   if (commsFetching.has(rootKey)) return;
   const pushed = [];
   commsFetching.set(rootKey, pushed);
-  if (!commsByRoot.get(rootKey)?.events) commsByRoot.set(rootKey, { loading: true, keys: new Set(commsKeysOf(rootKey.slice(4))) });
+  const held = commsByRoot.get(rootKey);
+  if (!held || held.loading) commsByRoot.set(rootKey, { loading: true, keys: new Set(commsKeysOf(rootKey.slice(4))) });
   const done = (r) => {
     if (commsFetching.get(rootKey) !== pushed) return;
     commsFetching.delete(rootKey);
     const at = Date.now();
+    const prev = commsByRoot.get(rootKey);
     if (r?.unsupported) commsByRoot.set(rootKey, { unsupported: true, at });
     else if (!Array.isArray(r?.events)) {
-      const prev = commsByRoot.get(rootKey);
       if (!prev?.events) commsByRoot.set(rootKey, { error: r?.error ?? "no answer", at });
-      // a first failure is tried once more in 5 s (later ones when a panel shows it, see drawComms)
-      if (!prev?.error) setTimeout(() => commsByRoot.get(rootKey)?.error && fetchComms(rootKey), 5000);
+      // a failed first load is tried once more in 5 s; later failures only when a panel on screen draws it (drawComms)
+      if (prev?.loading) setTimeout(() => commsByRoot.get(rootKey)?.error && fetchComms(rootKey), 5000);
     } else {
       const ids = new Set(r.events.map((e) => e.id));
       const events = [...r.events, ...pushed.filter((e) => !ids.has(e.id))]; // what came while the broker answered
       for (const e of events) ids.add(e.id);
       const keys = new Set([...(Array.isArray(r.keys) ? r.keys : []), ...commsKeysOf(rootKey.slice(4))]);
-      commsByRoot.set(rootKey, { root: rootKey, keys, events, peers: r.peers ?? {}, ids, at });
+      commsByRoot.set(rootKey, { root: rootKey, keys, events, peers: r.peers ?? {}, ids, at, tree: commsTreeOf(rootKey) });
     }
+    if (commsStale.delete(rootKey) && commsByRoot.has(rootKey)) commsRefetchSoon(rootKey); // the links changed meanwhile
     commsRefresh();
   };
   api.getComms(rootKey.slice(4)).then(done, (e) => done({ error: e.message }));
 }
+/** The sessions of the tree under rootKey as this app's links see them (to tell whether it gained or lost any). */
+const commsTreeOf = (rootKey) => commsKeysOf(rootKey.slice(4)).sort().join(" ");
+/** The tree's log fetched again soon: at once when the last answer is 2 s old, else when it is (one timer per tree);
+ *  a fetch running now is followed by another once it answers. */
+function commsRefetchSoon(rootKey) {
+  if (commsSoon.has(rootKey)) return;
+  const wait = Math.max(0, (commsByRoot.get(rootKey)?.at ?? 0) + 2000 - Date.now());
+  commsSoon.set(rootKey, setTimeout(() => {
+    commsSoon.delete(rootKey);
+    if (!commsByRoot.get(rootKey)?.events) return; // dropped, or not loaded (a first load or a failure has its own retry)
+    if (commsFetching.has(rootKey)) commsStale.add(rootKey);
+    else fetchComms(rootKey);
+  }, wait));
+}
 /** The links changed: a cached tree whose root is no longer a root is dropped (fetched again under its new root when
- *  shown), one that gained sessions is fetched again, an older broker's or failed answer is retried after 30 s. */
+ *  shown); a loaded tree is fetched again (at most every 2 s) when it gained or lost sessions, and on every change
+ *  while a panel shows it (links_changed follows every peer change: the root's and outside nodes' online/busy come
+ *  from the answer's peers). A failed or older broker's answer is retried by a panel on screen (drawComms). */
 function commsLinksChanged() {
+  const shown = new Set([...views.values()].filter((v) => v.panelKind === "comms").map((v) => `cli:${commsRootOf(v.sessionId)}`));
   for (const [rootKey, entry] of commsByRoot) {
     const id = rootKey.slice(4);
     if (commsRootOf(id) !== id || !tree.childrenOf.get(id)?.length) {
       commsByRoot.delete(rootKey);
       continue;
     }
-    const grew = entry.keys && commsKeysOf(id).some((k) => !entry.keys.has(k));
-    if (grew || ((entry.unsupported || entry.error) && Date.now() - entry.at > 30_000)) fetchComms(rootKey);
+    if (!shown.has(rootKey) && entry.tree === commsTreeOf(rootKey)) continue;
+    if (commsFetching.has(rootKey)) commsStale.add(rootKey); // its answer may predate the change
+    else if (entry.events) commsRefetchSoon(rootKey);
   }
   commsRefresh();
 }
@@ -3851,6 +3886,7 @@ function setPanelCollapsed(collapsed) {
   ui.panelCollapsed = collapsed;
   saveUi();
   layoutPanels();
+  if (!collapsed) commsRefresh(); // a Communication panel back on screen retries a failed load (drawComms)
 }
 
 /** Collapse / expand one project in place (no re-render, so the transition runs). */

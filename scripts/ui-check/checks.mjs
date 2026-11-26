@@ -992,7 +992,8 @@ const commsChecks = [
       await app.ev(`${VC(parent)}.commsBtn.click()`);
       await app.check(`ui.rightPanel === "comms" && ${VC(parent)}.panelKind === "comms"`, "Communication chosen");
       await app.check(`${VC(parent)}.commsBody.querySelectorAll(".cn").length === 3`, "the parent's graph");
-      await app.check(`!commsFetching.size && !!commsByRoot.get(${J(`cli:${parent}`)})?.events`, "the tree's log fetched");
+      // (and no refetch after a links change still due)
+      await app.check(`!commsFetching.size && !commsSoon.size && !commsStale.size && !!commsByRoot.get(${J(`cli:${parent}`)})?.events`, "the tree's log fetched");
       await frames(app);
       const ids = (await graphNodes(app, parent)).map((n) => n.id).sort();
       // watch the child's panel from here on: a node removed (its first draw only adds them) or a note over the log
@@ -1038,6 +1039,136 @@ const commsChecks = [
       assert.equal((await slotOf(app, parent)).comms, true, "the parent still shows Communication");
       await app.check(`!!${commsPart(parent, `.cn.released[data-id="${kid}"]`)}`, "the released child marked in the parent's graph");
       assert.ok((await graphNodes(app, parent)).some((n) => n.id === other && !n.cls.includes("outside")), "the other child still in the tree");
+    },
+  },
+  {
+    // the panel follows the broker after its first load: the root's view closed (its online state comes from the
+    // broker's peers, it has no link) turns its node closed in a child's panel; a child forgotten by the broker (a
+    // delete) leaves the graph and the log with its events
+    name: "comms-refresh",
+    modes: ["off"],
+    scenario: COMMS_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      const { parent, kids: [kid, other] } = await commsTree(app, ["helper", "second-helper"]);
+      const otherName = await app.ev(`${VC(other)}.relayName`);
+      await activate(app, kid);
+      await app.check(`${VC(kid)}.commsBody.querySelectorAll(".cn").length === 3`, "the child's graph");
+      await app.check(`!!${commsPart(kid, `.cn[data-id="${parent}"]:not(.st-closed)`)}`, "the open root not closed");
+      // the routes of the log's rows (the relay's notices to the parent name the child in their text, not their route)
+      const routes = () => app.ev(`[...${VC(kid)}.commsBody.querySelectorAll(".cl-row .cl-route")].map((r) => r.textContent)`);
+      assert.ok((await routes()).some((t) => t.includes(otherName)), "the other child's task row");
+
+      // the root's view closes (only it): its node turns closed from the broker's fresh peers
+      await app.ev(`closeViews([${J(parent)}])`);
+      await app.check(`!views.has(${J(parent)})`, "the root's view to close");
+      await app.check(`!!${commsPart(kid, `.cn[data-id="${parent}"].st-closed`)}`, "the closed root's node closed");
+
+      // the other child is closed and forgotten (as a delete does): its node and its rows go
+      await app.ev(`closeViews([${J(other)}])`);
+      await app.check(`!views.has(${J(other)})`, "the other child's view to close");
+      await app.ev(`api.forgetLinks([${J(`cli:${other}`)}])`);
+      await app.check(`tree.parentOf.get(${J(other)}) === undefined`, "the forgotten child out of the links");
+      await app.check(`!${commsPart(kid, `.cn[data-id="${other}"]`)}`, "the forgotten child's node to go");
+      const left = await routes();
+      assert.equal(left.some((t) => t.includes(otherName)), false, `no row of the forgotten child: ${JSON.stringify(left)}`);
+      assert.deepEqual((await graphNodes(app, kid)).map((n) => n.id).sort(), [parent, kid].sort(), "the root and the child left");
+    },
+  },
+  {
+    // a failed load: "Loading…" only for the first one, then the failure stays on screen; one timed retry, after it no
+    // fetch while no panel shows the tree; a panel back on screen fetches again (at most every 5 s) keeping the failure
+    // (or the older broker's note) shown until the answer comes. No broker and the relay off: every load fails.
+    name: "comms-fetch-retry",
+    modes: ["off"],
+    async run(app) {
+      const id = await app.newSession();
+      const root = `cli:${id}`;
+      const V0 = VC(id);
+      await app.ev(`(() => {
+        window.__starts = [];
+        window.__sets = [];
+        const fetch0 = fetchComms;
+        window.fetchComms = (k) => { if (k === ${J(root)} && !commsFetching.has(k)) __starts.push(Date.now()); return fetch0(k); };
+        const set0 = commsByRoot.set.bind(commsByRoot);
+        commsByRoot.set = (k, v) => { if (k === ${J(root)}) __sets.push(["loading", "error", "unsupported", "events"].find((x) => x in v)); return set0(k, v); };
+        setLinks({ links: [{ key: ${J(root)}, parent: null, name: "root", createdAt: 1 }, { key: "cli:fake-child", parent: ${J(root)}, name: "fake-child", createdAt: 2 }] });
+        return true;
+      })()`);
+      await app.check(`!${V0}.commsBtn.hidden`, "the Communication button");
+      if ((await app.ev(`${V0}.panelKind`)) !== "comms") await app.ev(`${V0}.commsBtn.click()`);
+      await app.check(`${V0}.commsPanel.checkVisibility()`, "the panel on screen");
+      await app.check(`!!commsByRoot.get(${J(root)})?.error && !commsFetching.size`, "the first load to fail");
+      const note = () => app.ev(`${commsPart(id, ".cl-note")}?.textContent ?? null`);
+      await app.check(`${commsPart(id, ".cl-note")}?.textContent.startsWith("Could not load the message history")`, "the failure shown");
+      // off the screen: the one retry in 5 s, then nothing
+      await app.ev(`${V0}.hidePanel()`);
+      await frames(app);
+      assert.equal(await app.ev(`${V0}.commsPanel.checkVisibility()`), false, "the panel collapsed");
+      await keeperSleep(6500);
+      assert.equal(await app.ev("__starts.length"), 2, "the first load and one retry");
+      await keeperSleep(6000);
+      assert.equal(await app.ev("__starts.length"), 2, "no fetch after the retry");
+      assert.deepEqual(await app.ev("__sets"), ["loading", "error", "error"], "Loading… only for the first load");
+
+      // back on screen: one fetch, the failure stays shown while it runs
+      const back = await app.ev(`(() => {
+        ${V0}.togglePanel();
+        drawComms();
+        const e = commsByRoot.get(${J(root)});
+        return { starts: __starts.length, fetching: commsFetching.has(${J(root)}), error: !!e.error, loading: !!e.loading, note: ${commsPart(id, ".cl-note")}?.textContent ?? null };
+      })()`);
+      assert.equal(back.starts, 3, "a panel on screen fetches the old failure again");
+      assert.deepEqual([back.fetching, back.error, back.loading], [true, true, false], "the failure kept while it runs");
+      assert.match(back.note ?? "", /^Could not load the message history/);
+      await app.check("!commsFetching.size", "its answer");
+      assert.match((await note()) ?? "", /^Could not load the message history/);
+      await keeperSleep(6000);
+      assert.ok((await app.ev("__starts.length")) <= 4, "no timed retry after a later failure (a draw may fetch every 5 s)");
+
+      // an older broker's note stays shown while a panel on screen asks again
+      await app.check("!commsFetching.size", "no fetch running");
+      const old = await app.ev(`(() => {
+        commsByRoot.set(${J(root)}, { unsupported: true, at: Date.now() - 6000 });
+        const before = __starts.length;
+        drawComms();
+        const e = commsByRoot.get(${J(root)});
+        const n = ${commsPart(id, ".cl-note")};
+        return { started: __starts.length - before, fetching: commsFetching.has(${J(root)}), unsupported: !!e.unsupported, loading: !!e.loading, note: n?.textContent ?? null, hint: !!n?.classList.contains("hint") };
+      })()`);
+      assert.deepEqual(old, { started: 1, fetching: true, unsupported: true, loading: false, note: await app.ev("CommsView.OLD_BROKER"), hint: true }, "the note kept while it runs");
+      assert.ok(!(await app.ev("__sets")).slice(1).includes("loading"), "never Loading… again");
+    },
+  },
+  {
+    // a click on the split bar without a drag keeps the graph's auto height (nothing stored); a drag stores the share;
+    // a double click gives the graph its needed height again
+    name: "comms-split-click",
+    modes: ["off"],
+    scenario: COMMS_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      const { parent } = await commsTree(app, ["helper"]);
+      await app.check(`${VC(parent)}.commsBody.querySelectorAll(".cn").length === 2`, "the graph");
+      await frames(app);
+      const auto = (await commsHeights(app, parent)).graph;
+      await dragSplit(app, parent, 0);
+      await dragSplit(app, parent, 2); // under 3 px: still a click
+      assert.equal(await app.ev("ui.commsSplitSet"), false, "a click stores no split");
+      assert.equal((JSON.parse(await storedUi(app)) ?? {}).commsSplitSet ?? false, false, "nothing stored");
+      assert.ok(Math.abs((await commsHeights(app, parent)).graph - auto) <= 1, "the graph keeps its auto height");
+      await dragSplit(app, parent, auto - 80 >= 140 ? -80 : 80); // within the limits from the auto height
+      assert.equal(await app.ev("ui.commsSplitSet"), true, "a drag stores the split");
+      const dragged = (await commsHeights(app, parent)).graph;
+      assert.ok(Math.abs(dragged - auto) > 40, `the graph follows the drag: ${auto} → ${dragged}`);
+      await app.ev(`${commsPart(parent, ".comms-split")}.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }))`);
+      await frames(app);
+      await frames(app);
+      assert.equal(await app.ev("ui.commsSplitSet"), false, "a double click: auto again");
+      assert.equal(JSON.parse(await storedUi(app)).commsSplitSet, false, "stored");
+      assert.ok(Math.abs((await commsHeights(app, parent)).graph - auto) <= 1, "the graph's needed height again");
     },
   },
 ];
