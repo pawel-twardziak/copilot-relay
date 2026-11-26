@@ -13,7 +13,8 @@ const NO_TREE = { parentOf: new Map(), childrenOf: new Map() };
 /**
  * The sidebar's structure, built from session trees (a root and all its descendants by the links): a tree with a
  * pinned member goes to `pinned`, else one with an open member to `open`, else to the group of its root's folder.
- * Every row is listed once. Trees (and groups) are ordered by their newest member.
+ * Every row is listed once; every folder keeps its group, empty when its sessions are elsewhere (not while searching).
+ * Trees (and groups) are ordered by their newest member.
  * rows: the listed sessions plus open views Copilot does not list (unique ids). tree: a SessionTree.index result.
  * query: lower-cased filter text; a tree stays whole when any member matches, and while filtering every group is
  * shown expanded (the stored state is untouched).
@@ -58,9 +59,15 @@ function listModel(rows, { pinned = new Set(), open = new Set(), collapsed = new
   const byLatest = (a, b) => (b.latest > a.latest) - (b.latest < a.latest); // stable for equal (and both Infinity)
   const flatten = (list, allFolders = false) =>
     [...list].sort(byLatest).flatMap((t) => t.members.map(({ s, depth }) => ({ s, depth, showProject: allFolders || s.cwd !== t.root.cwd })));
+  // every folder keeps its group (its header and "+"), empty when all its sessions are in Pinned or Open in app,
+  // in the place of its newest session; a search shows only the groups with matches
+  const folderLatest = new Map();
+  for (const s of rows) folderLatest.set(s.cwd, Math.max(folderLatest.get(s.cwd) ?? -Infinity, time(s)));
+  if (!query) for (const cwd of folderLatest.keys()) if (!groups.has(cwd)) groups.set(cwd, []);
   const out = [...groups.entries()].map(([cwd, list]) => {
     const groupRows = flatten(list);
-    return { cwd, rows: groupRows, count: groupRows.length, collapsed: collapsed.has(cwd) && !query, latest: Math.max(...list.map((t) => t.latest)) };
+    const latest = Math.max(folderLatest.get(cwd) ?? -Infinity, ...list.map((t) => t.latest));
+    return { cwd, rows: groupRows, count: groupRows.length, collapsed: collapsed.has(cwd) && !query, latest };
   });
   out.sort(byLatest);
   return { pinned: flatten(top, true), open: flatten(opened, true), groups: out.map(({ latest, ...g }) => g) };

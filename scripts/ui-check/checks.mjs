@@ -3855,7 +3855,8 @@ export const checks = [
   heldTypedDeleteCheck,
   ...keeperChecks,
   {
-    // the sidebar lists session trees, each session once: Pinned, Open in app, then projects
+    // the sidebar lists session trees, each session once: Pinned, Open in app, then projects; every folder keeps its
+    // header and "+", empty when its sessions are all elsewhere
     name: "sidebar-trees",
     modes: ["off"],
     async run(app) {
@@ -3865,7 +3866,8 @@ export const checks = [
         const keep = { sessions, links, pinned: new Set(ui.pinned) };
         const S = (sessionId, cwd, updatedAt) => ({ sessionId, cwd, title: sessionId, updatedAt });
         const read = () => [...document.querySelectorAll("#session-list > *")].flatMap((el) =>
-          el.classList.contains("group-title") ? ["# " + (el.querySelector(".name") ?? el.querySelector("span")).textContent]
+          el.classList.contains("group-title")
+            ? [el.querySelector(".name") ? \`# \${el.querySelector(".name").textContent} (\${el.querySelector(".count").textContent})\${el.querySelector(".new-here") ? " +" : ""}\` : "# " + el.querySelector("span").textContent]
           : [...(el.classList.contains("item-row") ? [el] : el.querySelectorAll(".item-row"))].map((r) => {
               const id = r.querySelector(".item").title.split("\\n")[2];
               const depth = r.style.getPropertyValue("--depth") || "0";
@@ -3888,12 +3890,12 @@ export const checks = [
         }
       })()`);
       const strip = (rows) => rows.map((r) => r.split(" | ")[0]);
-      assert.deepEqual(strip(out.first), ["# 📌 Pinned", "Q:0", "# Open in app", "scripted-work:0", "# a", "P:0", "C:1", "R:0"]);
+      assert.deepEqual(strip(out.first), ["# 📌 Pinned", "Q:0", "# Open in app", "scripted-work:0", "# work (0) +", "# a (3) +", "P:0", "C:1", "R:0", "# b (0) +"]);
       assert.equal(new Set(strip(out.first).filter((r) => !r.startsWith("#")).map((r) => r.split(":")[0])).size, 5, "no session twice");
       const meta = out.first.find((r) => r.startsWith("C:")).split(" | ")[1];
       assert.match(meta, /^b · /, "the child shows its own folder");
       assert.doesNotMatch(meta, /child of/);
-      assert.deepEqual(strip(out.second), ["# 📌 Pinned", "Q:0", "P:0", "C:1", "# Open in app", "scripted-work:0", "# a", "R:0"]);
+      assert.deepEqual(strip(out.second), ["# 📌 Pinned", "Q:0", "P:0", "C:1", "# Open in app", "scripted-work:0", "# work (0) +", "# a (1) +", "R:0", "# b (0) +"]);
     },
   },
 ];
