@@ -16,13 +16,8 @@ None of these blocked the merge. Line numbers were taken at the review that foun
 
 ## A. Worth doing first
 
-1. **A project's header and its "+" button disappear when all its trees are open or pinned**
-   (`listModel` in `electron/renderer/ui-state.js:49-56`).
-   - This follows from the accepted rule "every session once in the whole sidebar". The global New session button
-     stays.
-   - Cost: "new session in this folder" disappears exactly for the projects being worked in.
-   - *Proposal:* keep an empty, collapsed-looking group header (name, "+", count 0) for the folder of every root in
-     Pinned or Open in app; or add the folder's "+" to the Open in app rows' context. Needs the owner's call.
+- None. A.1 (a project's header and "+" disappeared when all its trees were open or pinned) was decided by the owner
+  on 2026-11-26 — the header stays — and fixed on `fix/sidebar-project-headers`.
 
 ## B. Window and wording
 

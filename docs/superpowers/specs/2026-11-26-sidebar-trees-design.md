@@ -49,6 +49,9 @@ as Open in app does now). Linked sessions that are neither listed nor open get n
 2. **Open in app**: other trees with at least one open view.
 3. **Projects**: the remaining trees, grouped by the root's `cwd`. The group's count is the number of sessions in its
    trees. Collapsing and the "+" button work as today.
+   Every folder that has a session keeps its group, header and "+" (owner's decision, 2026-11-26, after v0.30.0):
+   empty, with count 0, when all its sessions are in Pinned or Open in app, in the place of the folder's newest
+   session. While searching, only groups with matches are shown.
 
 **Within a tree** the rows are depth-first: children under their parent in link creation order (as `nest` does), drawn
 with the `└` branch and `--depth` indent. A member whose `cwd` differs from the root's shows its folder.
