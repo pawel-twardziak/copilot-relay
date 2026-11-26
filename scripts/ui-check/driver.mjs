@@ -286,6 +286,11 @@ export async function launch({ scenario, settings = {}, width = 1280, height = 8
       ev,
       check,
       resize,
+      /** A PNG of the window as it is now, written to file (for a look at a layout; no check compares it). */
+      async screenshot(file) {
+        const { data } = await cdp("Page.captureScreenshot", { format: "png" }, "taking a screenshot");
+        writeFileSync(file, Buffer.from(data, "base64"));
+      },
       /** The pid of the app's main process (Electron's, not a helper's), or null. */
       mainPid() {
         for (const pid of readdirSync("/proc").filter((d) => /^\d+$/.test(d))) {
@@ -304,6 +309,12 @@ export async function launch({ scenario, settings = {}, width = 1280, height = 8
         const key = { key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13, modifiers: ctrl ? 2 : 0 };
         await cdp("Input.dispatchKeyEvent", { type: "keyDown", ...key, text: "\r" }, "pressing Enter");
         await cdp("Input.dispatchKeyEvent", { type: "keyUp", ...key }, "releasing Enter");
+      },
+      /** A real Escape key press on the focused element (a modal dialog's own cancel handling). */
+      async pressEscape() {
+        const key = { key: "Escape", code: "Escape", windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 };
+        await cdp("Input.dispatchKeyEvent", { type: "keyDown", ...key }, "pressing Escape");
+        await cdp("Input.dispatchKeyEvent", { type: "keyUp", ...key }, "releasing Escape");
       },
       /** A new session in the work folder (scripted-work, or the launch's sessionId), with own as its own prompt
        *  part; later calls act on it. */

@@ -1456,6 +1456,46 @@ export const checks = [
     },
   },
   {
+    // Settings is a page over the whole window: its sections in 3 / 2 / 1 columns by the window's width, Prompts two
+    // columns wide where there are two or more; Escape discards even after an earlier Save
+    name: "settings-page",
+    modes: ["off"],
+    async run(app) {
+      await app.resize(1400, 900);
+      await app.ev(`document.querySelector("#btn-settings").click()`);
+      await app.check(`document.querySelector("#settings").open`, "the Settings page");
+      const r = await app.ev(`(() => { const b = document.querySelector("#settings").getBoundingClientRect(); return [b.left, b.top, b.width, b.height, innerWidth, innerHeight]; })()`);
+      assert.deepStrictEqual(r.slice(0, 4), [0, 0, r[4], r[5]], "covers the window");
+      assert.deepStrictEqual(
+        await app.ev(`[...document.querySelectorAll("#settings .set-card > h3")].map((e) => e.textContent)`),
+        ["Copilot", "Sessions", "Cache keeper", "Prompts", "Relay", "Files"],
+        "the sections, in order",
+      );
+      const cols = `getComputedStyle(document.querySelector("#settings .set-grid")).gridTemplateColumns.split(" ").length`;
+      const ratio = `(() => { const c = [...document.querySelectorAll("#settings .set-card")]; return c.find((e) => e.classList.contains("wide")).offsetWidth / c[0].offsetWidth; })()`;
+      for (const [w, n, wide] of [[1400, 3, true], [1000, 2, true], [700, 1, false]]) {
+        await app.resize(w, 900);
+        await app.check(`${cols} === ${n}`, `${n} column(s) at ${w} px`);
+        assert.equal((await app.ev(ratio)) > 1.5, wide, `Prompts wide at ${w} px`);
+      }
+      assert.ok(await app.ev(`(() => { const b = document.querySelector("#settings .page-body"); return b.scrollWidth <= b.clientWidth; })()`), "no horizontal scroll at 700 px");
+      // Save, then reopen, change a box and press Escape: the change is not saved
+      await app.ev(`document.querySelector("#set-save").click()`);
+      await app.check(`!document.querySelector("#settings").open`, "Settings to close");
+      const before = await app.ev(`api.getSettings().then((s) => s.queueMidTurn)`);
+      await app.ev(`document.querySelector("#btn-settings").click()`);
+      await app.check(`document.querySelector("#settings").open`, "the Settings page");
+      await app.ev(`(() => { const q = document.querySelector("#set-queue"); q.focus(); q.checked = !q.checked; })()`);
+      await app.pressEscape();
+      await app.check(`!document.querySelector("#settings").open`, "Escape to close Settings");
+      assert.notEqual(await app.ev(`document.querySelector("#settings").returnValue`), "save", "Escape is not a Save");
+      // reopened (its settings read after any save the close started): the box is back as saved
+      await app.ev(`document.querySelector("#btn-settings").click()`);
+      await app.check(`document.querySelector("#settings").open`, "the Settings page");
+      assert.equal(await app.ev(`document.querySelector("#set-queue").checked`), before, "Escape did not save");
+    },
+  },
+  {
     // every group's body is where the mode says, live and after a replay
     name: "panel-placement",
     async run(app) {

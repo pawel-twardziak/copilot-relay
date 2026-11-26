@@ -3996,6 +3996,7 @@ async function openSettings() {
   $("#set-broker-repo").placeholder = s.brokerRepoDefault;
   renderPromptSettings(s);
   renderBroker(await api.brokerStatus().catch(() => null));
+  $("#settings").returnValue = ""; // Escape keeps the previous value, which may be the last Save's
   $("#settings").showModal();
 }
 // "Prompts" section: the default part and the child part (defaultDefault / childDefault: it shows the built-in text
