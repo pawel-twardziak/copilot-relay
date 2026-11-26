@@ -184,17 +184,18 @@ details.thought > div { white-space: pre-wrap; padding: 4px 0 0 14px; border-lef
 .panel-handle::before { content: ""; position: absolute; top: 0; bottom: 0; left: -3px; right: -3px; z-index: 2; } /* what you grab */
 .panel-handle:hover, body.panel-resizing .panel-handle { background: var(--accent); }
 body.panel-resizing { cursor: col-resize; user-select: none; }
-.activity-panel { flex: none; width: 420px; display: flex; flex-direction: column; min-height: 0; } /* the width: layoutPanel */
-.panel-handle[hidden], .activity-panel[hidden] { display: none; }
+.activity-panel, .comms-panel { flex: none; width: 420px; display: flex; flex-direction: column; min-height: 0; } /* the width: layoutPanel */
+.panel-handle[hidden], .activity-panel[hidden], .comms-panel[hidden] { display: none; }
 .panel-head { flex: none; display: flex; align-items: center; gap: 8px; padding: 4px 8px 4px 12px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 12px; }
 .panel-head .title { flex: 1; }
 .panel-head button { padding: 1px 8px; }
 /* collapsed (wide layout): the log takes the row; narrow: the panel is a drawer over the log's right side, closed
    until opened (panel.hidden still means "no entry") */
-.chat-row.collapsed > .panel-handle, .chat-row.collapsed > .activity-panel, .chat-row.narrow > .panel-handle,
-.chat-row.narrow:not(.drawer-open) > .activity-panel { display: none; }
+.chat-row.collapsed > .panel-handle, .chat-row.collapsed > .activity-panel, .chat-row.collapsed > .comms-panel, .chat-row.narrow > .panel-handle,
+.chat-row.narrow:not(.drawer-open) > .activity-panel, .chat-row.narrow:not(.drawer-open) > .comms-panel { display: none; }
 .chat-row.narrow { position: relative; }
-.chat-row.narrow > .activity-panel { position: absolute; top: 0; right: 0; bottom: 0; z-index: 3; background: var(--bg); border-left: 1px solid var(--border); box-shadow: -8px 0 24px rgba(0, 0, 0, 0.45); }
+.chat-row.narrow > .activity-panel, .chat-row.narrow > .comms-panel { position: absolute; top: 0; right: 0; bottom: 0; z-index: 3; background: var(--bg); border-left: 1px solid var(--border); box-shadow: -8px 0 24px rgba(0, 0, 0, 0.45); }
+.comms-body { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; } /* filled by comms-view */
 .panel-body { flex: 1; overflow-y: auto; padding: 16px 12px 24px; display: flex; flex-direction: column; gap: 8px; }
 .panel-entry { flex: none; }
 .panel-entry.flash { outline: 2px solid var(--accent); outline-offset: -1px; } /* shown from the chat: for a second */

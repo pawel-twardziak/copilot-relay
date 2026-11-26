@@ -309,6 +309,10 @@ class SessionView {
     // requestId -> previews element of its reopen card while it is open, null once answered (the broker re-emits a
     // request, with every queued message, until it is answered)
     this.reopenRequests = new Map();
+    // the cards open now that the Communication panel lists: [{ kind: "create" | "permission" | "link" | "reopen", id, name? }]
+    // (openCard/closeCard keep it; a card carries its entry as `_pending`)
+    this.pendingCards = [];
+    this.panelKind = null; // which panel holds the right-hand slot: "activity" | "comms" | null (updatePanelShown)
     this.linkRequests = new Set(); // requestIds of the link cards shown (main replays an unanswered one)
     this.busy = false;
     this.dead = false;
@@ -369,18 +373,25 @@ class SessionView {
     this.panelBody = h("div", { class: "panel-body" }); // the panel's scroller, zoomed with the chat
     this.panelClose = h("button", { onclick: () => this.hidePanel() }); // collapse, or close the drawer
     const panelHead = h("div", { class: "panel-head" }, h("span", { class: "title" }, "Activity"), this.panelClose);
-    this.panel = h("aside", { class: "activity-panel", hidden: true }, panelHead, this.panelBody); // hidden: no entry
+    this.panel = h("aside", { class: "activity-panel", hidden: true }, panelHead, this.panelBody); // hidden: not in the slot
+    // the Communication panel: the other occupant of the same slot (width, collapse, drawer and handle are shared);
+    // its body is filled by comms-view
+    this.commsBody = h("div", { class: "comms-body" });
+    this.commsClose = h("button", { onclick: () => this.hidePanel() });
+    this.commsPanel = h("aside", { class: "comms-panel", hidden: true }, h("div", { class: "panel-head" }, h("span", { class: "title" }, "Communication"), this.commsClose), this.commsBody);
     // Esc inside the open drawer closes it; listened to here only, so Esc elsewhere keeps its meaning (stop the
     // turn, cancel an edit, close the command popup, the image viewer or the file preview). A held Esc's repeats do
     // nothing: one press closes the drawer and no more
-    this.panel.addEventListener("keydown", (e) => {
-      if (e.key !== "Escape" || e.repeat || !this.row.classList.contains("drawer-open")) return;
-      e.preventDefault();
-      e.stopPropagation();
-      this.setDrawer(false);
-    });
+    for (const aside of [this.panel, this.commsPanel]) {
+      aside.addEventListener("keydown", (e) => {
+        if (e.key !== "Escape" || e.repeat || !this.row.classList.contains("drawer-open")) return;
+        e.preventDefault();
+        e.stopPropagation();
+        this.setDrawer(false);
+      });
+    }
     this.panelHandle = h("div", { class: "panel-handle", hidden: true, onpointerdown: (e) => this.dragPanel(e) });
-    this.row = h("div", { class: "chat-row" }, this.log, this.panelHandle, this.panel);
+    this.row = h("div", { class: "chat-row" }, this.log, this.panelHandle, this.panel, this.commsPanel);
     this.drawerOpen = false; // the narrow layout's drawer: per view, not stored (layoutPanel)
     new ResizeObserver(() => this.layoutPanel()).observe(this.row); // the layout follows the view's width
     this.follow = true; // follow streamed output: off once you scroll up, on again near the bottom
@@ -424,7 +435,10 @@ class SessionView {
     this.cmdIndex = 0;
     this.cmdToken = null;
     // shown while the view has a panel entry: shows or hides the panel (wide layout) or the drawer (narrow)
-    this.activityBtn = h("button", { title: "Show or hide the activity panel", hidden: true, onclick: () => this.togglePanel() }, "Activity");
+    this.activityBtn = h("button", { title: "Show or hide the activity panel", hidden: true, onclick: () => this.switchPanel("activity") }, "Activity");
+    // shown while the session belongs to a tree (a parent or sub-sessions)
+    this.commsBtn = h("button", { title: "Show or hide the communication panel", hidden: true, onclick: () => this.switchPanel("comms") }, "Communication");
+    this.updatePanelShown(); // a session that already belongs to a tree
     this.cmdPopup = h("div", { class: "cmd-popup", role: "listbox", hidden: true, onmousedown: (e) => e.preventDefault() });
     this.editText = h("span");
     this.queueEl = h("div", { class: "queue-strip", hidden: true });
@@ -454,6 +468,7 @@ class SessionView {
         this.closeChildrenBtn,
         h("button", { title: "Changes in this session's repositories", onclick: () => filePreview.show(this) }, "Changes"),
         this.activityBtn,
+        this.commsBtn,
         h("button", { title: "Copy the whole conversation as Markdown", onclick: (e) => this.copyThread(e.currentTarget) }, "Copy thread"),
         h("button", { class: "danger", title: "Close this session in the app (it stays resumable)", onclick: () => closeView(this.sessionId) }, "Close"),
         h("button", { class: "danger", title: "Delete this whole session from disk", onclick: () => deleteSessionFlow({ sessionId: this.sessionId, cwd: this.cwd, title: this.title }) }, "Delete"),
@@ -1902,42 +1917,67 @@ class SessionView {
     this.followBottom(); // bodies that moved changed the content of the log and the panel, not always their size
   }
 
-  /** The panel shows while it has an entry. */
+  /** The slot holds Activity while it has an entry, Communication while the session belongs to a tree; when both
+   *  are available, the stored choice (ui.rightPanel) wins; never both shown. */
   updatePanelShown() {
-    const hidden = !this.panelBody.firstElementChild;
-    if (hidden === this.panel.hidden) return;
-    this.panel.hidden = this.panelHandle.hidden = hidden;
+    const activity = !!this.panelBody.firstElementChild;
+    const comms = CommsModel.inTree(tree, this.sessionId);
+    const kind = UiState.slotPanel(ui.rightPanel, activity, comms);
+    if (kind === this.panelKind && activity === this.activityAvailable && comms === this.commsAvailable) return;
+    Object.assign(this, { panelKind: kind, activityAvailable: activity, commsAvailable: comms });
+    this.panel.hidden = kind !== "activity";
+    this.commsPanel.hidden = kind !== "comms";
+    this.panelHandle.hidden = kind === null;
     this.layoutPanel();
+    if (kind === "comms") commsRefresh();
   }
 
   /** The panel's geometry for the view's width (UiState.panelLayout): its width, the narrow layout (a drawer over
    *  the log) and what shows: in the wide layout the panel unless collapsed (ui.panelCollapsed), in the narrow one
-   *  the drawer while open (drawerOpen). panel.hidden keeps meaning "no entry"; the rest is classes on the row. */
+   *  the drawer while open (drawerOpen). panel.hidden / commsPanel.hidden mean "not in the slot"; the rest is
+   *  classes on the row. */
   layoutPanel() {
-    this.activityBtn.hidden = this.panel.hidden;
+    this.activityBtn.hidden = !this.activityAvailable;
+    this.commsBtn.hidden = !this.commsAvailable;
     const viewWidth = this.row.clientWidth;
     if (!viewWidth) return; // not shown: laid out when it shows (the row's ResizeObserver)
     const { narrow, width } = UiState.panelLayout(viewWidth, ui.panelWidth);
-    this.panel.style.width = `${width}px`;
+    this.panel.style.width = this.commsPanel.style.width = `${width}px`;
     this.row.classList.toggle("narrow", narrow);
     this.row.classList.toggle("collapsed", !narrow && ui.panelCollapsed);
     this.row.classList.toggle("drawer-open", narrow && this.drawerOpen);
-    this.panelClose.textContent = narrow ? "✕" : "»";
+    this.panelClose.textContent = this.commsClose.textContent = narrow ? "✕" : "»";
     this.panelClose.title = narrow ? "Close (Esc)" : "Hide the activity panel";
+    this.commsClose.title = narrow ? "Close (Esc)" : "Hide the communication panel";
   }
   /** The layout applied: the panel is a drawer over the log. */
   isNarrow() {
     return this.row.classList.contains("narrow");
   }
+  /** The aside in the slot (null when none). */
+  shownPanel() {
+    return this.panelKind === "comms" ? this.commsPanel : this.panelKind === "activity" ? this.panel : null;
+  }
   setDrawer(open) {
-    const closing = !open && this.row.classList.contains("drawer-open") && this.panel.contains(document.activeElement);
+    const closing = !open && this.row.classList.contains("drawer-open") && !!this.shownPanel()?.contains(document.activeElement);
     this.drawerOpen = open;
     this.layoutPanel();
     // the focus leaves the drawer it was in for the button that opens it again (not the message box, where the next
     // Esc would stop the turn)
-    if (closing) this.activityBtn.focus();
+    if (closing) (this.panelKind === "comms" ? this.commsBtn : this.activityBtn).focus();
   }
-  /** The "Activity" button. */
+  /** A header button ("Activity" / "Communication"): the other panel's button switches the slot to its panel and
+   *  reveals it; the shown panel's button hides or shows it. */
+  switchPanel(kind) {
+    if (this.panelKind === kind) this.togglePanel();
+    else this.showPanel(kind);
+  }
+  /** The slot's choice is `kind` (stored, every view follows); this view reveals it. */
+  showPanel(kind) {
+    setRightPanel(kind);
+    this.revealPanel();
+  }
+  /** The shown panel's button. */
   togglePanel() {
     if (this.isNarrow()) this.setDrawer(!this.drawerOpen);
     else setPanelCollapsed(!ui.panelCollapsed);
@@ -2190,6 +2230,7 @@ class SessionView {
     card._toolCallId = toolCall?.toolCallId ?? null; // a mid-turn switch dismisses the cards of the tools it killed
     // a subagent's question (a background subagent runs on after the turn): see dismissPermissions
     card._agentId = ToolCalls.agentOf(toolCall) ?? ToolCalls.agentOf(this.tools.get(card._toolCallId)?.data);
+    card._pending = { kind: "permission", id: reqId };
     card._reqId = reqId; // ...and answers their requests
     card._group = this.tools.get(card._toolCallId)?.group ?? null; // its header shows ⏸ while the card is open
     if (card._group) {
@@ -2338,6 +2379,7 @@ class SessionView {
         promptSlot.replaceChildren(h("p", { class: "hint" }, `Could not read the prompt parts (${e.message}). Approve starts the session without an own part, with ${using}.`), ...commandMarks().filter(Boolean));
       })
       .finally(() => (approveBtn.disabled = false));
+    card._pending = { kind: "create", id: requestId, name };
     this.append(card);
     this.openCard(card);
   }
@@ -2406,6 +2448,7 @@ class SessionView {
       previewsEl,
       opts,
     );
+    card._pending = { kind: "reopen", id: requestId };
     this.append(card);
     this.openCard(card);
   }
@@ -2456,6 +2499,7 @@ class SessionView {
       ),
       opts,
     );
+    card._pending = { kind: "link", id: requestId };
     this.append(card);
     this.openCard(card);
   }
@@ -2476,6 +2520,11 @@ class SessionView {
     this.renderHoldSwitches();
   }
 
+  /** pendingCards changed: the Communication panel marks the waiting cards (comms-view). */
+  cardsChanged() {
+    commsRefresh();
+  }
+
   get needsAttention() {
     return !this.dead && this.openCards.size > 0;
   }
@@ -2483,11 +2532,21 @@ class SessionView {
   openCard(card) {
     this.setDrawer(false); // the question must be visible (permission, delegation, reopen and link cards)
     this.openCards.add(card);
+    const p = card._pending;
+    if (p && !this.pendingCards.some((c) => c.kind === p.kind && c.id === p.id)) {
+      this.pendingCards.push(p);
+      this.cardsChanged();
+    }
     renderList();
   }
 
   closeCard(card) {
     if (this.openCards.delete(card)) renderList();
+    const p = card._pending;
+    if (p && this.pendingCards.includes(p)) {
+      this.pendingCards = this.pendingCards.filter((c) => c !== p);
+      this.cardsChanged();
+    }
     const g = card._group;
     if (g && ![...this.openCards].some((c) => c._group === g)) {
       g._info.waiting = false;
@@ -3498,6 +3557,8 @@ function loadUi() {
     chatScale: Number.isFinite(raw.chatScale) ? raw.chatScale : 1,
     panelWidth: Number.isFinite(raw.panelWidth) ? raw.panelWidth : UiState.PANEL.def, // the activity panel's width, every view's
     panelCollapsed: raw.panelCollapsed === true, // applies to the wide layout only
+    rightPanel: raw.rightPanel === "comms" ? "comms" : "activity", // which panel holds the right-hand slot
+    commsSplit: Number.isFinite(raw.commsSplit) && raw.commsSplit >= 0 && raw.commsSplit <= 1 ? raw.commsSplit : 0.5, // the graph's share of the Communication panel
   };
 }
 const ui = loadUi();
@@ -3648,14 +3709,22 @@ const viewer = (() => {
 })();
 function saveUi() {
   try {
-    const { pinned, collapsed, chatScale, panelWidth, panelCollapsed } = ui;
-    localStorage.setItem(UI_KEY, JSON.stringify({ pinned: [...pinned], collapsed: [...collapsed], chatScale, panelWidth, panelCollapsed }));
+    const { pinned, collapsed, chatScale, panelWidth, panelCollapsed, rightPanel, commsSplit } = ui;
+    localStorage.setItem(UI_KEY, JSON.stringify({ pinned: [...pinned], collapsed: [...collapsed], chatScale, panelWidth, panelCollapsed, rightPanel, commsSplit }));
   } catch {}
 }
 /** The activity panel's stored width or collapsed state changed: every view lays its panel out again. */
 function layoutPanels() {
   for (const v of views.values()) v.layoutPanel();
 }
+/** The right-hand slot's choice changed: stored, and every view re-evaluates what it shows. */
+function setRightPanel(kind) {
+  ui.rightPanel = kind;
+  saveUi();
+  for (const v of views.values()) v.updatePanelShown();
+}
+/** The Communication panel's content changed (a graph or log input, a pending card): redrawn by comms-view. */
+function commsRefresh() {}
 function setPanelCollapsed(collapsed) {
   ui.panelCollapsed = collapsed;
   saveUi();
@@ -3958,6 +4027,7 @@ function setLinks(next) {
   heldByKey = (!Array.isArray(next) && next?.held) || {};
   heldByKindKey = (!Array.isArray(next) && next?.heldByKind) || {};
   tree = SessionTree.index(links);
+  for (const v of views.values()) v.updatePanelShown(); // a session may have joined or left a tree
   renderList(); // redraws the relation bars too
 }
 api.onLinks((l) => {
