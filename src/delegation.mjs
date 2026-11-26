@@ -30,10 +30,14 @@ export class Delegation {
   /** Link requests waiting for the user's answer, in memory only: requestId -> { requestId, kind, parentKey, childKey }. */
   #linkRequests = new Map();
 
-  /** `nameOf`: last known name of a session that has no stored link name (e.g. a root parent), or undefined. */
-  constructor({ registry, store, newId = randomUUID, nameOf = () => undefined }) {
+  /**
+   * `nameOf`: last known name of a session that has no stored link name (e.g. a root parent), or undefined.
+   * `comms`: the CommsLog every message path writes to (optional).
+   */
+  constructor({ registry, store, comms, newId = randomUUID, nameOf = () => undefined }) {
     this.registry = registry;
     this.store = store;
+    this.comms = comms;
     this.newId = newId;
     this.nameOf = nameOf;
     // a renamed child keeps its new name in the link, so it is shown under it once it is closed
@@ -73,8 +77,38 @@ export class Delegation {
 
   setTask(childKey, task) {
     const ok = this.store.setTask(childKey, task);
-    if (ok) this.#changed();
+    if (ok) {
+      // once per child: a log that already holds the task (e.g. an earlier link of the same session) is not asked twice
+      const parentKey = this.store.parentOf(childKey);
+      if (this.comms && !this.comms.eventsOf([childKey]).some((e) => e.kind === "task" && e.toKey === childKey))
+        this.#log({ kind: "task", fromKey: parentKey, toKey: childKey, from: this.#nameOf(parentKey), text: task, status: "delivered" });
+      this.#changed();
+    }
     return ok;
+  }
+
+  /** Write an event to the communication log (no-op without one); `to` is the recipient's current name. */
+  #log({ to, ...fields }) {
+    return this.comms?.append({ ...fields, to: to ?? this.#nameOf(fields.toKey) });
+  }
+
+  /** Log an outbox item: `kind`, and `status` ("delivered"/"queued" from a push result `true`/`false`); notices come from relay. */
+  #logItem(item, kind, delivered) {
+    const notice = kind === "notice";
+    this.#log({
+      id: item.id,
+      kind,
+      fromKey: notice || item.human ? null : (item.fromKey ?? null),
+      toKey: item.toKey,
+      from: notice ? "relay" : item.from,
+      text: item.text,
+      status: typeof delivered === "string" ? delivered : delivered ? "delivered" : "queued",
+    });
+  }
+
+  /** Log that the dropped outbox items were never delivered. */
+  #logDropped(items) {
+    for (const item of items) this.comms?.status(item.id, "dropped");
   }
 
   /** The session is gone for good: drop everything stored about it. */
@@ -90,7 +124,10 @@ export class Delegation {
   #forget(key) {
     const name = this.#nameOf(key);
     this.#dropLinkRequests((r) => r.parentKey === key || r.childKey === key);
-    for (const r of this.store.forget(key)) this.#notDelivered(r.fromKey, name);
+    const { reopens, items } = this.store.forget(key);
+    this.#logDropped(items);
+    this.comms?.purge(key);
+    for (const r of reopens) this.#notDelivered(r.fromKey, name);
   }
 
   #notDelivered(toKey, targetName) {
@@ -101,12 +138,14 @@ export class Delegation {
   #notice(toKey, text) {
     const item = { id: this.newId(), toKey, from: "relay", text, prompt: `[from relay]\n${text}` };
     this.store.enqueue(item);
-    this.#deliver(item);
+    this.#logItem(item, "notice", this.#deliver(item));
   }
 
   /** A notice from relay for an open session that does not wake it and is not stored. */
   #inform(toKey, text) {
-    this.registry.pushTo(toKey, { from: "relay", human: false, text, prompt: this.decorate(toKey, `[from relay]\n${text}`), wake: false });
+    const pushed = this.registry.pushTo(toKey, { from: "relay", human: false, text, prompt: this.decorate(toKey, `[from relay]\n${text}`), wake: false });
+    // not stored, so only a push is logged
+    if (pushed) this.#log({ kind: "notice", fromKey: null, toKey, from: "relay", text, status: "delivered" });
   }
 
   /** The parent key to deliver to, or null when there is none or it was deleted. */
@@ -139,6 +178,7 @@ export class Delegation {
         parentDeleted: !!l.parentDeleted,
         adopted: l.adopted === true,
         online: !!peer?.online,
+        endedNotice: this.store.isEndedNotice(key),
         busy: peer?.busy === true,
       };
     });
@@ -208,6 +248,7 @@ export class Delegation {
     this.store.markReported(callerKey);
     this.#changed();
     const delivered = this.#deliver(item);
+    this.#logItem(item, "report", delivered);
     try {
       child.control?.("reported", {});
     } catch {
@@ -239,7 +280,7 @@ export class Delegation {
     };
     this.store.enqueue(item); // on disk before any delivery attempt
     this.#changed();
-    this.#deliver(item);
+    this.#logItem(item, "message", this.#deliver(item));
     return true;
   }
 
@@ -248,7 +289,7 @@ export class Delegation {
     const item = { id: this.newId(), toKey, from: "user", text, prompt: text, human: true, heldAs: "user" };
     this.store.enqueue(item); // on disk before any delivery attempt
     this.#changed();
-    this.#deliver(item);
+    this.#logItem(item, "user", this.#deliver(item));
     return true;
   }
 
@@ -293,7 +334,10 @@ export class Delegation {
     const noApp = `Session "${targetName}" is closed and you have no app connection to ask the user to reopen it.`;
     if (!from.control || !from.app) return noApp; // a Terminal (extension) stream cannot show the card
     const [parentKey, childKey] = targetKey === parent ? [targetKey, fromKey] : [fromKey, targetKey];
-    if (!this.registry.chargePair(parentKey, childKey)) return BUDGET_EXHAUSTED;
+    if (!this.registry.chargePair(parentKey, childKey)) {
+      this.#log({ kind: "message", fromKey, toKey: targetKey, from: from.name, text, status: "blocked" });
+      return BUDGET_EXHAUSTED;
+    }
     const existing = this.store.reopenFor(fromKey, targetKey);
     const reopen = existing ?? { requestId: this.newId(), fromKey, targetKey };
     const item = {
@@ -313,6 +357,7 @@ export class Delegation {
       if (!existing) this.store.removeReopen(reopen.requestId);
       return noApp;
     }
+    this.#logItem(item, "message", "awaiting-reopen");
     this.#changed();
     return `Session "${targetName}" is closed. The user was asked to reopen it; your message is queued and will be delivered if they approve. Do not wait for it.`;
   }
@@ -329,9 +374,9 @@ export class Delegation {
     if (approved && reason !== "missing") {
       const items = this.store.awaitingFor(requestId);
       this.store.release(requestId);
-      for (const item of items) this.#deliver(item);
+      for (const item of items) if (this.#deliver(item)) this.comms?.status(item.id, "delivered");
     } else {
-      this.store.dropAwaiting(requestId);
+      this.#logDropped(this.store.dropAwaiting(requestId));
       this.store.removeReopen(requestId); // before a forget, which tells the other senders of the same target
       if (reason === "missing") this.#forget(reopen.targetKey);
       this.#notDelivered(fromKey, targetName);
@@ -478,7 +523,7 @@ export class Delegation {
     const parentName = this.#nameOf(parentKey);
     const dropped = [this.store.reopenFor(parentKey, childKey), this.store.reopenFor(childKey, parentKey)].filter(Boolean);
     for (const reopen of dropped) {
-      this.store.dropAwaiting(reopen.requestId);
+      this.#logDropped(this.store.dropAwaiting(reopen.requestId));
       this.store.removeReopen(reopen.requestId);
     }
     this.store.unlink(childKey);
@@ -522,17 +567,19 @@ export class Delegation {
     const parent = this.store.parentOf(key);
     if (peer && parent && !peer.parentKey) peer.parentKey = parent;
     if (peer && parent && peer.name !== this.store.nameOf(key)) this.store.link(key, parent, peer.name);
-    for (const item of this.store.pending(key)) this.#deliver(item, { redelivered: true });
+    for (const item of this.store.pending(key)) if (this.#deliver(item, { redelivered: true })) this.comms?.status(item.id, "delivered");
     for (const reopen of this.store.reopensFrom(key)) this.#askReopen(reopen);
     for (const request of this.#linkRequests.values()) if (request.parentKey === key) this.#askLink(request);
     this.#changed();
   }
 
-  ack(key, id) {
+  /** The app took over the item (`outcome` "taken", the default) or discarded it ("discarded"). True when it was removed. */
+  ack(key, id, outcome = "taken") {
     if (!this.store.pending(key).some((i) => i.id === id)) return false;
     const item = this.store.pending(key).find((i) => i.id === id);
     const held = this.store.heldItems().includes(item);
     const removed = this.store.remove(id);
+    if (removed) this.comms?.status(id, outcome);
     if (held) this.#changed();
     return removed;
   }
@@ -561,6 +608,7 @@ export class Delegation {
       text: item.text,
       prompt: item.heldAs === "other" || item.heldAs === "user" ? item.prompt : this.decorate(item.toKey, item.prompt),
       ...(item.fromChild ? { fromChild: true } : {}),
+      ...(item.fromKey ? { fromKey: item.fromKey } : {}),
       ...(item.heldAs ? { heldAs: item.heldAs } : {}),
       ...(redelivered ? { redelivered: true } : {}),
       deliveryId: item.id,

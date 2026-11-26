@@ -127,6 +127,10 @@ export class DelegationStore {
     return this.data.links[child]?.reported === true;
   }
 
+  isEndedNotice(child) {
+    return this.data.links[child]?.ended === true;
+  }
+
   /** True the first time only, so an ended-without-report notice is produced once per child. */
   markEndedNotice(child) {
     const l = this.data.links[child];
@@ -199,12 +203,18 @@ export class DelegationStore {
 
   /**
    * The session is gone for good: drop its link, queued items and reopen requests; its children keep `parent` but are
-   * orphans. Returns the dropped reopen requests of other senders that targeted it (their senders must be told).
+   * orphans. Returns `reopens`: the dropped reopen requests of other senders that targeted it (their senders must be told),
+   * and `items`: the dropped outbox items addressed to it.
    */
   forget(key) {
     const targeting = [];
+    const items = [];
     delete this.data.links[key];
-    for (const [id, i] of Object.entries(this.data.outbox)) if (i.toKey === key) delete this.data.outbox[id];
+    for (const [id, i] of Object.entries(this.data.outbox)) {
+      if (i.toKey !== key) continue;
+      items.push(i);
+      delete this.data.outbox[id];
+    }
     for (const [id, r] of Object.entries(this.data.reopens)) {
       if (r.fromKey !== key && r.targetKey !== key) continue;
       if (r.fromKey !== key) targeting.push(r);
@@ -212,7 +222,7 @@ export class DelegationStore {
     }
     for (const l of Object.values(this.data.links)) if (l.parent === key) l.parentDeleted = true;
     this.#save();
-    return targeting;
+    return { reopens: targeting, items };
   }
 
   remove(id) {
