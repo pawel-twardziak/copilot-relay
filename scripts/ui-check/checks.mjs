@@ -881,6 +881,30 @@ export const checks = [
     },
   },
   {
+    // the agent sends no usage_update on session/load: the header's context meter starts with the figures the
+    // session's last run left in events.jsonl (its shutdown's currentTokens, its last call's maxPromptTokens)
+    name: "context-on-load",
+    modes: ["off"],
+    sessionId: HISTORY_ID,
+    async run(app) {
+      const v = `views.get(${JSON.stringify(HISTORY_ID)})`;
+      await playScenario(app);
+      assert.equal(await app.ev(`${v}.usageLabel.textContent`), "context: —", "the scripted agent sends no usage_update");
+      const at = "2026-11-26T10:00:00.000Z";
+      const events = [
+        { type: "session.start", data: {}, timestamp: at },
+        { type: "session.usage_record", data: { usage: { inputTokens: 22000, maxPromptTokens: 200000 } }, timestamp: at },
+        { type: "session.shutdown", data: { currentTokens: 22899 }, timestamp: at },
+      ];
+      const dir = path.join(app.dir, "copilot-home", "session-state", HISTORY_ID);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(path.join(dir, "events.jsonl"), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
+      await app.reload();
+      await app.check(`${v}.usageLabel.textContent.startsWith("22.9k / 200k · 11%")`, "the context meter from the file");
+      assert.equal(await app.ev(`${v}.usageChip.classList.contains("ok")`), true);
+    },
+  },
+  {
     // the load replays the whole history, then fails: the dead view shows all of it, settled (the answer must not
     // end the replay before the last update); a few times, as the order of the two used to vary
     name: "failed-load-settles",
