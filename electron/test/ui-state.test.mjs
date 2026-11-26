@@ -72,9 +72,31 @@ test("stale pinned ids are ignored", () => {
   assert.equal(m.groups.length, 2);
 });
 
-test("group whose sessions are all pinned is omitted", () => {
+test("a folder whose sessions are all pinned keeps an empty group", () => {
   const m = listModel(sessions, { pinned: new Set(["s3", "s1"]) });
   assert.deepEqual(ids(m.pinned), ["s3", "s1"]);
+  assert.deepEqual(
+    m.groups.map((g) => [g.cwd, ids(g.rows), g.count]),
+    [
+      ["/a", ["s2"], 1],
+      ["/b", [], 0],
+    ],
+  );
+});
+
+test("an empty group keeps its place by its folder's newest session", () => {
+  const m = listModel(sessions, { open: new Set(["s2", "s1"]) });
+  assert.deepEqual(
+    m.groups.map((g) => [g.cwd, g.count]),
+    [
+      ["/a", 0],
+      ["/b", 1],
+    ],
+  );
+});
+
+test("a search hides empty groups", () => {
+  const m = listModel(sessions, { pinned: new Set(["s3", "s1"]), query: "foo" });
   assert.deepEqual(
     m.groups.map((g) => g.cwd),
     ["/a"],
@@ -88,8 +110,11 @@ const pc = T(L("c", "p", 1));
 test("a child stays under its parent across folders", () => {
   const m = listModel(treeRows.slice(0, 2), { tree: pc });
   assert.deepEqual(
-    m.groups.map((g) => g.cwd),
-    ["/a"],
+    m.groups.map((g) => [g.cwd, g.count]),
+    [
+      ["/a", 2],
+      ["/b", 0],
+    ],
   );
   const [g] = m.groups;
   assert.deepEqual(flat(g.rows), ["p:0", "c:1"]);
@@ -152,7 +177,7 @@ test("an unlisted open child sits under its listed parent", () => {
   const rows = [S("p", "/a", "2026-11-05T10:00:00Z"), { sessionId: "c", cwd: "/a", title: "c" }];
   const m = listModel(rows, { tree: pc, open: new Set(["c"]) });
   assert.deepEqual(flat(m.open), ["p:0", "c:1"]);
-  assert.deepEqual(m.groups, []);
+  assert.deepEqual(m.groups, [{ cwd: "/a", rows: [], count: 0, collapsed: false }]);
 });
 
 test("a child of an absent parent is a root", () => {
