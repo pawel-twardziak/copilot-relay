@@ -251,6 +251,13 @@ let links = []; // the broker's sub-session links (api.getLinks / api.onLinks), 
 let tree = SessionTree.index(links); // parent/child index over `links` (bare session ids)
 let heldByKey = {}; // the broker's count of held messages per key "cli:<sessionId>" (for sessions not open here)
 let heldByKindKey = {}; // the same by kind: { "cli:<sessionId>": { child, parent, other } }
+// the Communication panel's data, per tree (key = its root's "cli:<id>"): the broker's { root, keys (Set), events,
+// peers, ids (Set of event ids) }, or { loading, keys } before the first answer, { unsupported } (an older broker),
+// { error }; fetched when a panel of the tree is first shown and when the tree changes, then fed by comms events
+const commsByRoot = new Map();
+const commsFetching = new Map(); // root key -> the events pushed while its fetch runs (merged into the answer)
+let commsQueued = false; // a redraw of the shown Communication panels is due
+let commsTicker = null; // the 1 s redraw while a shown graph has a running timer
 const HOLD_TITLES = {
   child: "Replies from your sub-sessions wait here until you approve them",
   parent: "Orders from the parent session wait here until you approve them",
@@ -848,11 +855,13 @@ class SessionView {
     }, 300);
   }
 
-  /** The view is closed or replaced: no more reports for its session, no countdown tick. */
+  /** The view is closed or replaced: no more reports for its session, no countdown tick, no Communication panel. */
   stopKeeper() {
     this.keeperStopped = true;
     clearTimeout(this.keeperHeldTimer);
     clearInterval(this.keeperTimer);
+    this.commsView?.destroy();
+    this.commsView = null;
   }
 
   /** A keeper:state payload: the chip, its countdown, and the ⏳ mark in the session list. */
@@ -866,6 +875,7 @@ class SessionView {
     }, 1000) : null;
     this.drawKeeper();
     if ((was === "countdown") !== (state.phase === "countdown")) renderList();
+    commsRefresh(); // the node's "⏳ 1:45 / Compacting… / pings"
   }
 
   drawKeeper() {
@@ -1247,6 +1257,7 @@ class SessionView {
     this.promptBtn.disabled = b || this.deleting;
     this.showQueueStatus();
     renderList();
+    commsRefresh(); // the node's working / idle
     if (!b) queueMicrotask(() => this.pump());
   }
 
@@ -3036,6 +3047,7 @@ function activate(id, { keepSchedules = false } = {}) {
   for (const [sid, v] of views) v.el.classList.toggle("active", sid === id);
   $("#empty").style.display = id ? "none" : "";
   renderList();
+  commsRefresh(); // the shown panel's timers tick
   const v = views.get(id);
   if (v && !v.dead) v.input.focus();
 }
@@ -3145,6 +3157,7 @@ function dropView(id) {
   early.delete(id);
   v?.el.remove();
   if (activeId === id) activate([...views.keys()].pop() ?? null, { keepSchedules: true });
+  commsRefresh(); // its node is closed now
 }
 
 /** Rebuild a closed session's view from its files (after its history changed or a delete failed); queued items
@@ -3725,8 +3738,105 @@ function setRightPanel(kind) {
   saveUi();
   for (const v of views.values()) v.updatePanelShown();
 }
-/** The Communication panel's content changed (a graph or log input, a pending card): redrawn by comms-view. */
-function commsRefresh() {}
+/** The Communication panel's content changed (a graph or log input, a pending card): every view showing it redraws,
+ *  once for a burst of calls (and safe to call while a view is being built: it draws once it is registered). */
+function commsRefresh() {
+  if (commsQueued) return;
+  commsQueued = true;
+  setTimeout(drawComms, 0);
+}
+/** The bare id of the top of id's tree (cycle-safe). */
+function commsRootOf(id) {
+  const seen = new Set([id]);
+  let cur = id;
+  for (let p = tree.parentOf.get(cur); p != null && !seen.has(p); p = tree.parentOf.get(cur)) seen.add((cur = p));
+  return cur;
+}
+const commsKeysOf = (rootId) => [rootId, ...SessionTree.descendants(tree, rootId)].map((id) => `cli:${id}`);
+/** Facts of the sessions open in this app for CommsModel.build's `live` (they override what links and peers say). */
+function commsLive() {
+  const live = {};
+  for (const [id, v] of views) {
+    const k = v.keeperState;
+    live[id] = {
+      online: !v.dead, busy: !v.dead && v.busy === true, ctx: lastUsage.get(id)?.context ?? undefined,
+      keeper: k && ["pinging", "countdown", "compacting"].includes(k.phase) ? k : undefined, cards: v.pendingCards,
+    };
+  }
+  return live;
+}
+function drawComms() {
+  commsQueued = false;
+  clearTimeout(commsTicker);
+  commsTicker = null;
+  let tick = false;
+  const live = commsLive();
+  for (const v of views.values()) {
+    if (v.panelKind !== "comms") continue;
+    const rootKey = `cli:${commsRootOf(v.sessionId)}`;
+    if (v.commsRoot !== rootKey) Object.assign(v, { commsRoot: rootKey, commsFilter: null }); // another tree: no filter
+    if (!commsByRoot.has(rootKey)) fetchComms(rootKey);
+    const entry = commsByRoot.get(rootKey);
+    const comms = entry?.events ? { root: rootKey, keys: [...entry.keys], events: entry.events, peers: entry.peers } : null;
+    const model = CommsModel.build({ comms, links, heldByKind: heldByKindKey, current: v.sessionId, live, now: Date.now(), filter: v.commsFilter });
+    v.commsView ??= CommsView.create({
+      h, el: v.commsBody, on: {
+        openSession: (id) => openRelative(id),
+        fetchText: (id) => api.getCommsText(v.sessionId, id).then((r) => (typeof r?.text === "string" ? r.text : Promise.reject(new Error(r?.error ?? "not found")))),
+        filter: (f) => {
+          v.commsFilter = f;
+          commsRefresh();
+        },
+        split: (ratio, done) => {
+          ui.commsSplit = ratio;
+          if (done) (saveUi(), commsRefresh()); // every view's panel takes the new split
+        },
+      },
+    });
+    const note = entry?.loading ? "Loading the message history…" : entry?.error ? `Could not load the message history: ${entry.error}` : null;
+    v.commsView.render(model, { split: ui.commsSplit, filter: v.commsFilter, note });
+    if (v.el.classList.contains("active") && CommsView.hasTimer(model)) tick = true;
+  }
+  if (tick) commsTicker = setTimeout(commsRefresh, 1000);
+}
+/** Fetches the log of the tree whose root is rootKey; what it held stays shown until the answer comes. */
+function fetchComms(rootKey) {
+  if (commsFetching.has(rootKey)) return;
+  const pushed = [];
+  commsFetching.set(rootKey, pushed);
+  if (!commsByRoot.get(rootKey)?.events) commsByRoot.set(rootKey, { loading: true, keys: new Set(commsKeysOf(rootKey.slice(4))) });
+  const done = (r) => {
+    if (commsFetching.get(rootKey) !== pushed) return;
+    commsFetching.delete(rootKey);
+    const at = Date.now();
+    if (r?.unsupported) commsByRoot.set(rootKey, { unsupported: true, at });
+    else if (!Array.isArray(r?.events)) {
+      if (!commsByRoot.get(rootKey)?.events) commsByRoot.set(rootKey, { error: r?.error ?? "no answer", at });
+    } else {
+      const ids = new Set(r.events.map((e) => e.id));
+      const events = [...r.events, ...pushed.filter((e) => !ids.has(e.id))]; // what came while the broker answered
+      for (const e of events) ids.add(e.id);
+      const keys = new Set([...(Array.isArray(r.keys) ? r.keys : []), ...commsKeysOf(rootKey.slice(4))]);
+      commsByRoot.set(rootKey, { root: rootKey, keys, events, peers: r.peers ?? {}, ids, at });
+    }
+    commsRefresh();
+  };
+  api.getComms(rootKey.slice(4)).then(done, (e) => done({ error: e.message }));
+}
+/** The links changed: a cached tree whose root is no longer a root is dropped (fetched again under its new root when
+ *  shown), one that gained sessions is fetched again, an older broker's or failed answer is retried after 30 s. */
+function commsLinksChanged() {
+  for (const [rootKey, entry] of commsByRoot) {
+    const id = rootKey.slice(4);
+    if (commsRootOf(id) !== id || !tree.childrenOf.get(id)?.length) {
+      commsByRoot.delete(rootKey);
+      continue;
+    }
+    const grew = entry.keys && commsKeysOf(id).some((k) => !entry.keys.has(k));
+    if (grew || ((entry.unsupported || entry.error) && Date.now() - entry.at > 30_000)) fetchComms(rootKey);
+  }
+  commsRefresh();
+}
 function setPanelCollapsed(collapsed) {
   ui.panelCollapsed = collapsed;
   saveUi();
@@ -4030,6 +4140,7 @@ function setLinks(next) {
   heldByKindKey = (!Array.isArray(next) && next?.heldByKind) || {};
   tree = SessionTree.index(links);
   for (const v of views.values()) v.updatePanelShown(); // a session may have joined or left a tree
+  commsLinksChanged();
   renderList(); // redraws the relation bars too
 }
 api.onLinks((l) => {
@@ -4062,6 +4173,24 @@ const lastUsage = new Map();
 api.onUsage(({ sessionId, view }) => {
   lastUsage.set(sessionId, view);
   forView(sessionId, (v) => v.usage(view));
+  commsRefresh(); // the node's context bar
+});
+// a communication event of any tree: appended (once) to every cached tree it belongs to
+api.onCommsEvent((event) => {
+  if (!event?.id) return;
+  let changed = false;
+  for (const [rootKey, entry] of commsByRoot) {
+    const pushed = commsFetching.get(rootKey);
+    const mine = event.kind === "status" ? !!pushed || !!entry.ids?.has(event.ref) : !!(entry.keys?.has(event.fromKey) || entry.keys?.has(event.toKey));
+    if (!mine) continue;
+    if (pushed && !pushed.some((e) => e.id === event.id)) pushed.push(event);
+    if (entry.ids && !entry.ids.has(event.id)) {
+      entry.ids.add(event.id);
+      entry.events.push(event);
+      changed = true;
+    }
+  }
+  if (changed) commsRefresh();
 });
 
 $("#btn-new").addEventListener("click", () => newSession());
