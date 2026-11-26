@@ -45,6 +45,10 @@ The first four belong together as one "no orphan CLI" change.
    (`copilot-runtime.mjs:146`, `proc.on("exit")`). The message is only accurate before the port line.
 2. **Open question: a null quota hides the line and its failure reason shows nowhere** (a broken command, not logged
    in). The spec says hidden, so the user gets no hint. The reviewer declined to judge; the owner decides.
+3. **Spec not updated for the deadline in `withClient`:** spec "Design → 1" gives `withClient({ command }, fn)` and
+   "2. Quota reading" gives `readLiveQuota` via `withClient({ command }, …)`; neither mentions `deadlineMs` or that the
+   CLI is replaced past the deadline. The spec's "Not verified" still says "installer size about the same as v0.28.0"
+   (should be v0.30.1).
 
 ## C. Small behaviour
 
@@ -63,6 +67,15 @@ The first four belong together as one "no orphan CLI" change.
    callers catch.
 9. **Every Settings save and every fork forces a live query** through `refresh()` (`electron/renderer/app.js:3175`,
    fork at `:1155`). The spec wants a forced query only on the Refresh button.
+10. **A deadline during start skips the 60 s no-respawn hold** (`withClient`, `copilot-runtime.mjs:206`). A deadline
+   that fires before `entry.started` calls `stop()`, which drops the entry before `fail()` sets `failedAt`, so a CLI that
+   hangs before printing its port is spawned again on every forced query (Refresh, Settings save, fork); the 20 s port
+   deadline and its detailed error (command + stderr tail) are never reached by quota calls. Proposal: on a deadline
+   for a not-yet-started entry, record the failure hold (and keep the port error text).
+11. **The deadline stop uses the slow stop path** (`withClient`, `copilot-runtime.mjs:206`, `stop(entry)` without
+   `quick`). On a hung CLI `client.stop()` is the call most likely not to answer, so termination waits the full 3 s
+   while the entry is already out of the map — the A.3 window, on the path where it is most likely. Proposal:
+   `stop(entry, { quick: true })` there; fold into A.3.
 
 ## D. Tests and housekeeping
 
@@ -81,6 +94,8 @@ The first four belong together as one "no orphan CLI" change.
    `readFile`.
 8. **Two `quota:get` calls at startup** (`electron/main.mjs:592`, `renderer/app.js:3974`). Share one in-flight query.
 9. **No automated coverage for the main/renderer wiring and the quit wait.**
+10. **No test for a stuck fn that settles late after a newer entry exists** (`withClient`, `copilot-runtime.mjs:202`,
+   `:216-217`). Harmless by reading; nothing asserts it.
 
 ## Not verified (manual checks still open)
 
