@@ -310,6 +310,12 @@ export async function launch({ scenario, settings = {}, width = 1280, height = 8
         await cdp("Input.dispatchKeyEvent", { type: "keyDown", ...key, text: "\r" }, "pressing Enter");
         await cdp("Input.dispatchKeyEvent", { type: "keyUp", ...key }, "releasing Enter");
       },
+      /** A real mouse click at the middle of the element selector names (a user activation, unlike el.click(): a modal
+       *  dialog opened by it gets its own Escape, not one shared with a dialog opened before it without one). */
+      async click(selector) {
+        const [x, y] = await ev(`(() => { const b = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect(); return [b.left + b.width / 2, b.top + b.height / 2]; })()`);
+        for (const type of ["mousePressed", "mouseReleased"]) await cdp("Input.dispatchMouseEvent", { type, x, y, button: "left", clickCount: 1 }, `clicking ${selector}`);
+      },
       /** A real Escape key press on the focused element (a modal dialog's own cancel handling). */
       async pressEscape() {
         const key = { key: "Escape", code: "Escape", windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 };

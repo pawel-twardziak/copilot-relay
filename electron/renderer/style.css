@@ -260,6 +260,7 @@ dialog.page-dialog {
   margin: 0; padding: 0; border: 0; border-radius: 0; background: var(--bg);
 }
 dialog.page-dialog[open] { display: flex; flex-direction: column; }
+dialog.page-dialog:focus { outline: none; } /* focused itself when opened before its content renders (Schedules) */
 dialog.page-dialog > form { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .page-head { flex: none; display: flex; align-items: center; gap: 8px; padding: 10px 18px; background: var(--panel); border-bottom: 1px solid var(--border); }
 .page-head h2 { flex: 1; min-width: 0; margin: 0; font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -557,14 +558,9 @@ span.img-chip.off { border: 1px dashed var(--border); }
 .fp-error[hidden] { display: none; }
 
 /* ---------- schedules ---------- */
-/* the page replaces the chat area: every other child of #main is hidden, the sidebar keeps working */
-body.schedules-open #main > :not(#schedules) { display: none !important; }
-body.schedules-open #session-list .item.active { background: none; border-color: transparent; }
-#btn-schedules.active { background: #1f6feb33; border-color: #1f6feb66; }
-#schedules { flex: 1; overflow-y: auto; min-height: 0; }
-.sch-page { max-width: 920px; padding: 14px 18px; }
-.sch-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
-.sch-head h2 { margin: 0; font-size: 16px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* a page over the whole window (dialog.page-dialog): the header bar with ✕ Close, the content centered below */
+.sch-frame { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.sch-page { max-width: 920px; margin: 0 auto; }
 .sch-page h3 { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
 .sch-banner { border: 1px solid var(--err); background: #f8514914; color: var(--err); border-radius: 6px; padding: 8px 12px; margin-bottom: 10px; }
 .sch-error { color: var(--err); white-space: pre-wrap; font-size: 12.5px; }

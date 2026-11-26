@@ -30,7 +30,6 @@
         <p>Pick a session on the left to resume it, or start a new one in any folder.</p>
         <button id="btn-new-2" class="primary">+ New session</button>
       </div>
-      <section id="schedules" hidden></section>
       <!-- one .session-view per open session is inserted here -->
     </main>
 
@@ -140,6 +139,9 @@
         </div>
       </form>
     </dialog>
+
+    <!-- Schedules (schedules.js renders into it): a page over the whole window, like Settings -->
+    <dialog id="schedules" class="page-dialog"></dialog>
 
     <dialog id="delete-tree">
       <form method="dialog">

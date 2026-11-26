@@ -109,11 +109,11 @@
   const root = () => document.getElementById("schedules");
   const when = (iso) => (iso ? new Date(iso).toLocaleString() : "—");
 
+  // the page is a modal dialog: Close, hide() and Escape (the dialog's own close) all end in setVisible(false)
   function setVisible(on) {
     st.visible = on;
-    root().hidden = !on;
-    document.body.classList.toggle("schedules-open", on);
-    document.getElementById("btn-schedules")?.classList.toggle("active", on);
+    if (on && !root().open) root().showModal();
+    if (!on && root().open) root().close();
     clearInterval(st.timer);
     st.timer = on ? setInterval(() => st.mode === "list" && render(), REFRESH_MS) : null; // the list's "… ago" times
   }
@@ -154,7 +154,12 @@
 
   function page(title, actions, ...body) {
     const { h } = ui();
-    return h("div", { class: "sch-page" }, h("div", { class: "sch-head" }, h("h2", {}, title), actions), ...body);
+    return h(
+      "div",
+      { class: "sch-frame" },
+      h("div", { class: "page-head" }, h("h2", {}, title), actions, h("button", { type: "button", class: "sch-close", title: "Close Schedules (Esc)", onclick: hide }, "✕ Close")),
+      h("div", { class: "page-body" }, h("div", { class: "sch-page" }, ...body)),
+    );
   }
 
   async function renderList() {
@@ -418,6 +423,7 @@
 
   /** Called by app.js once window.api is ready. */
   function init() {
+    root().addEventListener("close", hide); // Escape closes the dialog itself
     api().onJobsChanged(onChanged);
     api().onJobRunFinished(onChanged);
   }

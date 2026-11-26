@@ -4246,7 +4246,7 @@ $("#btn-new").addEventListener("click", () => newSession());
 $("#btn-new-2").addEventListener("click", () => newSession());
 $("#btn-refresh").addEventListener("click", refresh);
 $("#btn-settings").addEventListener("click", openSettings);
-// the page hides #empty and every .session-view (body.schedules-open); activeId stays, so the session list works as before
+// the page is a modal dialog over the whole window; activeId stays, so the session is there again when it closes
 $("#btn-schedules").addEventListener("click", () => {
   filePreview.close();
   Schedules.show();

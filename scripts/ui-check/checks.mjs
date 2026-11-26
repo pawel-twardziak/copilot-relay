@@ -1496,6 +1496,48 @@ export const checks = [
     },
   },
   {
+    // Schedules is a page over the whole window (the sidebar under it), closed by ✕ Close or Escape; a typed form
+    // survives a close; opened from a notification over Settings, it closes alone
+    name: "schedules-page",
+    modes: ["off"],
+    async run(app) {
+      await app.ev(`document.querySelector("#btn-schedules").click()`);
+      await app.check(`document.querySelector("#schedules").open`, "the Schedules page");
+      const r = await app.ev(`(() => { const b = document.querySelector("#schedules").getBoundingClientRect(); return [b.left, b.top, b.width, b.height, innerWidth, innerHeight]; })()`);
+      assert.deepStrictEqual(r.slice(0, 4), [0, 0, r[4], r[5]], "covers the window");
+      assert.equal(
+        await app.ev(`(() => { const s = document.querySelector("#sidebar"), b = s.getBoundingClientRect(); return s.contains(document.elementFromPoint(b.left + b.width / 2, b.top + b.height / 2)); })()`),
+        false,
+        "the sidebar under the page",
+      );
+      await app.check(`!!document.querySelector("#schedules .sch-close")`, "the Close button");
+      await app.ev(`document.querySelector("#schedules .sch-close").click()`);
+      await app.check(`!document.querySelector("#schedules").open && !Schedules.isOpen()`, "Close to close Schedules");
+      // "+ New job", a name typed, Escape: reopened, the form holds it
+      await app.ev(`document.querySelector("#btn-schedules").click()`);
+      await app.check(`[...document.querySelectorAll("#schedules button")].some((b) => b.textContent === "+ New job")`, "the job list");
+      await app.ev(`[...document.querySelectorAll("#schedules button")].find((b) => b.textContent === "+ New job").click()`);
+      await app.check(`!!document.querySelector("#schedules .sch-form input")`, "the job form");
+      await app.ev(`(() => { const i = document.querySelector("#schedules .sch-form input"); i.focus(); i.value = "Typed"; i.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+      await app.pressEscape();
+      await app.check(`!document.querySelector("#schedules").open && !Schedules.isOpen()`, "Escape to close Schedules");
+      await app.ev(`document.querySelector("#btn-schedules").click()`);
+      await app.check(`document.querySelector("#schedules").open && !!document.querySelector("#schedules .sch-form input")`, "the form again");
+      assert.equal(await app.ev(`document.querySelector("#schedules .sch-form input").value`), "Typed", "the typed name survives");
+      // a notification click with Settings open: Schedules on top; Escape closes Schedules only
+      await app.ev(`document.querySelector("#schedules .sch-close").click()`);
+      await app.check(`!document.querySelector("#schedules").open`, "Schedules to close");
+      await app.click("#btn-settings"); // a real click, as a person opens it
+      await app.check(`document.querySelector("#settings").open`, "the Settings page");
+      await app.ev(`Schedules.openRun("nope", "nope")`);
+      await app.check(`document.querySelector("#schedules").open`, "Schedules over Settings");
+      await app.check(`!!document.querySelector("#schedules .sch-close")`, "the Close button on the run page");
+      await app.pressEscape();
+      await app.check(`!document.querySelector("#schedules").open`, "Escape to close Schedules");
+      assert.equal(await app.ev(`document.querySelector("#settings").open`), true, "Settings stays open");
+    },
+  },
+  {
     // every group's body is where the mode says, live and after a replay
     name: "panel-placement",
     async run(app) {
