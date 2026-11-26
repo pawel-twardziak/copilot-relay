@@ -2,7 +2,7 @@
 // One JSON line per event; the line holds the (cut) text, memory holds only the public event and the line's byte
 // position, so `text(id)` reads it back on demand. A crash may leave a half-written last line: it is skipped and cut off.
 import { randomUUID } from "node:crypto";
-import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, readSync, renameSync, truncateSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, readSync, renameSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { stateFile } from "./name-store.mjs";
 
@@ -22,6 +22,7 @@ export class CommsLog {
     this.size = 0; // bytes in the file
     this.listeners = [];
     this.timer = null;
+    this.pending = false; // a purge is waiting for its rewrite
     this.#load(cap);
   }
 
@@ -92,15 +93,32 @@ export class CommsLog {
     const n = this.items.length - kept.length;
     if (!n) return 0;
     this.#keepOnly(kept);
+    this.pending = true;
     this.#schedule();
     return n;
   }
 
-  /** Rewrite the file now from what memory holds (otherwise a debounced timer does it after a purge). */
+  /**
+   * Rewrite the file now when a purge is waiting for it (otherwise a debounced timer does it); a no-op when nothing is
+   * pending. Never throws: false when the rewrite failed (memory and the old file stay as they were; pending stays set).
+   */
   flush() {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
-    this.#rewrite();
+    if (!this.pending) return true;
+    try {
+      this.#rewrite();
+      this.pending = false;
+      return true;
+    } catch (e) {
+      console.warn(`comms log ${this.file}: rewrite failed (${e.message}); kept the old file`);
+      try {
+        unlinkSync(`${this.file}.tmp`);
+      } catch {
+        // no stale tmp file, or not removable
+      }
+      return false;
+    }
   }
 
   onAppend(fn) {
@@ -143,10 +161,7 @@ export class CommsLog {
 
   #schedule() {
     if (this.timer) return;
-    this.timer = setTimeout(() => {
-      this.timer = null;
-      this.#rewrite();
-    }, REWRITE_DELAY_MS);
+    this.timer = setTimeout(() => this.flush(), REWRITE_DELAY_MS);
     this.timer.unref();
   }
 

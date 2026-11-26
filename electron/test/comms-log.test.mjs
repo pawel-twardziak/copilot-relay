@@ -1,6 +1,6 @@
 // Tests for the durable communication log (src/comms-log.mjs).
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, statSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
@@ -161,4 +161,46 @@ test("onAppend listeners get every appended event; a throwing listener does not 
   const a = log.append(msg());
   const s = log.status(a.id, "delivered");
   assert.deepEqual(seen, [a, s]);
+});
+
+test("a failed rewrite never throws, keeps memory and the old file, and a later flush succeeds", async () => {
+  const { log, file, make } = setup();
+  const keep = log.append(msg({ fromKey: "c", toKey: "d", text: "keep" }));
+  log.append(msg({ fromKey: "a", toKey: "b" }));
+  log.purge("a");
+  const before = readFileSync(file, "utf8");
+  mkdirSync(`${file}.tmp`); // the rewrite cannot write its tmp file
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    assert.equal(log.flush(), false);
+    assert.deepEqual(log.eventsOf(["c"]), [keep]);
+    assert.equal(log.text(keep.id), "keep");
+    assert.equal(readFileSync(file, "utf8"), before);
+    // the debounce timer path must not throw either
+    log.purge("zzz");
+    log.append(msg({ fromKey: "e", toKey: "f" }));
+    log.purge("e");
+    await new Promise((r) => setTimeout(r, 1300));
+  } finally {
+    console.warn = warn;
+  }
+  rmSync(`${file}.tmp`, { recursive: true });
+  assert.equal(log.flush(), true);
+  assert.equal(readFileSync(file, "utf8").split("\n").filter(Boolean).length, 1);
+  assert.equal(make().text(keep.id), "keep");
+});
+
+test("flush with nothing pending does not rewrite the file", () => {
+  const { log, file } = setup();
+  log.append(msg());
+  const ino = statSync(file).ino;
+  assert.equal(log.flush(), true);
+  assert.equal(statSync(file).ino, ino);
+  log.purge("nobody"); // drops nothing: still nothing pending
+  assert.equal(log.flush(), true);
+  assert.equal(statSync(file).ino, ino);
+  log.purge("a");
+  assert.equal(log.flush(), true);
+  assert.notEqual(statSync(file).ino, ino);
 });
