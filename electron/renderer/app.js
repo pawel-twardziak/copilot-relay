@@ -348,6 +348,21 @@ class SessionView {
     this.relayChip = h("button", { class: "relay-chip", hidden: true, onclick: () => this.renameRelay() });
     this.usageFill = h("span", { class: "fill" });
     this.usageLabel = h("span", { class: "label" }, "context: —");
+    this.keeperText = h("span");
+    this.keeperNotNow = h("button", { class: "keeper-not-now", onclick: () => api.keeperNotNow(this.sessionId).catch((e) => this.error(e.message)) }, "Not now");
+    this.keeperChip = h("span", { class: "keeper-chip", hidden: true }, this.keeperText, this.keeperNotNow);
+    this.keeperState = null; // the runner's last { phase, pingsSent, pings, compactAt }
+    this.keeperTimer = null; // ticks the countdown every second
+    this.keeperHeldSent = null; // the last held value sent to main
+    this.keeperHeldTimer = null;
+    this.keeperSwitch = h("input", { type: "checkbox", class: "keeper-switch", checked: true, onchange: () => {
+      const on = this.keeperSwitch.checked;
+      api.keeperOptOut(this.sessionId, !on).catch((e) => {
+        this.keeperSwitch.checked = !on; // main did not store it
+        this.error(e.message);
+      });
+    } });
+    this.keeperLabel = h("label", { class: "keeper-switch-label", title: "Keep this session's prompt cache warm, then compact it, while it is idle" }, this.keeperSwitch, " Keep cache");
     this.usageChip = h("span", { class: "usage-chip" }, h("span", { class: "meter" }, this.usageFill), this.usageLabel);
     this.log = h("div", { class: "log" });
     // the activity panel beside the log: in a panel mode it holds the bodies of groups (place), each in an entry
@@ -433,6 +448,7 @@ class SessionView {
         h("div", { class: "title" }, this.titleEl, h("a", { title: "Open folder", onclick: () => api.openPath(this.cwd).catch((e) => this.error(e.message)) }, cwd)),
         this.relayChip,
         this.usageChip,
+        this.keeperChip,
         this.selects,
         this.promptBtn,
         this.closeChildrenBtn,
@@ -448,10 +464,11 @@ class SessionView {
       this.heldEl,
       this.queueEl,
       h("div", { class: "composer" }, this.cmdPopup, this.input, this.agentPicker, h("div", { class: "btns" }, this.sendBtn, this.stopBtn)),
-      h("div", { class: "status-bar" }, this.statusEl, this.holdBar, this.bgEl), // the running line sits beside the status: no shift
+      h("div", { class: "status-bar" }, this.statusEl, this.holdBar, this.keeperLabel, this.bgEl), // the running line sits beside the status: no shift
     );
     this.renderHeld(); // replies handed over from the view this one replaces
     this.loadHoldSwitch();
+    this.loadKeeper();
     this.bgEl.onclick = () => {
       const first = this.activity.running().map((id) => this.groupEls.get(id)).find(Boolean);
       if (first?.classList.contains("in-panel")) this.showInPanel(first);
@@ -502,6 +519,7 @@ class SessionView {
       else if (e.key === "Escape" && this.edit) this.cancelEdit();
     });
     this.input.addEventListener("input", () => {
+      this.reportKeeperHeld();
       if (this.recallEl) this.setRecalled(null); // an edited earlier message is the new draft
       this.autosize();
       this.updatePopup();
@@ -790,7 +808,61 @@ class SessionView {
     this.hidePopup();
   }
 
+  /** The cache keeper's view of this session: its switch and chip from main, and what the queue and box hold (main
+   *  keeps a stale "held" across a window reload, so it is sent again). */
+  loadKeeper() {
+    this.reportKeeperHeld();
+    api
+      .keeperGet(this.sessionId)
+      .then((r) => {
+        this.keeperSwitch.checked = !r?.optedOut;
+        if (r?.state && !this.keeperState) this.keeperUpdate(r.state);
+      })
+      .catch(() => {}); // unreadable: the switch stays on, the chip hidden
+  }
+
+  /** Tells main whether the queue or the message box holds text (debounced, only when it changed). */
+  reportKeeperHeld() {
+    clearTimeout(this.keeperHeldTimer);
+    if (this.keeperStopped) return;
+    this.keeperHeldTimer = setTimeout(() => {
+      const held = this.queue.length > 0 || this.input.value.trim() !== "";
+      if (held === this.keeperHeldSent) return;
+      this.keeperHeldSent = held;
+      api.keeperHeld(this.sessionId, held).catch(() => {});
+    }, 300);
+  }
+
+  /** The view is closed or replaced: no more reports for its session, no countdown tick. */
+  stopKeeper() {
+    this.keeperStopped = true;
+    clearTimeout(this.keeperHeldTimer);
+    clearInterval(this.keeperTimer);
+  }
+
+  /** A keeper:state payload: the chip, its countdown, and the ⏳ mark in the session list. */
+  keeperUpdate(state) {
+    const was = this.keeperState?.phase;
+    this.keeperState = state;
+    clearInterval(this.keeperTimer);
+    this.keeperTimer = state.phase === "countdown" ? setInterval(() => {
+      if (views.get(this.sessionId) === this) this.drawKeeper();
+      else clearInterval(this.keeperTimer); // the view was closed or replaced
+    }, 1000) : null;
+    this.drawKeeper();
+    if ((was === "countdown") !== (state.phase === "countdown")) renderList();
+  }
+
+  drawKeeper() {
+    const chip = CacheKeeper.chipView(this.keeperState, Date.now());
+    this.keeperChip.hidden = !chip;
+    if (!chip) return;
+    this.keeperText.textContent = chip.text;
+    this.keeperNotNow.hidden = !chip.notNow;
+  }
+
   autosize() {
+    this.reportKeeperHeld();
     this.input.style.height = "auto";
     this.input.style.height = Math.min(this.input.scrollHeight + 2, 240) + "px";
   }
@@ -1301,6 +1373,7 @@ class SessionView {
     const q = this.queue;
     this.queueEl.hidden = q.length === 0;
     this.queueEl.replaceChildren();
+    this.reportKeeperHeld();
     if (q.length) {
       const head = h("div", { class: "queue-head" }, h("span", {}, `Queue (${q.length})`));
       if (this.paused) {
@@ -2915,6 +2988,7 @@ async function openSession(s, { activate: show = true } = {}) {
   if (existing && !existing.dead) return show ? activate(s.sessionId) : undefined;
   if (existing) {
     existing.el.remove();
+    existing.stopKeeper();
     views.delete(s.sessionId);
     // resuming a dead view: what was waiting in it moves to the new one (unpaused: a new view), with the delivery
     // ids it took, so the broker's redelivery of a queued report is not taken twice
@@ -3003,6 +3077,7 @@ async function newSession(cwd) {
 /** Remove a session's view and everything the window keeps for it (the session itself is closed by the caller). */
 function dropView(id) {
   const v = views.get(id);
+  v?.stopKeeper();
   views.delete(id);
   lastCommands.delete(id);
   lastUsage.delete(id); // a re-opened session must not flash this stale snapshot
@@ -3021,6 +3096,7 @@ async function reopenView(old, error, { holdInbox = false, typed, keepFollowUp =
   typed ??= old.recallEl ? old.draft : old.input.value; // what you typed (not a recalled earlier message)
   if (views.get(sessionId) === old) views.delete(sessionId);
   old.el.remove();
+  old.stopKeeper();
   // handed over before the replay: a report redelivered while the session reopens must already count as seen
   await openSession({ sessionId, cwd, title, parentSessionId, seenDeliveries, pendingNotes, holdInbox, held, discarded });
   const v = views.get(sessionId);
@@ -3172,8 +3248,8 @@ function openRelative(id) {
   openSession(s);
 }
 
-/** showProject: the session is listed outside its project (pinned), so its folder goes into the meta line.
- *  depth: its level under a parent shown in the same group (0 = top level, with "child of X" when it has a parent). */
+/** showProject: its folder goes into the meta line (in Pinned and Open in app, or its folder differs from its root's).
+ *  depth: its level under its parent in the tree (0 = a root, with "child of X" when it has a parent not listed). */
 function item(s, v, { showProject = false, depth = 0 } = {}) {
   const heldCount = HeldReplies.sidebarCount({ view: v, brokerHeld: heldByKey, brokerByKind: heldByKindKey, sessionId: s.sessionId });
   const pinned = ui.pinned.has(s.sessionId);
@@ -3197,6 +3273,7 @@ function item(s, v, { showProject = false, depth = 0 } = {}) {
         v && h("span", v.dead ? { class: "dot dead", title: "Its Copilot process ended" } : { class: "dot" + (v.busy ? " busy" : "") }),
         h("b", {}, shortTitle(v?.title || s.title)),
         v?.needsAttention && h("span", { class: "attention", title: "Waiting for your answer" }, "!"),
+        v?.keeperState?.phase === "countdown" && h("span", { class: "keeper-mark", title: "Compacting soon" }, "⏳"),
         heldCount > 0 && h("span", { class: "held-mark", title: HeldReplies.markTitle(heldCount) }, `⏸ ${heldCount}`),
       ),
       h("div", { class: "m" }, [relation, showProject && baseName(s.cwd), UiState.activityAt(s) ? ago(UiState.activityAt(s)) : "", s.sessionId.slice(0, 8)].filter(Boolean).join(" · ")),
@@ -3601,7 +3678,7 @@ function toggleGroup(cwd, header, items) {
 }
 
 function groupBlock(g) {
-  const items = h("div", { class: "group-items" + (g.collapsed ? " collapsed" : "") }, h("div", {}, ...nestedItems(g.sessions)));
+  const items = h("div", { class: "group-items" + (g.collapsed ? " collapsed" : "") }, h("div", {}, ...rowItems(g.rows)));
   items.inert = g.collapsed;
   const header = h(
     "div",
@@ -3637,9 +3714,9 @@ function groupBlock(g) {
   return [header, items];
 }
 
-/** A group's rows, children indented under a parent listed in the same group. */
-function nestedItems(list, opts = {}) {
-  return SessionTree.nest(list, tree).map(({ s, depth }) => item(s, views.get(s.sessionId), { ...opts, depth }));
+/** The model's rows (UiState.listModel) as sidebar items. */
+function rowItems(rows) {
+  return rows.map(({ s, depth, showProject }) => item(s, views.get(s.sessionId), { depth, showProject }));
 }
 
 /** Also redraws every view's relation bar: its dots and the Close all sub-sessions button follow the open views. */
@@ -3649,16 +3726,12 @@ function renderList() {
 
   for (const v of views.values()) v.renderRelations();
 
-  const openOnes = [...views.values()].map((v) => sessions.find((s) => s.sessionId === v.sessionId) ?? { sessionId: v.sessionId, cwd: v.cwd, title: v.title });
-  if (openOnes.length) {
-    out.push(h("div", { class: "group-title" }, h("span", {}, "Open in app")));
-    out.push(...nestedItems(openOnes));
-  }
-
-  const model = UiState.listModel(sessions, { pinned: ui.pinned, collapsed: ui.collapsed, query: q });
-  if (model.pinned.length) {
-    out.unshift(h("div", { class: "group-title" }, h("span", {}, "📌 Pinned")), ...nestedItems(model.pinned, { showProject: true }));
-  }
+  // the listed sessions plus the open views Copilot does not list (a child just created, say)
+  const listed = new Set(sessions.map((s) => s.sessionId));
+  const unlisted = [...views.values()].filter((v) => !listed.has(v.sessionId)).map((v) => ({ sessionId: v.sessionId, cwd: v.cwd, title: v.title }));
+  const model = UiState.listModel([...sessions, ...unlisted], { pinned: ui.pinned, open: new Set(views.keys()), collapsed: ui.collapsed, query: q, tree });
+  if (model.pinned.length) out.push(h("div", { class: "group-title" }, h("span", {}, "📌 Pinned")), ...rowItems(model.pinned));
+  if (model.open.length) out.push(h("div", { class: "group-title" }, h("span", {}, "Open in app")), ...rowItems(model.open));
   for (const g of model.groups) out.push(...groupBlock(g));
   if (!out.length) out.push(h("div", { class: "group-title" }, h("span", {}, q ? "No matches" : "No sessions yet")));
   $("#session-list").replaceChildren(...out);
@@ -3680,6 +3753,9 @@ async function openSettings() {
   renderStorage();
   $("#set-relay").checked = s.relay;
   $("#set-queue").checked = s.queueMidTurn;
+  $("#set-keeper").checked = s.cacheKeeper?.enabled === true;
+  $("#set-keeper-pings").value = s.cacheKeeper?.pings ?? "";
+  $("#set-keeper-min").value = s.cacheKeeper ? s.cacheKeeper.minContext / 1000 : "";
   $("#set-context").value = s.contextTier;
   $("#set-activity").value = s.activityPanel ?? "off";
   $("#set-relay").disabled = !s.relayAvailable;
@@ -3801,6 +3877,7 @@ $("#settings").addEventListener("close", async () => {
     relay: $("#set-relay").checked,
     contextTier: $("#set-context").value,
     queueMidTurn: $("#set-queue").checked,
+    cacheKeeper: CacheKeeper.settingsOfForm({ enabled: $("#set-keeper").checked, pings: $("#set-keeper-pings").value, minContextK: $("#set-keeper-min").value }),
     activityPanel: $("#set-activity").value,
     brokerRepo: $("#set-broker-repo").value.trim() === brokerRepoDefault ? "" : $("#set-broker-repo").value,
     promptDefault: $("#set-prompt-default").value,
@@ -3823,6 +3900,8 @@ api.onUpdate(({ sessionId, update }) => {
 });
 api.onReplayed(({ replayId }) => replayEnds.get(replayId)?.());
 api.onPermission((p) => views.get(p.sessionId)?.permission(p));
+// the cache keeper's state: the chip in the view and the ⏳ mark in the list (a view reads keeperGet when it opens)
+api.onKeeperState((st) => views.get(st.sessionId)?.keeperUpdate(st));
 api.onExit((e) => views.get(e.sessionId)?.markDead(e));
 api.onNotice((n) => views.get(n.sessionId)?.system(n.text));
 

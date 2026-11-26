@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { createQuotaService, createUsagePusher, formatTokens, pickPool, quotaLine, quotaView, readLiveQuota, readQuota, readSessionUsage, summarize } from "../usage.mjs";
+import { createQuotaService, createUsagePusher, formatTokens, pickPool, quotaLine, quotaView, readCacheExpiry, readLiveQuota, readQuota, readSessionUsage, summarize } from "../usage.mjs";
 
 const FIX = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "usage");
 let root;
@@ -451,5 +451,36 @@ describe("createUsagePusher", () => {
     await tick(300);
     assert.equal(sent.length, 1);
     assert.equal(sent[0].view.credits, null);
+  });
+});
+
+describe("readCacheExpiry", () => {
+  const T = (iso) => Date.parse(iso);
+
+  test("readCacheExpiry takes the current model's entry only", async () => {
+    const id = put(fixture("events-cache.jsonl"));
+    const hit = await readCacheExpiry(id, { copilotHome: home, modelId: "claude-opus-5.5" });
+    assert.deepEqual(hit, {
+      expiresAt: T("2026-11-25T10:15:00Z"),
+      ttlSeconds: 300,
+      modelId: "claude-opus-5.5",
+      checkpointId: "c2",
+    });
+    assert.equal(await readCacheExpiry(id, { copilotHome: home, modelId: "gpt-6-luna" }), null);
+  });
+
+  test("readCacheExpiry falls back to the latest entry for an unknown model", async () => {
+    const id = put(fixture("events-cache.jsonl"));
+    for (const opts of [{ modelId: "auto" }, { modelId: null }, {}]) {
+      const hit = await readCacheExpiry(id, { copilotHome: home, ...opts });
+      assert.equal(hit.expiresAt, T("2026-11-25T10:16:00Z"));
+      assert.equal(hit.modelId, "claude-haiku-5.5");
+    }
+  });
+
+  test("readCacheExpiry is null without a checkpoint", async () => {
+    const id = put('{"type":"session.start","id":"s0","data":{}}\n');
+    assert.equal(await readCacheExpiry(id, { copilotHome: home }), null);
+    assert.equal(await readCacheExpiry("not-a-uuid", { copilotHome: home }), null);
   });
 });

@@ -5,24 +5,36 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { copilotHome as copilotHomeDefault, isSessionId, yamlGet } from "./history.mjs";
 import { readLines } from "./usage.mjs";
+import { isKeepAlive } from "./cache-keeper.mjs";
 
 const ACTIVITY = /"type"\s*:\s*"(?:user|assistant|tool)\./; // cheap test of the raw line before it is parsed
 const isActivity = (type) => typeof type === "string" && /^(?:user|assistant|tool)\./.test(type);
 const TAILS = [64 * 1024, 2 * 1024 * 1024]; // most sessions end within the first; then the whole file (bounded)
 
-/** Time (ms) of the last activity event in these lines, or null. */
+/** Time (ms) of the last activity event in these lines, or null, and whether the real user message that started its
+ *  turn was among them (`bounded`). A keep-alive ping of the cache keeper is a user.message too: it and the turn it
+ *  started are not activity. */
 function lastEventTime(lines) {
+  let latest = null; // the newest time since the newest user message seen so far (walking back)
   for (let i = lines.length - 1; i >= 0; i--) {
     if (!ACTIVITY.test(lines[i])) continue;
+    let e;
     try {
-      const e = JSON.parse(lines[i]);
-      const t = isActivity(e?.type) ? Date.parse(e.timestamp) : NaN;
-      if (Number.isFinite(t)) return t;
+      e = JSON.parse(lines[i]);
     } catch {
-      // half-written or foreign line
+      continue; // half-written or foreign line
     }
+    if (!isActivity(e?.type)) continue;
+    const prompt = e.type === "user.message";
+    if (prompt && isKeepAlive(e.data?.content ?? "")) {
+      latest = null; // everything after it was the ping's turn
+      continue;
+    }
+    const t = Date.parse(e.timestamp);
+    if (latest === null && Number.isFinite(t)) latest = t;
+    if (prompt && latest !== null) return { time: latest, bounded: true };
   }
-  return null;
+  return { time: latest, bounded: false };
 }
 
 /** False only when there is certainly no such file: a file that cannot be looked at counts as there. */
@@ -34,8 +46,9 @@ async function lastEventTimeOf(file) {
   for (const bytes of [...TAILS, null]) {
     const read = await readLines(file, bytes === null, bytes ?? undefined);
     if (!read) return (await exists(file)) ? { unknown: true } : { time: null };
-    const time = lastEventTime(read.lines);
-    if (time !== null || !read.truncated) return { time };
+    const { time, bounded } = lastEventTime(read.lines);
+    // a ping is a few KB: only the first tail can hold its answer without its prompt
+    if ((time !== null && (bounded || bytes !== TAILS[0])) || !read.truncated) return { time };
   }
   return { unknown: true };
 }

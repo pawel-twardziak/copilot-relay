@@ -88,3 +88,54 @@ Not covered: client mode `"empty"` (meant for multi-user servers), OAuth for MCP
 - A scenario hangs: Ctrl+C once finishes it and runs the cleanup; `--turn-timeout <seconds>` changes the limit.
 - Sessions left behind after a hard stop are named in `report.json` under the scenario that created them; the next
   full run does not remove them.
+
+## Cache TTL and compaction cost (`cache-ttl.mjs`)
+
+A separate, smaller check: how long the Copilot CLI keeps the prompt cache per model, and whether a compaction costs
+a premium request. It needs only Node and the installed Copilot CLI (no `npm install`).
+
+For an agent asked to run it, from the root of this repository:
+
+```
+git pull origin main
+cd scripts/sdk-probe
+node cache-ttl.mjs
+node cache-ttl.mjs --live
+npm install
+node cache-ttl.mjs --quota
+```
+
+- `node cache-ttl.mjs` is free: it only reads the session history in `COPILOT_HOME` (`~/.copilot/session-state`,
+  the newest 300 sessions; `--sessions <n>` changes it).
+- `node cache-ttl.mjs --quota` is free too: it asks the account how it is billed (`account.getQuota` through the
+  SDK, so `npm install` must have run here once). `tokenBasedBilling = true` on a pool in use means usage is billed
+  by tokens (AI credits); `false` means it counts requests.
+- `node cache-ttl.mjs --live` sends nothing either: it lists the models. Run the paid test only when the owner asks,
+  with a Claude model from that list: `node cache-ttl.mjs --live --model <id>`. It sends two prompts and `/compact`
+  in a temporary folder (2 premium requests × the model multiplier), then removes the test session (`--keep` keeps it).
+- Show the owner the whole output. It is also saved to `results/cache-ttl-<time>.md`, which git ignores. It holds
+  model names, endpoints and numbers only.
+
+What to read in it: `cacheTtlSeconds` per model (300 means the cache lives 5 minutes), and in the compactions
+table the `premium Δ` of the rows with "no turn in between" (0 means the compaction did not cost a premium request).
+
+Before running it:
+
+- Node 18 or newer (`node --version`).
+- The script starts `copilot` from `PATH`, like the app does by default. If the app uses another command
+  (Settings → Copilot command, or `COPILOT_PATH`), pass the same file: `--cli C:\path\to\copilot.exe` (an npm
+  `copilot.cmd` works too).
+- It reads the history from `COPILOT_HOME`, or `%USERPROFILE%\.copilot` when it is not set. If the app runs with
+  another `COPILOT_HOME`, set the same value in the shell first (PowerShell: `$env:COPILOT_HOME = "D:\copilot-home"`).
+
+If it fails:
+
+- `Cannot load @microsoft/copilot-sdk` (`--quota` only): `npm install` in `scripts/sdk-probe` did not run or failed.
+- `Cannot read …\session-state`: wrong `COPILOT_HOME` (see above).
+- `Session history: 0 of 0 sessions`: same cause, or Copilot has never been used under this account.
+- "No checkpoint with modelCacheState found": the CLI is too old to record the TTL (`copilot --version`; it was
+  seen with 1.0.116). The live test needs the same.
+- `timeout after … ms: ACP initialize` or `copilot --acp exited`: the CLI does not start from this shell (not logged
+  in, wrong `--cli`, proxy). Run `copilot --version` and `copilot` once by hand to check.
+- `unknown model <id>`: copy the id exactly as `--live` lists it.
+- `Could not remove …`: the test session stayed in `session-state`; delete that folder by hand or from the app.

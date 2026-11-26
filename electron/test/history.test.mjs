@@ -21,6 +21,7 @@ import {
   sessionStateDir,
   truncateSession,
 } from "../history.mjs";
+import { keepAliveText } from "../cache-keeper.mjs";
 
 let home;
 let prevHome;
@@ -634,5 +635,37 @@ describe("sessionCreatedAt", () => {
     assert.equal(sessionCreatedAt(withYaml(null)), null);
     assert.equal(sessionCreatedAt(randomUUID()), null);
     assert.equal(sessionCreatedAt("../x"), null);
+  });
+});
+
+describe("keep-alive pings", () => {
+  const pingEvents = (id) => [
+    ev("session.start", { sessionId: id, context: { cwd: "/start/cwd" } }), // 0
+    { ...ev("user.message", { content: "a" }), timestamp: "2026-11-02T16:00:01.000Z" }, // 1
+    ev("assistant.message", { content: "A." }), // 2
+    { ...ev("user.message", { content: keepAliveText() }), timestamp: "2026-11-02T16:00:02.000Z" }, // 3
+    ev("assistant.message", { content: "." }), // 4
+    { ...ev("user.message", { content: "b" }), timestamp: "2026-11-02T16:00:03.000Z" }, // 5
+    ev("assistant.message", { content: "B." }), // 6
+  ];
+
+  test("pings are not user messages", async () => {
+    const { id } = makeSession({ events: pingEvents(randomUUID()) });
+    assert.equal(countUserMessages(id), 2);
+    const times = await messageTimes(id);
+    assert.equal(times.users.length, 2);
+    assert.deepEqual(times.users, [Date.parse("2026-11-02T16:00:01.000Z"), Date.parse("2026-11-02T16:00:03.000Z")]);
+  });
+
+  test("a ping right after the cut target", () => {
+    const events = pingEvents("x");
+    assert.equal(cutIndex(events, { ordinal: 1, text: "a", where: "afterReply" }), 3); // the ping goes with what follows
+    assert.equal(countFrom(events, 3), 1);
+    assert.equal(cutIndex(events, { ordinal: 2, text: "b", where: "beforeUser" }), 5); // pings are not counted
+  });
+
+  test("a ping after the last real message is cut away", () => {
+    const events = [...pingEvents("x"), ev("user.message", { content: keepAliveText() }), ev("assistant.message", { content: "." })];
+    assert.equal(cutIndex(events, { ordinal: 2, text: "b", where: "afterReply" }), 7);
   });
 });

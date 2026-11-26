@@ -1,6 +1,6 @@
-// The UI checks run by scripts/ui-check/run.mjs: { name, scenario?, modes?, settings?, sessionId?, broker?, run(app) },
-// each throwing on failure. app is a driver (driver.mjs) launched with the check's scenario (default
-// panel-scenario.mjs), settings, sessionId and broker, its mode already set.
+// The UI checks run by scripts/ui-check/run.mjs: { name, scenario?, modes?, settings?, sessionId?, broker?, env?,
+// run(app) }, each throwing on failure. app is a driver (driver.mjs) launched with the check's scenario (default
+// panel-scenario.mjs), settings, sessionId, broker and env, its mode already set.
 import assert from "node:assert/strict";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -11,6 +11,7 @@ import { PARTS } from "../../electron/test/fixtures/acp/panel-scroll-scenario.mj
 import { RUNNING_TITLE } from "../../electron/test/fixtures/acp/tool-split-scenario.mjs";
 import { CHILD_PART } from "../../electron/session-prompts.mjs";
 import { REMINDER } from "../../electron/delegation.mjs";
+import { KEEPALIVE_MARKER } from "../../electron/cache-keeper.mjs";
 import { gitIn } from "../../electron/test/git-helper.mjs";
 import { launch, until } from "./driver.mjs";
 
@@ -564,6 +565,127 @@ const heldTypedDeleteCheck = {
     assert.equal(res.text.includes("1 queued message(s) waiting for it were discarded"), true, res.text);
   },
 };
+
+// ---------- cache keeper ----------
+// The keeper's UI checks run against keeper-scenario.mjs: every turn reports 160000 tokens of context and writes a
+// checkpoint whose cache expires 9 s later. With the leads below the keeper pings 3 s after a turn, counts down 4 s
+// after the ping and compacts 2 s later.
+const KEEPER_SCENARIO = path.join(FIXTURES, "keeper-scenario.mjs");
+const KEEPER_COMPACT =
+  "/compact Ignore the messages that start with [keep-alive] and their one-dot replies. Quote verbatim the last other user message and your answer to it.";
+const KEEPER_NOTICE = "Compacted automatically before the prompt cache expired (−4 messages)";
+const KV = `views.get(${JSON.stringify(HISTORY_ID)})`;
+const keeperChip = (app) => app.ev(`${KV}.keeperChip.hidden ? null : ${KV}.keeperText.textContent`);
+/** What the scripted agent recorded: every prompt (user_message_chunk) and update it sent, in order. */
+const agentUpdates = (app) => JSON.parse(readFileSync(path.join(app.dir, "work", ".scripted-agent.json"), "utf8")).updates;
+/** The prompts the scripted agent received, in order. */
+const agentPrompts = (app) => agentUpdates(app).filter((u) => u.sessionUpdate === "user_message_chunk").map((u) => u.content.text);
+/** The prompts and answer chunks the agent recorded, in order: "user <text>" (a ping as "user ping"), "agent <text>". */
+const agentTalk = (app) =>
+  agentUpdates(app).flatMap((u) => {
+    if (u.sessionUpdate === "user_message_chunk") return [`user ${u.content.text.startsWith(KEEPALIVE_MARKER) ? "ping" : u.content.text}`];
+    return u.sessionUpdate === "agent_message_chunk" ? [`agent ${u.content.text}`] : [];
+  });
+const pingSent = (app) => until(async () => agentPrompts(app).some((p) => p.startsWith(KEEPALIVE_MARKER)), "the keep-alive ping", 7000);
+const keeperSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** The chat's rows from your first message on (the "New session in" line before it left out): [class, text] of your
+ *  messages, the answers (their text only, without the row's buttons and time), notices and errors. */
+const CHAT_ROWS = `(() => {
+  const rows = [...${KV}.log.querySelectorAll(":scope > .msg")];
+  return rows.slice(rows.findIndex((e) => e.matches(".user"))).map((e) => [e.className, (e.querySelector(":scope > .body, :scope > .md") ?? e).textContent.trim()]);
+})()`;
+const chatRows = (app) => app.ev(CHAT_ROWS);
+
+/** A keeper check: the keeper on with one ping, its leads and retries short (main's test hooks). */
+const keeperCheck = (name, run, env = {}) => ({
+  name,
+  modes: ["off"],
+  scenario: KEEPER_SCENARIO,
+  sessionId: HISTORY_ID, // main reads the cache expiry of a UUID session only
+  settings: { cacheKeeper: { enabled: true, pings: 1, minContext: 50000 } },
+  env: { COPILOT_RELAY_KEEPER_LEADS_MS: "6000,5000,3000,1000", COPILOT_RELAY_KEEPER_RETRY_MS: "200", ...env },
+  run,
+});
+
+/** "hello" answered and the session idle: the keeper's pause starts. */
+async function keeperStart(app) {
+  await app.newSession();
+  await app.send("hello");
+  await app.check(`[...${KV}.log.querySelectorAll(":scope > .msg.agent")].some((e) => e.textContent.includes("Answer to hello."))`, "the answer to hello");
+  await app.idle();
+}
+
+const keeperChecks = [
+  // the ping is sent and stays out of the chat; the countdown follows, and Not now ends it without a compaction
+  keeperCheck("keeper-ping-not-now", async (app) => {
+    await keeperStart(app);
+    await pingSent(app);
+    await until(async () => (await keeperChip(app)) === "♻ Keeping the cache warm (1/1)", "the chip after the ping");
+    // the countdown lasts 2 s: Not now is clicked in the same evaluation that sees it, what it shows captured there
+    const seen = await app.check(
+      `(() => {
+        const v = ${KV};
+        if (v.keeperChip.hidden || !v.keeperText.textContent.startsWith("⏳ Compacting in") || !document.querySelector("span.keeper-mark")) return null;
+        const seen = { notNowHidden: v.keeperNotNow.hidden, rows: ${CHAT_ROWS} };
+        v.el.querySelector("button.keeper-not-now").click();
+        return seen;
+      })()`,
+      "the countdown chip and the ⏳ mark in the session list",
+    );
+    assert.equal(seen.notNowHidden, false, "Not now must be offered in the countdown");
+    assert.deepEqual(seen.rows, [["msg user", "hello"], ["msg agent", "Answer to hello."]], "the ping must leave no row in the chat");
+    await until(async () => (await keeperChip(app)) === null, "Not now to hide the chip");
+    await keeperSleep(6000);
+    assert.equal(agentPrompts(app).filter((p) => p.startsWith("/compact")).length, 0, "there must be no compaction after Not now");
+    assert.equal(await keeperChip(app), null);
+  }),
+  // without Not now the keeper compacts: its notice is in the chat, Copilot's own reply line is not
+  keeperCheck("keeper-compact", async (app) => {
+    await keeperStart(app);
+    await pingSent(app);
+    await until(async () => agentPrompts(app).includes(KEEPER_COMPACT), "the /compact prompt");
+    await app.check(`[...${KV}.log.querySelectorAll(":scope > .msg.system")].some((e) => e.textContent === ${JSON.stringify(KEEPER_NOTICE)})`, "the compaction notice");
+    await until(async () => (await keeperChip(app)) === null, "the chip to go after the compaction");
+    const rows = await chatRows(app);
+    assert.deepEqual(rows, [["msg user", "hello"], ["msg agent", "Answer to hello."], ["msg system", KEEPER_NOTICE]]);
+    assert.ok(!(await app.ev(`${KV}.log.textContent.includes("Compacted conversation history")`)), "Copilot's reply line must not be in the chat");
+    assert.equal(agentPrompts(app).filter((p) => p.startsWith("/compact")).length, 1);
+  }),
+  // a message sent while a ping runs waits for it, then goes out once and is answered
+  keeperCheck(
+    "keeper-prompt-waits",
+    async (app) => {
+      await keeperStart(app);
+      await pingSent(app);
+      await app.send("second"); // the ping waits 1.5 s before its answer
+      assert.ok(!agentTalk(app).includes("agent ."), "second must be sent while the ping runs (before its answer)");
+      // main holds second back until the ping's turn ended: the agent got it after the ping's answer
+      await until(async () => agentPrompts(app).includes("second"), "second to reach the agent");
+      assert.deepEqual(agentTalk(app).slice(0, 5), ["user hello", "agent Answer to hello.", "user ping", "agent .", "user second"], "second must reach the agent after the ping's answer");
+      await app.check(`[...${KV}.log.querySelectorAll(":scope > .msg.agent")].some((e) => e.textContent.includes("Answer to second."))`, "the answer to second");
+      await app.idle();
+      const talk = agentTalk(app).slice(0, 6); // a next ping may follow 3 s after second's turn
+      assert.deepEqual(talk, ["user hello", "agent Answer to hello.", "user ping", "agent .", "user second", "agent Answer to second."], "second must be answered once, after the ping");
+      assert.equal(agentPrompts(app).filter((p) => p === "second").length, 1, "second must reach the agent once");
+      const rows = await chatRows(app);
+      assert.deepEqual(rows.filter(([c]) => c === "msg user"), [["msg user", "hello"], ["msg user", "second"]]);
+      assert.deepEqual(rows.filter(([c]) => c === "msg error" || c === "msg system"), [], "there must be no notice or error");
+    },
+    { SCRIPTED_KEEPER_PING_WAIT_MS: "1500" },
+  ),
+  // the session's switch off: nothing follows the turn
+  keeperCheck("keeper-switch-off", async (app) => {
+    await app.newSession();
+    await app.check(`${KV}.keeperSwitch.checked`, "the switch to be on");
+    await app.ev(`${KV}.el.querySelector("input.keeper-switch").click()`);
+    await app.check(`api.keeperGet(${JSON.stringify(HISTORY_ID)}).then((r) => r.optedOut === true)`, "the opt-out to be stored");
+    await app.send("hello");
+    await app.idle();
+    await keeperSleep(8000);
+    assert.deepEqual(agentPrompts(app), ["hello"], "nothing must be sent after hello");
+    assert.equal(await keeperChip(app), null);
+  }),
+];
 
 export const checks = [
   {
@@ -3731,4 +3853,49 @@ export const checks = [
   heldTypedCheck(false),
   heldTypedCheck(true),
   heldTypedDeleteCheck,
+  ...keeperChecks,
+  {
+    // the sidebar lists session trees, each session once: Pinned, Open in app, then projects; every folder keeps its
+    // header and "+", empty when its sessions are all elsewhere
+    name: "sidebar-trees",
+    modes: ["off"],
+    async run(app) {
+      await app.newSession();
+      // one synchronous evaluation: no list refresh can come between setting the rows and reading the sidebar
+      const out = await app.ev(`(() => {
+        const keep = { sessions, links, pinned: new Set(ui.pinned) };
+        const S = (sessionId, cwd, updatedAt) => ({ sessionId, cwd, title: sessionId, updatedAt });
+        const read = () => [...document.querySelectorAll("#session-list > *")].flatMap((el) =>
+          el.classList.contains("group-title")
+            ? [el.querySelector(".name") ? \`# \${el.querySelector(".name").textContent} (\${el.querySelector(".count").textContent})\${el.querySelector(".new-here") ? " +" : ""}\` : "# " + el.querySelector("span").textContent]
+          : [...(el.classList.contains("item-row") ? [el] : el.querySelectorAll(".item-row"))].map((r) => {
+              const id = r.querySelector(".item").title.split("\\n")[2];
+              const depth = r.style.getPropertyValue("--depth") || "0";
+              return id + ":" + depth + (id === "C" ? " | " + r.querySelector(".m").textContent : "");
+            }));
+        try {
+          sessions = [S("P", "/x/a", "2026-11-20T10:00:00Z"), S("C", "/x/b", "2026-11-19T10:00:00Z"), S("Q", "/x/a", "2026-11-21T10:00:00Z"), S("R", "/x/a", "2026-11-01T10:00:00Z")];
+          ui.pinned.clear();
+          ui.pinned.add("Q");
+          setLinks([{ key: "cli:C", parent: "cli:P", createdAt: 1, parentDeleted: false }]);
+          const first = read();
+          ui.pinned.add("C");
+          renderList();
+          return { first, second: read() };
+        } finally {
+          sessions = keep.sessions;
+          ui.pinned.clear();
+          for (const id of keep.pinned) ui.pinned.add(id);
+          setLinks(keep.links);
+        }
+      })()`);
+      const strip = (rows) => rows.map((r) => r.split(" | ")[0]);
+      assert.deepEqual(strip(out.first), ["# 📌 Pinned", "Q:0", "# Open in app", "scripted-work:0", "# work (0) +", "# a (3) +", "P:0", "C:1", "R:0", "# b (0) +"]);
+      assert.equal(new Set(strip(out.first).filter((r) => !r.startsWith("#")).map((r) => r.split(":")[0])).size, 5, "no session twice");
+      const meta = out.first.find((r) => r.startsWith("C:")).split(" | ")[1];
+      assert.match(meta, /^b · /, "the child shows its own folder");
+      assert.doesNotMatch(meta, /child of/);
+      assert.deepEqual(strip(out.second), ["# 📌 Pinned", "Q:0", "P:0", "C:1", "# Open in app", "scripted-work:0", "# work (0) +", "# a (1) +", "R:0", "# b (0) +"]);
+    },
+  },
 ];

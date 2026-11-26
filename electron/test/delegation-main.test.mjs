@@ -171,6 +171,15 @@ test("PendingRequests reports its size and can be emptied", () => {
   assert.equal(p.take("a"), undefined);
 });
 
+test("PendingRequests tells whether a parent has a request waiting", () => {
+  const p = new PendingRequests();
+  p.add({ requestId: "a", parentSessionId: "x" });
+  assert.equal(p.hasParent("x"), true);
+  assert.equal(p.hasParent("y"), false);
+  p.take("a");
+  assert.equal(p.hasParent("x"), false);
+});
+
 test("withDeadline passes a result through and rejects when the deadline passes", async () => {
   assert.equal(await withDeadline(Promise.resolve(7), Date.now() + 1000, "late"), 7);
   await assert.rejects(withDeadline(new Promise(() => {}), Date.now() + 5, "late"), /late/);
