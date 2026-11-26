@@ -17,10 +17,12 @@
     }
   }
 
-  /** Settings fields -> the stored cacheKeeper: an empty pings field is 0; the minimum context is typed in k tokens. */
+  /** Settings fields -> the stored cacheKeeper: an empty pings field is 0; the minimum context is typed in k tokens
+   *  and an empty or unreadable one is sent as "" so main uses its default. */
   function settingsOfForm({ enabled, pings, minContextK }) {
-    const num = (v) => (Number.isFinite(Number(v)) && String(v).trim() !== "" ? Math.max(0, Number(v)) : 0);
-    return { enabled: enabled === true, pings: Math.floor(num(pings)), minContext: Math.round(num(minContextK) * 1000) };
+    const num = (v) => (String(v ?? "").trim() !== "" && Number.isFinite(Number(v)) ? Math.max(0, Number(v)) : null);
+    const min = num(minContextK);
+    return { enabled: enabled === true, pings: Math.floor(num(pings) ?? 0), minContext: min === null ? "" : Math.round(min * 1000) };
   }
 
   const CacheKeeper = { clock, chipView, settingsOfForm };

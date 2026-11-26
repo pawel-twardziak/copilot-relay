@@ -23,5 +23,5 @@ test("chipView", () => {
 test("settingsOfForm", () => {
   assert.deepEqual(settingsOfForm({ enabled: true, pings: "6", minContextK: "50" }), { enabled: true, pings: 6, minContext: 50_000 });
   assert.deepEqual(settingsOfForm({ enabled: false, pings: "", minContextK: "12.5" }), { enabled: false, pings: 0, minContext: 12_500 });
-  assert.deepEqual(settingsOfForm({ enabled: true, pings: "x", minContextK: "" }), { enabled: true, pings: 0, minContext: 0 });
+  assert.deepEqual(settingsOfForm({ enabled: true, pings: "x", minContextK: "" }), { enabled: true, pings: 0, minContext: "" });
 });

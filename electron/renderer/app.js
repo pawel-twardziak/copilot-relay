@@ -355,7 +355,13 @@ class SessionView {
     this.keeperTimer = null; // ticks the countdown every second
     this.keeperHeldSent = null; // the last held value sent to main
     this.keeperHeldTimer = null;
-    this.keeperSwitch = h("input", { type: "checkbox", class: "keeper-switch", checked: true, onchange: () => api.keeperOptOut(this.sessionId, !this.keeperSwitch.checked).catch((e) => this.error(e.message)) });
+    this.keeperSwitch = h("input", { type: "checkbox", class: "keeper-switch", checked: true, onchange: () => {
+      const on = this.keeperSwitch.checked;
+      api.keeperOptOut(this.sessionId, !on).catch((e) => {
+        this.keeperSwitch.checked = !on; // main did not store it
+        this.error(e.message);
+      });
+    } });
     this.keeperLabel = h("label", { class: "keeper-switch-label", title: "Keep this session's prompt cache warm, then compact it, while it is idle" }, this.keeperSwitch, " Keep cache");
     this.usageChip = h("span", { class: "usage-chip" }, h("span", { class: "meter" }, this.usageFill), this.usageLabel);
     this.log = h("div", { class: "log" });
@@ -818,12 +824,20 @@ class SessionView {
   /** Tells main whether the queue or the message box holds text (debounced, only when it changed). */
   reportKeeperHeld() {
     clearTimeout(this.keeperHeldTimer);
+    if (this.keeperStopped) return;
     this.keeperHeldTimer = setTimeout(() => {
       const held = this.queue.length > 0 || this.input.value.trim() !== "";
       if (held === this.keeperHeldSent) return;
       this.keeperHeldSent = held;
       api.keeperHeld(this.sessionId, held).catch(() => {});
     }, 300);
+  }
+
+  /** The view is closed or replaced: no more reports for its session, no countdown tick. */
+  stopKeeper() {
+    this.keeperStopped = true;
+    clearTimeout(this.keeperHeldTimer);
+    clearInterval(this.keeperTimer);
   }
 
   /** A keeper:state payload: the chip, its countdown, and the ⏳ mark in the session list. */
@@ -2974,6 +2988,7 @@ async function openSession(s, { activate: show = true } = {}) {
   if (existing && !existing.dead) return show ? activate(s.sessionId) : undefined;
   if (existing) {
     existing.el.remove();
+    existing.stopKeeper();
     views.delete(s.sessionId);
     // resuming a dead view: what was waiting in it moves to the new one (unpaused: a new view), with the delivery
     // ids it took, so the broker's redelivery of a queued report is not taken twice
@@ -3062,6 +3077,7 @@ async function newSession(cwd) {
 /** Remove a session's view and everything the window keeps for it (the session itself is closed by the caller). */
 function dropView(id) {
   const v = views.get(id);
+  v?.stopKeeper();
   views.delete(id);
   lastCommands.delete(id);
   lastUsage.delete(id); // a re-opened session must not flash this stale snapshot
@@ -3080,6 +3096,7 @@ async function reopenView(old, error, { holdInbox = false, typed, keepFollowUp =
   typed ??= old.recallEl ? old.draft : old.input.value; // what you typed (not a recalled earlier message)
   if (views.get(sessionId) === old) views.delete(sessionId);
   old.el.remove();
+  old.stopKeeper();
   // handed over before the replay: a report redelivered while the session reopens must already count as seen
   await openSession({ sessionId, cwd, title, parentSessionId, seenDeliveries, pendingNotes, holdInbox, held, discarded });
   const v = views.get(sessionId);
