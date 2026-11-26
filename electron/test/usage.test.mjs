@@ -154,9 +154,13 @@ describe("readLastContext", () => {
   test("after a compaction that follows the last call: the shutdown's system + conversation + the call's tools", async () => {
     const after = shutdown(70000, { systemTokens: 18000, conversationTokens: 9000, toolDefinitionsTokens: 43000 });
     assert.deepEqual(await read(lines(start, record(90000), compacted(), after)), { used: 18000 + 9000 + 22215, size: 200000 });
-    // a later run without a turn shuts down again: the newest shutdown is still after the compaction
-    const again = shutdown(60000, { systemTokens: 18000, conversationTokens: 9100, toolDefinitionsTokens: 0 });
-    assert.deepEqual(await read(lines(start, record(90000), compacted(), after, resume, again)), { used: 18000 + 9100 + 22215, size: 200000 });
+    // a later run without a turn shuts down with smaller figures (no tools loaded): the first shutdown after the
+    // compaction counts
+    const again = shutdown(13806, { systemTokens: 9365, conversationTokens: 4438, toolDefinitionsTokens: 0 });
+    assert.deepEqual(await read(lines(start, record(90000), compacted(), after, resume, again)), { used: 18000 + 9000 + 22215, size: 200000 });
+    // two compactions: the first shutdown after the newer one
+    const later = shutdown(50000, { systemTokens: 18000, conversationTokens: 5000, toolDefinitionsTokens: 43000 });
+    assert.deepEqual(await read(lines(start, record(90000), compacted(), after, resume, compacted(), later, resume, again)), { used: 18000 + 5000 + 22215, size: 200000 });
   });
 
   test("a failed compaction changes nothing", async () => {
@@ -180,15 +184,40 @@ describe("readLastContext", () => {
     assert.deepEqual(await read(content), { used: 31000, size: 200000 });
   });
 
-  test("null without a call, without inputTokens, or without maxPromptTokens", async () => {
-    for (const content of [
-      lines(start, shutdown(1000)),
-      lines(start, ev("session.usage_record", { usage: { maxPromptTokens: 200000 } })),
-      lines(start, ev("session.usage_record", { usage: { inputTokens: 1000 } })),
-      lines(start, ev("session.usage_record", { usage: { inputTokens: 0, maxPromptTokens: 200000 } })),
-    ]) {
-      assert.equal(await read(content), null);
+  test("null without a usable call; an unusable newest call falls back to an earlier one", async () => {
+    const bad = [
+      ev("session.usage_record", { usage: { maxPromptTokens: 200000 } }),
+      ev("session.usage_record", { usage: { inputTokens: 1000 } }),
+      ev("session.usage_record", { usage: { inputTokens: 0, maxPromptTokens: 200000 } }),
+      ev("session.usage_record", {}),
+      ev("session.usage_record", { usage: null }),
+    ];
+    assert.equal(await read(lines(start, shutdown(1000))), null);
+    for (const b of bad) {
+      assert.equal(await read(lines(start, b)), null);
+      assert.deepEqual(await read(lines(start, record(31000), b)), { used: 31000, size: 200000 });
     }
+  });
+
+  test("skips sub-agent events (agentId): their calls, compactions, truncations and cleared contexts", async () => {
+    const sub = (type, data) => JSON.stringify({ type, data, agentId: "a1", timestamp: "2026-11-26T10:00:00.000Z" });
+    const content = lines(
+      start,
+      record(40000),
+      sub("session.usage_record", { usage: { inputTokens: 9000, maxPromptTokens: 128000, interactionType: "conversation-agent" } }),
+      sub("session.compaction_complete", { success: true }),
+      sub("session.truncation", {}),
+      sub("session.context_cleared", {}),
+      shutdown(1),
+    );
+    assert.deepEqual(await read(content), { used: 40000, size: 200000 });
+  });
+
+  test("the whole-file pass starts afresh when the tail holds a compaction but not the call", async () => {
+    const filler = JSON.stringify({ type: "assistant.message", data: { content: "x".repeat(1000) } });
+    const after = shutdown(70000, { systemTokens: 18000, conversationTokens: 9000, toolDefinitionsTokens: 43000 });
+    const content = lines(start, record(90000), ...Array(2200).fill(filler), compacted(), after);
+    assert.deepEqual(await read(content), { used: 18000 + 9000 + 22215, size: 200000 });
   });
 
   test("reads the whole file when the 2 MiB tail has no main call", async () => {

@@ -117,10 +117,12 @@ export async function readSessionUsage(sessionId, { copilotHome } = {}) {
  * session/load): inputTokens and maxPromptTokens of the session's last main model call, the prompt it really sent.
  * session.shutdown's currentTokens is not used for that: its toolDefinitionsTokens counts every available tool,
  * deferred ones too (MCP tools behind tool search), which the model never receives (105k against 22k on the corp PC).
- * Sub-agent and sampling calls do not count. If a successful compaction follows that call, the history shrank: the
- * figure is then the system and conversation tokens of the newest shutdown after the compaction, plus the call's tool
- * tokens. Null if the id is invalid, the file is missing, there is no main call, or the context was cleared or
- * truncated after it (or compacted with no shutdown after the compaction to measure it).
+ * A main call is one with interactionType "conversation-agent" (or none, older CLIs) and no other session as its
+ * source; events of sub-agents (agentId on the envelope) are skipped. If a successful compaction follows that call,
+ * the history shrank: the figure is then the system and conversation tokens of the first shutdown after the newest
+ * such compaction, plus the call's tool tokens. Null if the id is invalid, the file is missing, there is no usable
+ * main call, the context was cleared or truncated after it, or a compaction follows it with no shutdown after the
+ * compaction (or without the token fields that formula needs).
  */
 export async function readLastContext(sessionId, { copilotHome } = {}) {
   if (!isSessionId(sessionId)) return null;
@@ -142,9 +144,9 @@ function isMainCall(usage, sessionId) {
 
 /** Backward walk to the last main call; undefined when the lines end before one. */
 function lastContext(lines, sessionId) {
-  let shutdown = null; // the newest session.shutdown, while walking back from the end
+  let shutdown = null; // the oldest session.shutdown seen so far walking back, frozen at the newest compaction
   let compacted = false; // a successful compaction lies after the call
-  let measured = true; // every such compaction has a shutdown after it
+  let measured = true; // the newest such compaction has a shutdown after it
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i];
     if (!line.includes('"session.')) continue;
@@ -154,22 +156,24 @@ function lastContext(lines, sessionId) {
     } catch {
       continue; // half-written or foreign line
     }
+    if (e?.agentId) continue; // a sub-agent's event: its calls, compactions and truncations are not the session's
     const type = e?.type;
     if (type === "session.usage_record") {
       const usage = e.data?.usage;
-      if (!isMainCall(usage, sessionId)) continue;
+      if (!usage || typeof usage !== "object" || !isMainCall(usage, sessionId)) continue;
       const input = num(usage.inputTokens);
       const size = num(usage.maxPromptTokens);
-      if (!(input > 0 && size > 0)) return null;
+      if (!(input > 0 && size > 0)) continue; // unusable: an earlier call may still be
       if (!compacted) return { used: input, size };
       const sys = num(shutdown?.systemTokens);
       const conv = num(shutdown?.conversationTokens);
       const tools = num(usage.toolTokenCount);
       return measured && sys !== null && conv !== null && tools !== null ? { used: sys + conv + tools, size } : null;
     } else if (type === "session.shutdown") {
-      shutdown ??= e.data ?? {};
+      // the one right after the compaction: a later run without a turn reports smaller system/conversation figures
+      if (!compacted) shutdown = e.data ?? {};
     } else if (type === "session.compaction_complete") {
-      if (e.data?.success !== true) continue;
+      if (e.data?.success !== true || compacted) continue;
       compacted = true;
       if (!shutdown) measured = false;
     } else if (type === "session.context_cleared" || type === "session.truncation") {
