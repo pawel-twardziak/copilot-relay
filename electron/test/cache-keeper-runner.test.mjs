@@ -257,6 +257,73 @@ test("Not now", async () => {
   assert.equal(h.runs.length, 0);
 });
 
+test("text typed during the countdown skips the pause, also when it is cleared before compactAt + the catch-up", async () => {
+  const h = harness({ settings: { pings: 0 } });
+  h.expiry("c1");
+  await h.runner.turnEnded(ID);
+  await h.advance(T0 + 3 * MIN);
+  assert.equal(h.phases().at(-1), "countdown");
+  h.runner.setHeld(ID, true);
+  assert.equal(h.phases().at(-1), "off");
+  h.clock.t = T0 + 4 * MIN + 1_000; // past compactAt, inside the catch-up
+  h.runner.setHeld(ID, false);
+  assert.equal(h.timers.length, 0);
+  await h.advance(T0 + 60 * MIN);
+  assert.equal(h.runs.length, 0);
+  assert.equal(h.phases().at(-1), "off");
+});
+
+test("a block released a little after compactAt compacts at once", async () => {
+  const h = harness({ settings: { pings: 0 } });
+  h.expiry("c1");
+  await h.runner.turnEnded(ID);
+  await h.advance(T0 + 3 * MIN);
+  h.f.busy = true; // e.g. an open card
+  await h.advance(T0 + 4 * MIN);
+  assert.equal(h.phases().at(-1), "off");
+  h.clock.t = T0 + 4 * MIN + 1_000;
+  h.f.busy = false;
+  h.runner.replan(ID);
+  await h.advance(h.clock.t);
+  assert.deepEqual(h.runs.map((r) => r.kind), ["compact"]);
+});
+
+test("a block released after compactAt + the catch-up ends the pause: no compaction, no revival", async () => {
+  const h = harness({ settings: { pings: 0 } });
+  h.expiry("c1");
+  await h.runner.turnEnded(ID);
+  await h.advance(T0 + 3 * MIN);
+  h.f.busy = true;
+  await h.advance(T0 + 4 * MIN);
+  h.clock.t = T0 + 4 * MIN + 2_001;
+  h.f.busy = false;
+  h.runner.replan(ID);
+  assert.equal(h.timers.length, 0);
+  assert.equal(h.phases().at(-1), "off");
+  h.s.pings = 3; // a settings change re-plans: the missed pause stays skipped
+  h.runner.replan();
+  await h.advance(T0 + 60 * MIN);
+  assert.equal(h.runs.length, 0);
+});
+
+test("a countdown start missed by more than the catch-up ends the pause: no countdown, no revival", async () => {
+  const h = harness({ settings: { pings: 0 } });
+  h.expiry("c1");
+  await h.runner.turnEnded(ID);
+  h.f.busy = true;
+  await h.advance(T0 + 3 * MIN);
+  assert.equal(h.phases().at(-1), "off");
+  h.clock.t = T0 + 3 * MIN + 2_001;
+  h.f.busy = false;
+  h.runner.replan(ID);
+  assert.equal(h.timers.length, 0);
+  h.s.pings = 3;
+  h.runner.replan(ID);
+  await h.advance(T0 + 60 * MIN);
+  assert.equal(h.runs.length, 0);
+  assert.ok(!h.phases().includes("countdown"));
+});
+
 test("an unchanged checkpoint gives no expiry", async () => {
   const h = harness();
   h.expiry("c1");

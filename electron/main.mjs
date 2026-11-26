@@ -1079,11 +1079,11 @@ handle("reopen:answer", async (sessionId, requestId, approved, reason) => {
   } catch (e) {
     if (e.status !== 404) throw e; // not answered: the card stays answerable
     reopenCards.delete(requestId);
-    keeper.replan(sessionId); // the card no longer keeps the keeper from acting
+    keeper.activity(sessionId); // the user answered the card: they are here, the pause restarts with the next turn
     return false;
   }
   reopenCards.delete(requestId);
-  keeper.replan(sessionId);
+  keeper.activity(sessionId);
   return true;
 });
 
@@ -1112,11 +1112,11 @@ handle("link:answer", async (sessionId, requestId, approved) => {
   } catch (e) {
     if (e.status !== 404) throw e; // not answered: the card stays answerable
     linkCards.delete(requestId);
-    keeper.replan(sessionId); // the card no longer keeps the keeper from acting
+    keeper.activity(sessionId); // the user answered the card: they are here, the pause restarts with the next turn
     return false;
   }
   linkCards.delete(requestId);
-  keeper.replan(sessionId);
+  keeper.activity(sessionId);
   return answer;
 });
 
@@ -1218,7 +1218,7 @@ handle("delegation:answer", async (requestId, approved, own, command, fields) =>
   // taken while it is answered, so a second click cannot start a second child
   const req = pendingRequests.take(requestId);
   if (!req) return false;
-  keeper.replan(req.parentSessionId); // the parent's card is answered: it no longer keeps the keeper from acting
+  keeper.activity(req.parentSessionId); // the user answered the parent's card: they are here, the pause restarts with the next turn
   if (approved !== true) {
     tellParent(req, "rejected", `The user rejected the request to create session "${req.name}".`);
     return { outcome: "rejected" };

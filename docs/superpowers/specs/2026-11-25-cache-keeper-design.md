@@ -65,7 +65,7 @@ Rough costs for a 160k Opus session (about 25k after compaction):
      compaction at about 28 min. With N = 0, the countdown starts at about 3 min and compaction runs at about 4 min.
 2. **Settings** (Settings dialog, global):
    - "Keep idle sessions' prompt cache warm, then compact them", off by default.
-   - "Keep-alive prompts before compacting", default 6. 0 or empty means no pings, compaction only.
+   - "Keep-alive prompts before compacting", default 6, at most 20. 0 or empty means no pings, compaction only.
    - "Minimum context", default 50k tokens. Below it the keeper does nothing.
 3. **Per-session switch.** A per-session "Don't keep this session's cache" switch turns off pings and compaction for
    that session only. It is remembered with the session.
@@ -84,7 +84,9 @@ Rough costs for a 160k Opus session (about 25k after compaction):
 8. **A compaction leaves one grey line in the chat**: "Compacted automatically before the prompt cache expired (−N
    messages)". The CLI's own reply line is hidden. A failed compaction leaves a grey note with the reason, and the
    session goes on unchanged.
-9. **Focus instructions.** `/compact` always carries focus instructions that keep the last exchange verbatim. A
+9. **Focus instructions.** `/compact` always carries focus instructions that keep the last exchange verbatim. Pings
+   are real messages in the model's context, so the instructions name them to be ignored and keep the last exchange
+   that is not a ping. A
    parent with children that have not reported back yet gets longer ones that also keep each delegation verbatim
    (section 3).
 10. **Nothing gets lost.** Every user action that today checks `entry.prompting` waits for a running ping or
@@ -182,22 +184,26 @@ Rules, in order:
    so the cutoff must sit before the action time. The pause ends without
    a compaction; the next turn starts a new one.
 3. `pingsSent < settings.pings` → `ping` at `expiresAt - PING_LEAD_MS`.
-4. Otherwise → `countdown` at `expiresAt - COUNTDOWN_LEAD_MS` (immediately if that is already past, as long as
-   rule 2 does not apply), then `compact` at `expiresAt - COMPACT_LEAD_MS`.
+4. Otherwise → `countdown` at `expiresAt - COUNTDOWN_LEAD_MS`, then `compact` at `expiresAt - COMPACT_LEAD_MS`.
+   Either one whose time has passed is due now only within `CATCHUP_MS` (2 s, a timer a little late). Later than
+   that, e.g. when a block (held text, a card, the switch, a setting) is released after its time, it is missed:
+   `none` with `missed: true`, and the runner marks the pause `skipped`, so no compaction goes out without the
+   countdown the user could see. A late ping stays due now (rule 2 still applies).
 5. After a compaction, successful or not, the phase is `done` until the next `turnEnded`. The keeper never pings or
    compacts a session twice in one pause, so an abandoned session costs at most N pings and one compaction.
 
 Events that change the state:
 - `turnEnded(expiresAt)`: a turn of the user or the relay → `pingsSent = 0`, `skipped = false`.
 - `pingEnded(expiresAt)`: `pingsSent += 1`.
-- `notNow`: `skipped = true`.
+- `notNow`: `skipped = true`. The runner also sends it when the window reports held text during the countdown (the
+  user is here; clearing the text later must not compact at once) and for a missed countdown or compaction (rule 4).
 - `activity`: anything in Goal 6 → back to `idle` and wait for `turnEnded`.
 - `compactEnded`: phase `done`. The ending of the keeper's own ping or compaction is not a `turnEnded`.
 
 The module also builds the two prompt texts:
 - `keepAliveText()`: `[keep-alive] The user is away. Reply with a single dot. Do not use any tool and do not continue
   any task.` The builder may tune the wording; it must start with `KEEPALIVE_MARKER`.
-- `compactText({ parent })`: `/compact Quote verbatim the last user message and your last answer.` For a parent with
+- `compactText({ parent })`: `/compact Ignore the messages that start with [keep-alive] and their one-dot replies. Quote verbatim the last other user message and your answer to it.` For a parent with
   active children (`hasActiveChildren`), also: ` For each delegated child session, keep verbatim what you asked it to do and how you
   planned to check its result.`
 
@@ -257,7 +263,8 @@ the action like a turn.
 
 **Settings.** `cacheKeeper: { enabled: false, pings: 6, minContext: 50_000 }` in the settings file, normalised like
 `queueMidTurn` and `contextTier`. Empty or 0 pings → 0. The per-session switch is stored with the other per-session
-values (the builder picks the existing per-session store, e.g. the one behind `commands` and `tiers`).
+values (the builder picks the existing per-session store, e.g. the one behind `commands` and `tiers`). `pings`
+is clamped to at most 20 (`MAX_PINGS`); the settings field has `max="20"`.
 
 ### 3. Pings out of the history (`electron/history.mjs`, replay)
 
@@ -316,7 +323,10 @@ These were settled by the author, not by the owner:
 - A config change ends the pause, and the cache entry is taken only for the current model (Goal 6, section 2).
 - After a compaction the keeper stops until the next turn (rule 5).
 - Open cards make a session busy, held messages do not; a child counts as active until its report reaches the parent
-  (section 1).
+  (section 1). Answering a card (new session, reopen, link) is the user being present: it is activity, and the pause
+  restarts with the next turn. A card dropped without an answer (connection gone, window reload) only re-plans.
+- A countdown or compaction later than `CATCHUP_MS` is missed, not run (rule 4); held text during the countdown acts
+  as Not now.
 
 ## Known limitations
 

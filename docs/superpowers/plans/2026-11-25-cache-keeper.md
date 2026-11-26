@@ -24,17 +24,20 @@ reasons).
 **Timing and text**
 - `LATE_MS = 30_000`: an action is too late when `expiresAt - now < LATE_MS`; a planned action whose time has passed
   but is not too late is due now.
+- `CATCHUP_MS = 2_000` (overridable as `leads.catchup`): a countdown start or a compaction whose time passed more than
+  this long ago is missed (`{ action: "none", at: null, missed: true }`) and the runner marks the pause skipped. A late
+  ping stays due now.
 - Leads, in ms: `PING_LEAD_MS = 60_000`, `COUNTDOWN_LEAD_MS = 120_000`, `COMPACT_LEAD_MS = 60_000`, all before the
   session's `cacheExpiresAt`.
 - `KEEPALIVE_MARKER = "[keep-alive]"`.
 - Keep-alive text: `[keep-alive] The user is away. Reply with a single dot. Do not use any tool and do not continue any task.`
-- Compact text: `/compact Quote verbatim the last user message and your last answer.`
+- Compact text: `/compact Ignore the messages that start with [keep-alive] and their one-dot replies. Quote verbatim the last other user message and your answer to it.`
 - Compact text for a parent with active children: the line above, then
   ` For each delegated child session, keep verbatim what you asked it to do and how you planned to check its result.`
 
 **Settings**
 - `cacheKeeper: { enabled: false, pings: 6, minContext: 50000 }`.
-- `pings`: 0 or empty means 0. `minContext` is in tokens.
+- `pings`: 0 or empty means 0, at most 20 (`MAX_PINGS`; the field has `max="20"`). `minContext` is in tokens.
 
 **UI strings (English, like the rest of the app)**
 - Settings checkbox: "Keep idle sessions' prompt cache warm, then compact them".
@@ -103,7 +106,7 @@ reasons).
     - `{ type: "notNow" }`
   - `next({ state, now, settings, facts, leads? }): { action: "none" | "ping" | "countdown" | "compact", at: number | null }`.
     - `facts = { enabled, busy, held, replaying, contextUsed }`.
-    - `leads` defaults to the three constants and is overridable (`{ ping, countdown, compact, late }`) for the UI checks.
+    - `leads` defaults to the constants and is overridable (`{ ping, countdown, compact, late, catchup }`) for the UI checks.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -118,8 +121,11 @@ reasons).
       `{ action: "countdown", at: expiresAt - 120_000 }`.
     - At `now = expiresAt - 120_000` with phase `countdown` → `{ action: "compact", at: expiresAt - 60_000 }`.
   - `"no pings when pings is 0"`: right after `turnEnded`, the action is `countdown` at `exp - 120_000`.
-  - `"the countdown starts at once when its time has passed but compaction still fits"`: `now = exp - 90_000`,
-    `pings: 0` → `{ action: "countdown", at: now }`.
+  - `"a countdown a little late starts at once; one later than the catch-up is missed"`: `pings: 0`,
+    `now = countdownAt + 1_000` → `{ action: "countdown", at: now }`; `now = countdownAt + 2_001` → `none` with
+    `missed: true`. In phase `countdown`: `compactAt + 1_000` → `compact`, `compactAt + 2_001` → missed. A late
+    ping is still due now. (Final-review fix; it replaced "the countdown starts at once when its time has passed but
+    compaction still fits".)
   - `"too late does nothing"`: `now = exp - 29_000` → `{ action: "none", at: null }` (too late = `expiresAt - now < LATE_MS`, 30 s). With `expiresAt: null` →
     `none`.
   - `"each fact or setting can stop it"`: each of these alone gives `none`:
@@ -617,7 +623,7 @@ reasons).
     - after 6 s no `/compact` prompt was recorded.
   - `keeper-compact`:
     - same start, without clicking **Not now**;
-    - the agent records `/compact Quote verbatim the last user message and your last answer.`;
+    - the agent records `/compact Ignore the messages that start with [keep-alive] and their one-dot replies. Quote verbatim the last other user message and your answer to it.`;
     - the chat shows "Compacted automatically before the prompt cache expired (−4 messages)" and no "Compacted
       conversation history" line.
   - `keeper-prompt-waits`:

@@ -6,10 +6,17 @@ export const PING_LEAD_MS = 60_000; // a ping goes out this long before the cach
 export const COUNTDOWN_LEAD_MS = 120_000; // the "compacting soon" countdown starts this long before expiry
 export const COMPACT_LEAD_MS = 60_000; // compaction starts this long before expiry
 export const LATE_MS = 30_000; // closer to expiry than this, nothing is started (timers fire late, so this sits before the action times)
+// A countdown or a compaction is still started this long after its time (a timer a little late); later than that,
+// e.g. once a block (held text, a card, the switch, settings) is released, it is missed: no compaction without the
+// countdown the user could see. Pings have no such limit.
+export const CATCHUP_MS = 2_000;
+export const MAX_PINGS = 20;
 export const KEEPALIVE_MARKER = "[keep-alive]";
 
 const DEFAULTS = { enabled: false, pings: 6, minContext: 50_000 };
-const COMPACT_BASE = "/compact Quote verbatim the last user message and your last answer.";
+// pings are real messages in the model's context: the last exchange to keep is the last one that is not a ping
+const COMPACT_BASE =
+  `/compact Ignore the messages that start with ${KEEPALIVE_MARKER} and their one-dot replies. Quote verbatim the last other user message and your answer to it.`;
 const COMPACT_PARENT =
   " For each delegated child session, keep verbatim what you asked it to do and how you planned to check its result.";
 
@@ -38,7 +45,7 @@ export function normalizeKeeperSettings(raw) {
   const r = raw && typeof raw === "object" ? raw : {};
   const mc = Math.floor(Number(r.minContext));
   const minContext = r.minContext === "" || r.minContext == null || !Number.isFinite(mc) ? DEFAULTS.minContext : Math.max(0, mc);
-  return { enabled: r.enabled === true, pings: wholeNumber(r.pings, DEFAULTS.pings), minContext };
+  return { enabled: r.enabled === true, pings: Math.min(MAX_PINGS, wholeNumber(r.pings, DEFAULTS.pings)), minContext };
 }
 
 export function initialState() {
@@ -62,10 +69,12 @@ export function reduce(state, event) {
   }
 }
 
-/** What to do next and when (`at`, epoch ms; at <= now means due now). */
+/** What to do next and when (`at`, epoch ms; at <= now means due now). `missed: true` with `none`: the countdown or
+ *  the compaction is later than CATCHUP_MS, so the rest of the pause is skipped (the runner marks it `notNow`). */
 export function next({ state, now, settings, facts, leads }) {
   const none = { action: "none", at: null };
-  const lead = { ping: PING_LEAD_MS, countdown: COUNTDOWN_LEAD_MS, compact: COMPACT_LEAD_MS, late: LATE_MS, ...leads };
+  const missed = { ...none, missed: true };
+  const lead = { ping: PING_LEAD_MS, countdown: COUNTDOWN_LEAD_MS, compact: COMPACT_LEAD_MS, late: LATE_MS, catchup: CATCHUP_MS, ...leads };
   if (!facts.enabled || !settings.enabled) return none;
   if (facts.busy || facts.held || facts.replaying) return none;
   if (state.skipped || state.phase === "done" || state.phase === "off") return none;
@@ -74,11 +83,15 @@ export function next({ state, now, settings, facts, leads }) {
   // Too late: the cache may already be cold.
   if (state.expiresAt - now < lead.late) return none;
 
-  // An action whose time has passed is due now (at <= now), as long as it is not too late.
-  const compactAt = state.expiresAt - lead.compact;
-  if (state.phase === "countdown") return { action: "compact", at: compactAt };
+  // An action whose time has passed is due now (at <= now), as long as it is not too late; a countdown or a
+  // compaction only within the catch-up.
+  if (state.phase === "countdown") {
+    const compactAt = state.expiresAt - lead.compact;
+    return now > compactAt + lead.catchup ? missed : { action: "compact", at: compactAt };
+  }
   if (state.pingsSent < settings.pings) return { action: "ping", at: state.expiresAt - lead.ping };
-  return { action: "countdown", at: Math.max(now, state.expiresAt - lead.countdown) };
+  const countdownAt = state.expiresAt - lead.countdown;
+  return now > countdownAt + lead.catchup ? missed : { action: "countdown", at: Math.max(now, countdownAt) };
 }
 
 const COMPACT_REPLY = "Compacted conversation history";

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  PING_LEAD_MS, LATE_MS, COUNTDOWN_LEAD_MS, COMPACT_LEAD_MS, KEEPALIVE_MARKER,
+  PING_LEAD_MS, LATE_MS, COUNTDOWN_LEAD_MS, COMPACT_LEAD_MS, CATCHUP_MS, KEEPALIVE_MARKER,
   isKeepAlive, keepAliveText, createReplayFilter, compactText, normalizeKeeperSettings, initialState, reduce, next,
 } from "../cache-keeper.mjs";
 
@@ -10,6 +10,7 @@ const exp = T + 300_000;
 const S = { enabled: true, pings: 6, minContext: 50_000 };
 const F = { enabled: true, busy: false, held: false, replaying: false, contextUsed: 160_000 };
 const NONE = { action: "none", at: null };
+const MISSED = { action: "none", at: null, missed: true };
 const started = () => reduce(initialState(), { type: "turnEnded", expiresAt: exp });
 
 test("a pause pings N times 60 s before expiry, then counts down and compacts", () => {
@@ -33,9 +34,34 @@ test("no pings when pings is 0", () => {
     { action: "countdown", at: exp - 120_000 });
 });
 
-test("the countdown starts at once when its time has passed but compaction still fits", () => {
-  const now = exp - 90_000;
-  assert.deepEqual(next({ state: started(), now, settings: { ...S, pings: 0 }, facts: F }), { action: "countdown", at: now });
+test("a countdown a little late starts at once; one later than the catch-up is missed", () => {
+  const countdownAt = exp - 120_000;
+  const s0 = { ...S, pings: 0 };
+  let now = countdownAt + 1_000;
+  assert.deepEqual(next({ state: started(), now, settings: s0, facts: F }), { action: "countdown", at: now });
+  now = countdownAt + 2_001;
+  assert.deepEqual(next({ state: started(), now, settings: s0, facts: F }), MISSED);
+  assert.equal(CATCHUP_MS, 2_000);
+});
+
+test("in the countdown a compaction a little late is due now; one later than the catch-up is missed", () => {
+  const st = { ...started(), phase: "countdown" };
+  const compactAt = exp - 60_000;
+  assert.deepEqual(next({ state: st, now: compactAt + 1_000, settings: S, facts: F }), { action: "compact", at: compactAt });
+  assert.deepEqual(next({ state: st, now: compactAt + 2_001, settings: S, facts: F }), MISSED);
+});
+
+test("a late ping is still due now, past the catch-up too", () => {
+  const pingAt = exp - 60_000;
+  assert.deepEqual(next({ state: started(), now: pingAt + 20_000, settings: S, facts: F }), { action: "ping", at: pingAt });
+});
+
+test("the catch-up can be overridden", () => {
+  const leads = { catchup: 500 };
+  const compactAt = exp - 60_000;
+  const st = { ...started(), phase: "countdown" };
+  assert.deepEqual(next({ state: st, now: compactAt + 400, settings: S, facts: F, leads }), { action: "compact", at: compactAt });
+  assert.deepEqual(next({ state: st, now: compactAt + 600, settings: S, facts: F, leads }), MISSED);
 });
 
 test("too late does nothing", () => {
@@ -89,7 +115,8 @@ test("texts", () => {
   assert.ok(keepAliveText().startsWith(KEEPALIVE_MARKER));
   assert.equal(keepAliveText(),
     "[keep-alive] The user is away. Reply with a single dot. Do not use any tool and do not continue any task.");
-  const base = "/compact Quote verbatim the last user message and your last answer.";
+  const base =
+    "/compact Ignore the messages that start with [keep-alive] and their one-dot replies. Quote verbatim the last other user message and your answer to it.";
   assert.equal(compactText({ parent: false }), base);
   assert.equal(compactText({ parent: true }),
     base + " For each delegated child session, keep verbatim what you asked it to do and how you planned to check its result.");
@@ -107,6 +134,8 @@ test("settings are normalised", () => {
   assert.equal(normalizeKeeperSettings({ pings: 2.7 }).pings, 2);
   assert.equal(normalizeKeeperSettings({ minContext: "abc" }).minContext, 50_000);
   assert.equal(normalizeKeeperSettings({ enabled: true }).enabled, true);
+  assert.equal(normalizeKeeperSettings({ pings: 600 }).pings, 20);
+  assert.equal(normalizeKeeperSettings({ pings: 20 }).pings, 20);
 });
 
 test("leads can be overridden", () => {

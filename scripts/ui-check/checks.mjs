@@ -571,7 +571,8 @@ const heldTypedDeleteCheck = {
 // checkpoint whose cache expires 9 s later. With the leads below the keeper pings 3 s after a turn, counts down 4 s
 // after the ping and compacts 2 s later.
 const KEEPER_SCENARIO = path.join(FIXTURES, "keeper-scenario.mjs");
-const KEEPER_COMPACT = "/compact Quote verbatim the last user message and your last answer.";
+const KEEPER_COMPACT =
+  "/compact Ignore the messages that start with [keep-alive] and their one-dot replies. Quote verbatim the last other user message and your answer to it.";
 const KEEPER_NOTICE = "Compacted automatically before the prompt cache expired (−4 messages)";
 const KV = `views.get(${JSON.stringify(HISTORY_ID)})`;
 const keeperChip = (app) => app.ev(`${KV}.keeperChip.hidden ? null : ${KV}.keeperText.textContent`);

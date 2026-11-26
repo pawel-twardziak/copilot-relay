@@ -22,7 +22,7 @@ const compactedNotice = (text) => {
  * @param {() => number} deps.now
  * @param {(fn: () => void, ms: number) => unknown} deps.setTimer
  * @param {(handle: unknown) => void} deps.clearTimer
- * @param {{ ping?: number, countdown?: number, compact?: number, late?: number }} [deps.leads]
+ * @param {{ ping?: number, countdown?: number, compact?: number, late?: number, catchup?: number }} [deps.leads]
  * @param {{ tries?: number, ms?: number }} [deps.retry] re-reads of the expiry after a turn (default 3 × 1 s)
  */
 export function createKeeperRunner(deps) {
@@ -109,7 +109,11 @@ export function createKeeperRunner(deps) {
       replaying: Boolean(f.replaying),
       contextUsed: f.contextUsed,
     };
-    return next({ state: e.state, now: deps.now(), settings: s, facts, leads: deps.leads });
+    const r = next({ state: e.state, now: deps.now(), settings: s, facts, leads: deps.leads });
+    // a countdown or compaction missed by more than the catch-up (a late release of a block): the pause is skipped,
+    // so a later re-plan (a settings change, more pings) does not revive it
+    if (r.missed) e.state = reduce(e.state, { type: "notNow" });
+    return r;
   };
 
   /** Arms the one timer of a session from `next`, or none; never while an action of this id runs. */
@@ -241,10 +245,12 @@ export function createKeeperRunner(deps) {
       reset(e);
       publish(id, e);
     },
-    /** The window's queue or message box is (not) empty. */
+    /** The window's queue or message box is (not) empty. Text typed during the countdown acts as Not now: the user
+     *  is here, and clearing it later must not compact at once. */
     setHeld(id, held) {
       const e = entryOf(id);
       e.held = Boolean(held);
+      if (e.held && phaseOf(e) === "countdown") e.state = reduce(e.state, { type: "notNow" });
       plan(id, e);
     },
     /** No pings and no compaction for the rest of this pause. */

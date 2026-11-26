@@ -17,12 +17,14 @@
     }
   }
 
-  /** Settings fields -> the stored cacheKeeper: an empty pings field is 0; the minimum context is typed in k tokens
-   *  and an empty or unreadable one is sent as "" so main uses its default. */
+  const MAX_PINGS = 20; // as MAX_PINGS in electron/cache-keeper.mjs, which clamps again
+
+  /** Settings fields -> the stored cacheKeeper: an empty pings field is 0, more than MAX_PINGS is MAX_PINGS; the
+   *  minimum context is typed in k tokens and an empty or unreadable one is sent as "" so main uses its default. */
   function settingsOfForm({ enabled, pings, minContextK }) {
     const num = (v) => (String(v ?? "").trim() !== "" && Number.isFinite(Number(v)) ? Math.max(0, Number(v)) : null);
     const min = num(minContextK);
-    return { enabled: enabled === true, pings: Math.floor(num(pings) ?? 0), minContext: min === null ? "" : Math.round(min * 1000) };
+    return { enabled: enabled === true, pings: Math.min(MAX_PINGS, Math.floor(num(pings) ?? 0)), minContext: min === null ? "" : Math.round(min * 1000) };
   }
 
   const CacheKeeper = { clock, chipView, settingsOfForm };
