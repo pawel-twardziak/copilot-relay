@@ -1805,9 +1805,17 @@ function notifyIfUnfocused(title, body) {
   new Notification({ title, body }).show();
 }
 
-let runtimeStopping = Promise.resolve(); // the Copilot CLI of the quota query: quitting waits for it to be gone
+// The Copilot CLI of the quota query: quitting waits for it to be gone. Every killAll() adds its stopAll() to the
+// pending one (a second call finds nothing left to stop and would settle at once), and runtimeStopPending stays set
+// until the combined promise settles (the runtime's size() is already 0 while the stop is still running).
+let runtimeStopping = Promise.resolve();
+let runtimeStopPending = false;
 function killAll() {
-  runtimeStopping = runtime.stopAll().catch(() => {});
+  runtimeStopPending = true;
+  const stopping = (runtimeStopping = Promise.all([runtimeStopping, runtime.stopAll()]).catch(() => {}));
+  stopping.then(() => {
+    if (runtimeStopping === stopping) runtimeStopPending = false;
+  });
   for (const { conn, relay } of open.values()) {
     relay?.stop();
     conn.kill();
@@ -1875,7 +1883,7 @@ if (!app.requestSingleInstanceLock()) {
   let promptsAwaited = false;
   app.on("will-quit", (e) => {
     const live = [...promptProcs].filter((c) => !c.exited);
-    if (promptsAwaited || (!live.length && runtime.size() === 0)) return;
+    if (promptsAwaited || (!live.length && !runtimeStopPending)) return;
     promptsAwaited = true;
     e.preventDefault();
     Promise.all([runtimeStopping, ...live.map((c) => exited(c, 3500))]).then(() => app.quit());
