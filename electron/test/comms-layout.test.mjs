@@ -127,6 +127,34 @@ function assertPairsApart(out) {
     assert.ok(min >= 2 * o - 1, `pair ${e.from}<->${e.to}: lines ${min.toFixed(1)} px apart, want >= ${(2 * o - 1).toFixed(1)}`);
   }
 }
+/**
+ * Tree edges of different children: an outgoing (parent -> child) and a return (child -> parent) line never share a
+ * line (collinear closer than 2 px over more than 1 px; crossing at a right angle is fine), and two straight
+ * (diagonal) lines never cross. Edges in the same direction from one parent may share its bus.
+ */
+function assertDirectionsApart(out, nodes) {
+  const parent = new Map(nodes.map((n) => [n.id, n.parent]));
+  const tree = out.edges
+    .filter((e) => parent.get(e.to) === e.from || parent.get(e.from) === e.to)
+    .map((e) => ({ e, down: parent.get(e.to) === e.from, child: parent.get(e.to) === e.from ? e.to : e.from }));
+  const along = (a1, a2, b1, b2) => Math.min(Math.max(a1, a2), Math.max(b1, b2)) - Math.max(Math.min(a1, a2), Math.min(b1, b2));
+  for (const a of tree) {
+    for (const b of tree) {
+      if (a.child === b.child || (a.down === b.down && parent.get(a.child) === parent.get(b.child))) continue;
+      for (const [x1, y1, x2, y2] of segments(a.e.path)) {
+        for (const [u1, v1, u2, v2] of segments(b.e.path)) {
+          const what = `${a.e.from}->${a.e.to} [${[x1, y1, x2, y2]}] and ${b.e.from}->${b.e.to} [${[u1, v1, u2, v2]}]`;
+          const shared =
+            (y1 === y2 && v1 === v2 && Math.abs(y1 - v1) < 2 && along(x1, x2, u1, u2) > 1) ||
+            (x1 === x2 && u1 === u2 && Math.abs(x1 - u1) < 2 && along(y1, y2, v1, v2) > 1);
+          assert.ok(!shared, `opposite directions share a line: ${what}`);
+          const diagonal = x1 !== x2 && y1 !== y2 && u1 !== u2 && v1 !== v2;
+          assert.ok(!diagonal || segDist([x1, y1, x2, y2], [u1, v1, u2, v2]) > 0, `straight lines cross: ${what}`);
+        }
+      }
+    }
+  }
+}
 const axisAligned = (path) => segments(path).every(([x1, y1, x2, y2]) => x1 === x2 || y1 === y2);
 const byId = (out) => new Map(out.nodes.map((n) => [n.id, n]));
 
@@ -169,6 +197,12 @@ test("twelve children at 280 px wrap into rows; node width >= 140; scroll only v
   assert.ok(rows.size > 1, "the children wrap into several rows");
   assertEdgesClear(out);
   assertLabelsClear(out);
+  // the same group with every child answering: each direction on its own bus, pairs apart
+  const both = run([node("root"), ...kids], kids.flatMap((k) => [edge("root", k.id, true), edge(k.id, "root", true)]), 280, 300);
+  assertEdgesClear(both);
+  assertPairsApart(both);
+  assertDirectionsApart(both, [node("root"), ...kids]);
+  assertLabelsClear(both);
   // the same group in a tall area: no scroll at all, still the minimum width fits
   const tall = run([node("root"), ...kids], kids.map((k) => edge("root", k.id, true)), 280, 2000);
   assert.equal(tall.scrollX, false);
@@ -335,13 +369,7 @@ test("a pair in both directions gets two offset edges with distinct label points
     assertPairsApart(row);
     assertEdgesClear(row);
     assertLabelsClear(row);
-    const lines = row.edges.flatMap((e) => segments(e.path).map((seg) => ({ e, seg })));
-    for (const a of lines) {
-      for (const b of lines) {
-        if (a.e.to === b.e.to || a.e.from === b.e.from || a.e.to === b.e.from || a.e.from === b.e.to) continue;
-        assert.ok(segDist(a.seg, b.seg) > 0, `${a.e.from}->${a.e.to} crosses ${b.e.from}->${b.e.to} (${count} at ${width})`);
-      }
-    }
+    assertDirectionsApart(row, [node("root"), ...kids]);
   }
   // an outside node's routed edges
   const ext = run([node("root"), outside("x")], [edge("root", "x"), edge("x", "root")], 420, 300);
@@ -429,6 +457,7 @@ test("seeded random trees: no edge grazes a box or runs along a trunk, pairs sta
     assertEdgesClear(out);
     assertOffTrunks(out, nodes);
     assertPairsApart(out);
+    assertDirectionsApart(out, nodes);
     labels += out.edges.length;
     conflicts.push(...labelConflicts(out).map((x) => `${what}: ${x}`));
   }

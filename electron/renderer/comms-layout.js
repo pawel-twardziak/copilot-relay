@@ -260,8 +260,8 @@ function router(boxes, lane, clear, bend, bounds, o) {
 
 /**
  * An axis-aligned polyline moved d px to one side of its travel (each segment along its normal (dy, -dx)), so a twin
- * at -d runs parallel at 2|d| everywhere, corners included; the ends move along the box borders they leave.
- * -> { pts, offs: each segment's shift }
+ * at -d runs parallel at 2|d| everywhere, corners included; the ends move along the borders they leave. d = 0 just
+ * drops repeated and collinear points.
  */
 function offsetLine(pts, d) {
   const same = (p, q) => p[0] === q[0] && p[1] === q[1];
@@ -274,11 +274,10 @@ function offsetLine(pts, d) {
     const a = line[i], len = Math.hypot(q[0] - a[0], q[1] - a[1]) || 1;
     return [((q[1] - a[1]) / len) * d, (-(q[0] - a[0]) / len) * d];
   });
-  const out = line.map((q, i) => {
+  return line.map((q, i) => {
     const a = offs[i - 1] ?? [0, 0], b = offs[i] ?? [0, 0];
     return [q[0] + a[0] + b[0], q[1] + a[1] + b[1]];
   });
-  return { pts: out, offs };
 }
 
 /** Whether the segment p -> q meets the open rectangle r (Liang-Barsky). */
@@ -298,9 +297,9 @@ function meets(p, q, r) {
 }
 
 /**
- * A label point for item (its pts, a pair's sideways shift per segment `offs`, the preferred place `at`: a share of
- * the length, "drop" = the middle of the last segment, "rise" = of the first): the first place along the line, from
- * the preferred one outward, on the line or just beside it (a pair's label only on the side away from its twin),
+ * A label point for item (its pts, the preferred place `at`: a share of the length, "drop" = the middle of the last
+ * segment, "rise" = of the first): the first place along the line, from the preferred one outward, on the line or
+ * just beside it (a pair's label only beside it: the side toward its twin is crowded by the twin's line),
  * where an lw x lh pill touches no box, no other line and no placed label; else the least crowded place.
  * -> { p, c: its crowding (0 = clear) }
  */
@@ -311,14 +310,13 @@ function labelPlace(item, lines, placed, boxes, lw, lh, bounds) {
   const total = lens.reduce((x, y) => x + y, 0);
   const pref =
     item.at === "drop" ? total - lens[lens.length - 1] / 2 : item.at === "rise" ? lens[0] / 2 : total * item.at;
-  const pairSide = (n, m) => (item.both ? Math.sign(item.offs[n][0] * m[0] + item.offs[n][1] * m[1]) || 1 : null);
   const pointAt = (dist, side) => {
     let n = 0;
     while (n < segs.length - 1 && dist > lens[n]) dist -= lens[n++];
     const [p, q] = segs[n];
     const t = lens[n] ? Math.min(1, Math.max(0, dist / lens[n])) : 0;
     const m = lens[n] ? [-(q[1] - p[1]) / lens[n], (q[0] - p[0]) / lens[n]] : [0, 0]; // a unit normal of the segment
-    const by = (pairSide(n, m) ?? side) * ((Math.abs(m[0]) * lw) / 2 + (Math.abs(m[1]) * lh) / 2 + 1);
+    const by = side * ((Math.abs(m[0]) * lw) / 2 + (Math.abs(m[1]) * lh) / 2 + 1);
     return [half(p[0] + (q[0] - p[0]) * t + m[0] * by), half(p[1] + (q[1] - p[1]) * t + m[1] * by)];
   };
   const crowd = (p) => crowdAt(item, p, lines, placed, boxes, lw, lh, bounds);
@@ -327,7 +325,7 @@ function labelPlace(item, lines, placed, boxes, lw, lh, bounds) {
   for (let k = 0; k <= (2 * total) / step + 1 && best?.c !== 0; k++) {
     const dist = pref + (k % 2 ? 1 : -1) * Math.ceil(k / 2) * step;
     if (dist < 0 || dist > total) continue;
-    for (const side of item.both ? [1] : [0, 1, -1]) {
+    for (const side of item.both ? [1, -1] : [0, 1, -1]) {
       const p = pointAt(dist, side);
       const c = crowd(p);
       if (!best || c < best.c) best = { p, c };
@@ -515,7 +513,7 @@ function layout(nodes = [], edges = [], opts = {}) {
   const boxes = [...box.values()];
   const bounds = { w: width, h: height };
   const has = new Set(edges.map((e) => `${e.from}\0${e.to}`));
-  const items = []; // { e, a, b, both, pts, offs, at, label }
+  const items = []; // { e, a, b, both, pts, at, label }
   for (const e of edges) {
     const a = box.get(e.from), b = box.get(e.to);
     if (a && b && a !== b) items.push({ e, a, b, both: has.has(`${e.to}\0${e.from}`) });
@@ -534,14 +532,21 @@ function layout(nodes = [], edges = [], opts = {}) {
     const parent = child === b ? a : b;
     const side = both ? (parent === a ? -1 : 1) : 0;
     const trunk = trunkOf.get(child.id);
-    let pts, offs;
+    let pts;
     if (trunk) {
-      // down the parent's line (a wrapped group's trunk, or the middle of a bus row), along the bus, down to the child
+      // outgoing lines go down the parent's line (a wrapped group's trunk, or the middle of a bus row) and along the
+      // upper bus; return lines come along the lower bus and up a second trunk 2o beside it, on the side away from
+      // the child, so each direction keeps its own bus and a pair (drops at cx -+ o) never crosses itself
       let tx = half(offX + trunk.x * s);
       if (Math.abs(tx - parent.cx) < 1) tx = parent.cx;
       if (Math.abs(tx - child.cx) < 1) tx = child.cx;
-      const by = half(trunk.y * s);
-      ({ pts, offs } = offsetLine([[tx, parent.y + h], [tx, by], [child.cx, by], [child.cx, child.y]], side * o));
+      const by = half(trunk.y * s), top = parent.y + h;
+      const r = child.cx >= tx ? 1 : -1, d = both ? o : 0;
+      pts =
+        parent === a
+          ? [[tx, top], [tx, by - o], [child.cx + r * d, by - o], [child.cx + r * d, child.y]]
+          : [[child.cx - r * d, child.y], [child.cx - r * d, by + o], [tx - 2 * r * o, by + o], [tx - 2 * r * o, top]];
+      pts = offsetLine(pts, 0);
       item.at = parent === a ? "drop" : "rise"; // on the child's own drop either way
     } else {
       // the lines of a row fan out from the parent's bottom border in the children's order, so they never cross
@@ -553,14 +558,9 @@ function layout(nodes = [], edges = [], opts = {}) {
       const lim = w / 2 - 2; // never reached: place() keeps a row straight only when every slide fits its slot
       const slide = Math.max(-lim, Math.min(lim, side * o * (nx - (dx * ny) / dy)));
       pts = [[sx + slide, sy], [ex + slide, ey]];
-      offs = [[side * o * nx, side * o * ny]];
+      if (parent !== a) pts.reverse();
       item.at = 0.5;
     }
-    if (parent !== a) {
-      pts.reverse();
-      offs.reverse();
-    }
-    item.offs = offs;
     item.tree = true;
     draw(item, pts);
   }
@@ -593,12 +593,9 @@ function layout(nodes = [], edges = [], opts = {}) {
   const lay = (first, second, twins) => {
     const base = grid.route(first, second);
     for (const item of twins) {
-      const { pts, offs } = offsetLine(base, item.both ? (first === item.a ? -o : o) : 0);
-      if (first !== item.a) {
-        pts.reverse();
-        offs.reverse();
-      }
-      Object.assign(item, { offs, at: 0.5 });
+      const pts = offsetLine(base, item.both ? (first === item.a ? -o : o) : 0);
+      if (first !== item.a) pts.reverse();
+      item.at = 0.5;
       draw(item, pts);
     }
     let c = 0;
