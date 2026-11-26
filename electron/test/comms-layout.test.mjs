@@ -9,7 +9,7 @@ const FONT = 13;
 const node = (id, parent = null, depth = 0, extra = {}) => ({ id, name: id, inTree: true, released: false, parent, depth, state: "idle", ...extra });
 const outside = (id) => node(id, null, null, { inTree: false });
 const edge = (from, to, tree = false, count = 1) => ({ from, to, tree, count });
-const run = (nodes, edges, width, height) => CommsLayout.layout(nodes, edges, { width, height, font: FONT });
+const run = (nodes, edges, width, height, font = FONT) => CommsLayout.layout(nodes, edges, { width, height, font });
 const children = (n, parent = "root") => Array.from({ length: n }, (_, i) => node(`c${i}`, parent, 1));
 
 const overlap = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
@@ -23,10 +23,10 @@ function assertInside(out) {
     assert.ok(n.x + n.w <= out.width && n.y + n.h <= out.height, `${n.id} beyond ${out.width}x${out.height}`);
   }
 }
-function assertMinimum(out) {
+function assertMinimum(out, font = FONT) {
   for (const n of out.nodes) {
     assert.ok(n.w >= 140, `${n.id} width ${n.w}`);
-    assert.ok(n.h >= FONT * 3.2, `${n.id} height ${n.h}`);
+    assert.ok(n.h >= font * 3.2, `${n.id} height ${n.h}`);
   }
 }
 /** The segments [x1, y1, x2, y2] of an edge path ("M x y L x y ..."). */
@@ -53,10 +53,13 @@ function meets([x1, y1, x2, y2], r, m = 0) {
   }
   return true;
 }
-/** No edge comes within 1 px of a box other than its two ends'. */
+/** Every edge inside the SVG and never within 1 px of a box other than its two ends'. */
 function assertEdgesClear(out) {
   for (const e of out.edges) {
     for (const seg of segments(e.path)) {
+      const [x1, y1, x2, y2] = seg;
+      const inside = Math.min(x1, x2) >= 0 && Math.min(y1, y2) >= 0 && Math.max(x1, x2) <= out.width && Math.max(y1, y2) <= out.height;
+      assert.ok(inside, `edge ${e.from}->${e.to} [${seg}] leaves the ${out.width}x${out.height} SVG`);
       for (const n of out.nodes) {
         if (n.id === e.from || n.id === e.to) continue;
         assert.ok(!meets(seg, n, 1), `edge ${e.from}->${e.to} [${seg}] grazes ${n.id}`);
@@ -77,6 +80,23 @@ function assertLabelsClear(out) {
       if (j > i) assert.ok(!overlap(r, rect(f)), `labels ${e.from}->${e.to} and ${f.from}->${f.to} overlap`);
     });
   });
+}
+/** No routed (non-tree) line runs along a tree line closer than 4 px for more than 3 px. */
+function assertOffTrunks(out, nodes) {
+  const parent = new Map(nodes.map((n) => [n.id, n.parent]));
+  const isTree = (e) => parent.get(e.to) === e.from || parent.get(e.from) === e.to;
+  const tree = out.edges.filter(isTree).flatMap((e) => segments(e.path));
+  for (const e of out.edges.filter((x) => !isTree(x))) {
+    for (const [x1, y1, x2, y2] of segments(e.path)) {
+      for (const [u1, v1, u2, v2] of tree) {
+        const along = (a1, a2, b1, b2) => Math.min(Math.max(a1, a2), Math.max(b1, b2)) - Math.max(Math.min(a1, a2), Math.min(b1, b2));
+        const near =
+          (y1 === y2 && v1 === v2 && Math.abs(y1 - v1) < 4 && along(x1, x2, u1, u2) > 3) ||
+          (x1 === x2 && u1 === u2 && Math.abs(x1 - u1) < 4 && along(y1, y2, v1, v2) > 3);
+        assert.ok(!near, `routed ${e.from}->${e.to} [${[x1, y1, x2, y2]}] runs along a tree line [${[u1, v1, u2, v2]}]`);
+      }
+    }
+  }
 }
 const axisAligned = (path) => segments(path).every(([x1, y1, x2, y2]) => x1 === x2 || y1 === y2);
 const byId = (out) => new Map(out.nodes.map((n) => [n.id, n]));
@@ -134,6 +154,37 @@ test("twelve children at 280 px wrap into rows; node width >= 140; scroll only v
     assertNoOverlap(r.nodes);
     assertEdgesClear(r);
   }
+});
+
+test("ordinary trees fit without scroll at the UI font (14 px): the gaps give way before a scroll", () => {
+  for (const [count, width] of [[3, 280], [3, 340], [6, 420]]) {
+    const kids = children(count);
+    const nodes = [node("root"), ...kids];
+    const edges = kids.flatMap((k, i) => (i === 1 ? [edge("root", k.id, true), edge(k.id, "root", true)] : [edge("root", k.id, true)]));
+    const out = run(nodes, edges, width, 300, 14);
+    const what = `root + ${count} at ${width}x300`;
+    assert.equal(out.scrollY, false, what);
+    assert.equal(out.scrollX, false, what);
+    assertMinimum(out, 14);
+    assertNoOverlap(out.nodes);
+    assertInside(out);
+    assertEdgesClear(out);
+    assertLabelsClear(out);
+  }
+});
+
+test("routed edges stay off a wrapped group's trunk and inside the SVG", () => {
+  const kids = children(4);
+  const nodes = [node("root"), ...kids];
+  const edges = [...kids.map((k) => edge("root", k.id, true)), edge("c0", "c2"), edge("c2", "c0"), edge("c1", "c3")];
+  const out = run(nodes, edges, 280, 600, 14);
+  assertEdgesClear(out);
+  assertOffTrunks(out, nodes);
+  assertLabelsClear(out);
+  const outside3 = [node("r"), node("a", "r", 1), node("b", "r", 1), outside("x")];
+  const flat = run(outside3, [edge("a", "b"), edge("b", "a"), edge("r", "x"), edge("x", "r")], 630, 211, 14);
+  assertEdgesClear(flat);
+  assertLabelsClear(flat);
 });
 
 test("a deep chain larger than the area scrolls; no node below the minimum", () => {
@@ -286,6 +337,7 @@ test("no nodes: the area without scroll; edges to unknown nodes and to themselve
 });
 
 test("seeded random trees: no edge grazes a box, no label sits on a box, another edge or another label", () => {
+  for (const font of [13, 14]) {
   let seed = 20261126;
   const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
   const pick = (list) => list[Math.floor(rnd() * list.length)];
@@ -317,15 +369,17 @@ test("seeded random trees: no edge grazes a box, no label sits on a box, another
     }
     for (const x of nodes.filter((n) => !n.inTree)) add(pick(nodes.filter((n) => n.inTree)).id, x.id);
     const width = 280 + Math.floor(rnd() * 500), height = 200 + Math.floor(rnd() * 500);
-    const out = run(nodes, edges, width, height);
-    const what = `run ${run_} (${count} tree nodes, ${width}x${height})`;
+    const out = run(nodes, edges, width, height, font);
+    const what = `font ${font} run ${run_} (${count} tree nodes, ${width}x${height})`;
     assert.equal(out.edges.length, edges.length, what);
     assert.equal(out.scrollX, out.width > width, what);
     assert.equal(out.scrollY, out.height > height, what);
-    assertMinimum(out);
+    assertMinimum(out, font);
     assertNoOverlap(out.nodes);
     assertInside(out);
     assertEdgesClear(out);
+    assertOffTrunks(out, nodes);
     assertLabelsClear(out);
+  }
   }
 });

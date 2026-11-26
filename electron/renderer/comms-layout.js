@@ -79,7 +79,7 @@ function place(id, avail, g, subs, wrap) {
       rowH = 0;
     }
     move(b, x, y);
-    trunks.push({ child: b.items[0].id, x: g.gx / 2, y: y - g.gy * BUS });
+    trunks.push({ child: b.items[0].id, x: g.gx / 2, y: y - g.bus });
     x += b.w + g.gx;
     rowH = Math.max(rowH, b.h);
     w = Math.max(w, x - g.gx);
@@ -137,15 +137,17 @@ function heap() {
 }
 
 /**
- * An orthogonal router over the boxes: a grid of lanes `lane` px outside every box side (plus the port lines), with
- * every grid segment that comes within `clear` px of a box blocked. route(a, b) -> the polyline from a port of a
+ * An orthogonal router over the boxes: a grid of lanes `lane` px outside every box side (plus the port lines; lanes
+ * a line offset by o would take out of `bounds` are left out), with every grid segment that comes within `clear` px of
+ * a box blocked. route(a, b) -> the polyline from a port of a
  * (a side's middle, or 3/4 along the top or bottom: the middle belongs to tree edges) to a port of b, shortest with a
  * cost per bend, per reuse of a segment an earlier route took (spreads parallel routes) and per placed label crossed
- * (avoid). -> { route, avoid }
+ * (avoid) or for running along a tree line (parallel). -> { route, avoid, parallel }
  */
-function router(boxes, lane, clear, bend) {
-  const xs = distinct(boxes.flatMap((b) => [b.x - lane, b.x + b.w + lane, b.cx, b.x + b.w * 0.75]));
-  const ys = distinct(boxes.flatMap((b) => [b.y - lane, b.y + b.h + lane, b.cy]));
+function router(boxes, lane, clear, bend, bounds, o) {
+  const inX = (x) => x >= o + 1.5 && x <= bounds.w - o - 1.5, inY = (y) => y >= o + 1.5 && y <= bounds.h - o - 1.5;
+  const xs = distinct(boxes.flatMap((b) => [b.x - lane, b.x + b.w + lane, b.cx, b.x + b.w * 0.75]).filter(inX));
+  const ys = distinct(boxes.flatMap((b) => [b.y - lane, b.y + b.h + lane, b.cy]).filter(inY));
   const nx = xs.length, ny = ys.length;
   const hit = (x1, y1, x2, y2) =>
     boxes.some((b) => x2 > b.x - clear && x1 < b.x + b.w + clear && y2 > b.y - clear && y1 < b.y + b.h + clear);
@@ -166,13 +168,27 @@ function router(boxes, lane, clear, bend) {
       [b.x - lane, b.cy, 1, b.x, b.cy],
       [b.x + b.w * 0.75, b.y + b.h + lane, 2, b.x + b.w * 0.75, b.y + b.h],
       [b.x + b.w * 0.75, b.y - lane, 3, b.x + b.w * 0.75, b.y],
-    ].map(([x, y, out, px, py]) => ({ node: nearest(xs, x) * ny + nearest(ys, y), out, p: [px, py] }));
+    ]
+      .filter(([x, y]) => inX(x) && inY(y))
+      .map(([x, y, out, px, py]) => ({ node: nearest(xs, x) * ny + nearest(ys, y), out, p: [px, py] }));
   /** Makes every grid segment through rectangle r cost `cost` more (a placed label later routes go around). */
   function avoid(r, cost) {
     for (let i = 0; i < nx; i++) {
       for (let j = 0; j < ny; j++) {
         if (i + 1 < nx && meets([xs[i], ys[j]], [xs[i + 1], ys[j]], r)) extra[0][i * ny + j] += cost;
         if (j + 1 < ny && meets([xs[i], ys[j]], [xs[i], ys[j + 1]], r)) extra[1][i * ny + j] += cost;
+      }
+    }
+  }
+  /** Makes the grid segments that run along the axis-aligned segment p-q closer than dist cost `cost` more. */
+  function parallel(p, q, dist, cost) {
+    const flat = p[1] === q[1];
+    if (!flat && p[0] !== q[0]) return;
+    const [lo, hi] = flat ? [Math.min(p[0], q[0]), Math.max(p[0], q[0])] : [Math.min(p[1], q[1]), Math.max(p[1], q[1])];
+    for (let i = 0; i < nx; i++) {
+      for (let j = 0; j < ny; j++) {
+        if (flat && i + 1 < nx && Math.abs(ys[j] - p[1]) < dist && xs[i + 1] > lo && xs[i] < hi) extra[0][i * ny + j] += cost;
+        if (!flat && j + 1 < ny && Math.abs(xs[i] - p[0]) < dist && ys[j + 1] > lo && ys[j] < hi) extra[1][i * ny + j] += cost;
       }
     }
   }
@@ -213,7 +229,7 @@ function router(boxes, lane, clear, bend) {
         }
       }
     }
-    if (end < 0) return [ports(a)[0].p, ports(b)[1].p]; // unreachable (never with disjoint boxes and gaps)
+    if (end < 0) return [[a.cx, a.y + a.h], [b.cx, b.y]]; // unreachable (never with disjoint boxes and gaps)
     const chain = [];
     for (let st = end; st >= 0; st = prev[st]) chain.unshift(st);
     for (let n = 1; n < chain.length; n++) {
@@ -228,7 +244,7 @@ function router(boxes, lane, clear, bend) {
       return !a0 || !a2 || !((a0[0] === p[0] && p[0] === a2[0]) || (a0[1] === p[1] && p[1] === a2[1]));
     });
   }
-  return { route, avoid };
+  return { route, avoid, parallel };
 }
 
 /** Whether the segment p -> q meets the open rectangle r (Liang-Barsky). */
@@ -323,9 +339,6 @@ function layout(nodes = [], edges = [], opts = {}) {
   const area = { w: num(opts.width, 1), h: num(opts.height, 1) };
   const font = num(opts.font, 13);
   const minNode = num(opts.minNode, 140);
-  const g = { w: minNode, h: font * H_PER_FONT, gx: minNode * GAP_X, pad: minNode * PAD, out: minNode * OUT_GAP };
-  g.gy = g.h * GAP_Y;
-
   // the tree: children per parent in the model's order (createdAt, ghosts after), roots = in-tree nodes without one
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const kids = new Map();
@@ -342,74 +355,108 @@ function layout(nodes = [], edges = [], opts = {}) {
     if (!kids.has(p)) kids.set(p, []);
     kids.get(p).push(n.id);
   }
-  const unit = new Map(); // id -> { x, y } top left at the minimum size
-  const trunkOf = new Map(); // child id -> trunk point of its wrapped group
-  const placeTree = (avail) => {
-    unit.clear();
-    trunkOf.clear();
-    const ctx = { g, kids, memo: new Map(), up: new Set() };
-    let w = 0, h = 0;
-    for (const r of roots) {
-      const b = block(r, avail, ctx);
-      const y = g.pad + (h ? h + g.gy : 0);
-      for (const it of b.items) unit.set(it.id, { x: g.pad + it.x, y: y + it.y });
-      for (const t of b.trunks) trunkOf.set(t.child, { x: g.pad + t.x, y: y + t.y });
-      w = Math.max(w, b.w);
-      h = y - g.pad + b.h;
-    }
-    return { w, h };
+  // the gaps at the minimum size, from the normal proportions (t = 0) to the floors (t = 1): gy still holds a label
+  // under a pair's lower bus above a wrapped row (bus = the bus's height above the row), the routing lane stays clear of
+  // the boxes, the margin may shrink to 4 px (the router then drops lanes that would leave the SVG)
+  const o1 = minNode * PAIR;
+  const lh0 = half(font * LABEL_H);
+  const gapsAt = (t) => {
+    const g = { w: minNode, h: font * H_PER_FONT, gx: minNode * GAP_X, out: minNode * OUT_GAP };
+    const mix = (normal, floor) => normal + (Math.min(normal, floor) - normal) * t;
+    const lane0 = Math.min(g.gx, g.h * GAP_Y) * LANE;
+    g.gy = mix(g.h * GAP_Y, lh0 + 2 * o1 + 5);
+    g.lane = mix(lane0, o1 + CLEAR + 1);
+    g.pad = mix(Math.max(minNode * PAD, lane0 + o1 + 1.5), 2 * CLEAR);
+    g.bus = Math.min(g.gy - o1 - 2, Math.max(g.gy * BUS, lh0 + o1 + 3));
+    return g;
   };
-  // outside nodes (and any in-tree node the tree did not reach): a column on the right when it fits the width, else
-  // rows below the tree; ordered by the topmost tree node each exchanged messages with
-  const others = nodes.filter((n) => !n.inTree).length;
-  let tree = placeTree(Math.max(g.w, area.w - 2 * g.pad - (others ? g.out + g.w : 0)));
-  let placement = "right";
-  if (others && tree.w && 2 * g.pad + tree.w + g.out + g.w > area.w) {
-    placement = "below";
-    tree = placeTree(Math.max(g.w, area.w - 2 * g.pad));
-  }
-  const anchor = new Map();
-  for (const e of edges) {
-    for (const [out, peer] of [[e.from, e.to], [e.to, e.from]]) {
-      const y = unit.get(peer)?.y;
-      if (y !== undefined && !unit.has(out)) anchor.set(out, Math.min(anchor.get(out) ?? Infinity, y));
-    }
-  }
-  const column = nodes
-    .filter((n) => !unit.has(n.id))
-    .map((n, i) => ({ id: n.id, i, at: anchor.get(n.id) ?? Infinity }))
-    .sort((p, q) => p.at - q.at || p.i - q.i);
-  let W1, H1;
-  if (placement === "right") {
-    // level with that tree node when there is room (short routes), else below the previous one
-    const colX = g.pad + (tree.w ? tree.w + g.out : 0);
-    let end = g.pad - g.gy;
-    for (const c of column) {
-      const y = Math.max(end + g.gy, Number.isFinite(c.at) ? c.at : 0);
-      unit.set(c.id, { x: colX, y });
-      end = y + g.h;
-    }
-    W1 = (column.length ? colX + g.w : g.pad + tree.w) + g.pad;
-    H1 = Math.max(tree.h, column.length ? end - g.pad : 0) + 2 * g.pad;
-  } else {
-    // rows like wrapped children, under a wider gap that sets the group apart
-    const top = g.pad + tree.h + g.gy * BELOW_GAP;
-    let x = g.pad, y = top, rowsW = 0;
-    for (const c of column) {
-      if (x > g.pad && x + g.w > area.w - g.pad) {
-        x = g.pad;
-        y += g.h + g.gy;
+  // the arrangement at the minimum size for gaps g: { g, unit: id -> top left, trunkOf: child -> trunk point,
+  // placement, W1, H1 }
+  const arrange = (g) => {
+    const unit = new Map(); // id -> { x, y } top left at the minimum size
+    const trunkOf = new Map(); // child id -> trunk point of its wrapped group
+    const placeTree = (avail) => {
+      unit.clear();
+      trunkOf.clear();
+      const ctx = { g, kids, memo: new Map(), up: new Set() };
+      let w = 0, h = 0;
+      for (const r of roots) {
+        const b = block(r, avail, ctx);
+        const y = g.pad + (h ? h + g.gy : 0);
+        for (const it of b.items) unit.set(it.id, { x: g.pad + it.x, y: y + it.y });
+        for (const t of b.trunks) trunkOf.set(t.child, { x: g.pad + t.x, y: y + t.y });
+        w = Math.max(w, b.w);
+        h = y - g.pad + b.h;
       }
-      unit.set(c.id, { x, y });
-      rowsW = Math.max(rowsW, x + g.w - g.pad);
-      x += g.w + g.gx;
+      return { w, h };
+    };
+    // outside nodes (and any in-tree node the tree did not reach): a column on the right when it fits the width, else
+    // rows below the tree; ordered by the topmost tree node each exchanged messages with
+    const others = nodes.filter((n) => !n.inTree).length;
+    let tree = placeTree(Math.max(g.w, area.w - 2 * g.pad - (others ? g.out + g.w : 0)));
+    let placement = "right";
+    if (others && tree.w && 2 * g.pad + tree.w + g.out + g.w > area.w) {
+      placement = "below";
+      tree = placeTree(Math.max(g.w, area.w - 2 * g.pad));
     }
-    W1 = Math.max(tree.w, rowsW) + 2 * g.pad;
-    H1 = y + g.h + g.pad;
+    const anchor = new Map();
+    for (const e of edges) {
+      for (const [out, peer] of [[e.from, e.to], [e.to, e.from]]) {
+        const y = unit.get(peer)?.y;
+        if (y !== undefined && !unit.has(out)) anchor.set(out, Math.min(anchor.get(out) ?? Infinity, y));
+      }
+    }
+    const column = nodes
+      .filter((n) => !unit.has(n.id))
+      .map((n, i) => ({ id: n.id, i, at: anchor.get(n.id) ?? Infinity }))
+      .sort((p, q) => p.at - q.at || p.i - q.i);
+    let W1, H1;
+    if (placement === "right") {
+      // level with that tree node when there is room (short routes), else below the previous one
+      const colX = g.pad + (tree.w ? tree.w + g.out : 0);
+      let end = g.pad - g.gy;
+      for (const c of column) {
+        const y = Math.max(end + g.gy, Number.isFinite(c.at) ? c.at : 0);
+        unit.set(c.id, { x: colX, y });
+        end = y + g.h;
+      }
+      W1 = (column.length ? colX + g.w : g.pad + tree.w) + g.pad;
+      H1 = Math.max(tree.h, column.length ? end - g.pad : 0) + 2 * g.pad;
+    } else {
+      // rows like wrapped children, under a wider gap that sets the group apart
+      const top = g.pad + tree.h + g.gy * BELOW_GAP;
+      let x = g.pad, y = top, rowsW = 0;
+      for (const c of column) {
+        if (x > g.pad && x + g.w > area.w - g.pad) {
+          x = g.pad;
+          y += g.h + g.gy;
+        }
+        unit.set(c.id, { x, y });
+        rowsW = Math.max(rowsW, x + g.w - g.pad);
+        x += g.w + g.gx;
+      }
+      W1 = Math.max(tree.w, rowsW) + 2 * g.pad;
+      H1 = y + g.h + g.pad;
+    }
+    return { g, unit, trunkOf, placement, W1, H1 };
+  };
+  // fit: the largest scale that fits (1 px spare for rounding), clamped to [1, the width cap]. When even the minimum
+  // does not fit, the gaps give way toward their floors (the least squeeze that fits) when that avoids the scroll; a
+  // graph that scrolls anyway keeps the normal gaps.
+  const fitOf = (a) => Math.min((area.w - 1) / a.W1, (area.h - 1) / a.H1);
+  let chosen = arrange(gapsAt(0));
+  if (fitOf(chosen) < 1 && fitOf(arrange(gapsAt(1))) >= 1) {
+    let lo = 0, hi = 1;
+    for (let i = 0; i < 10; i++) {
+      const mid = (lo + hi) / 2;
+      if (fitOf(arrange(gapsAt(mid))) >= 1) hi = mid;
+      else lo = mid;
+    }
+    chosen = arrange(gapsAt(hi));
   }
-
+  const { g, unit, trunkOf, placement, W1, H1 } = chosen;
   // fit: the largest scale that fits (1 px spare for rounding), clamped to [1, the width cap]
-  const s = Math.max(1, Math.min((area.w - 1) / W1, (area.h - 1) / H1, MAX_NODE / minNode));
+  const s = Math.max(1, Math.min(fitOf(chosen), MAX_NODE / minNode));
   const contentW = W1 * s, contentH = H1 * s;
   const width = Math.max(area.w, up(contentW));
   const height = Math.max(area.h, up(contentH));
@@ -426,8 +473,8 @@ function layout(nodes = [], edges = [], opts = {}) {
   // edge paths and labels. Tree edges first (their lines and labels are fixed), then each other pair is routed around
   // the boxes and the labels placed so far, and its labels placed at once, so later routes go around them too.
   const o = g.w * PAIR * s; // half the distance between a pair's two lines
-  const lane = Math.min(g.gx, g.gy) * LANE * s;
-  const grid = router([...box.values()], lane, o + CLEAR, g.w * BEND * s);
+  const lane = g.lane * s;
+  const grid = router([...box.values()], lane, o + CLEAR, g.w * BEND * s, { w: width, h: height }, o);
   const lw = half(font * LABEL_W), lh = half(font * LABEL_H);
   const boxes = [...box.values()];
   const bounds = { w: width, h: height };
@@ -458,10 +505,13 @@ function layout(nodes = [], edges = [], opts = {}) {
       item.shift = [d, d];
       item.at = "drop";
     } else {
-      const sx = parent.cx, sy = parent.y + h, ex = child.cx, ey = child.y;
+      // the lines of a row fan out from the parent's bottom border in the children's order, so they never cross
+      const row = kids.get(parent.id) ?? [child.id];
+      const gap = w / (row.length + 1);
+      const sx = parent.x + gap * (row.indexOf(child.id) + 1), sy = parent.y + h, ex = child.cx, ey = child.y;
       const dx = ex - sx, dy = ey - sy, len = Math.hypot(dx, dy);
       const nx = dy / len, ny = -dx / len; // the normal of parent -> child
-      const lim = w / 2 - 2;
+      const lim = Math.min(w / 2 - 2, gap / 2 - 1);
       const slide = Math.max(-lim, Math.min(lim, side * o * (nx - (dx * ny) / dy)));
       pts = [[sx + slide, sy], [ex + slide, ey]];
       item.shift = [side * o * nx, side * o * ny];
@@ -472,6 +522,11 @@ function layout(nodes = [], edges = [], opts = {}) {
     draw(item, pts);
   }
   const penalty = g.w * s * 4;
+  // routed lines (a pair's at +-o from its route) keep 4 px from the tree's lines they run along (worse than crossing
+  // a label); crossing a tree line is cheap
+  for (const item of lines) {
+    for (let n = 1; n < item.pts.length; n++) grid.parallel(item.pts[n - 1], item.pts[n], o + 4, 3 * penalty);
+  }
   const commit = (item) => {
     const r = rectAt(item.label);
     placed.push({ ...r, item });
@@ -541,9 +596,10 @@ function layout(nodes = [], edges = [], opts = {}) {
   }
   // repair: a label a later line could not avoid moves to a clear place on its line, if one exists now
   for (const item of lines) {
-    if (!crowdAt(item, item.label, lines, placed, boxes, lw, lh, bounds)) continue;
+    const now = crowdAt(item, item.label, lines, placed, boxes, lw, lh, bounds);
+    if (!now) continue;
     const again = labelPlace(item, lines, placed, boxes, lw, lh, bounds);
-    if (again.c < crowdAt(item, item.label, lines, placed, boxes, lw, lh, bounds)) {
+    if (again.c < now) {
       item.label = again.p;
       Object.assign(placed.find((p) => p.item === item), rectAt(again.p));
     }
