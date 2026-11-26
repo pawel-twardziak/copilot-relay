@@ -306,3 +306,27 @@ test("order and shown time follow the last activity, not Copilot's updatedAt", (
   assert.equal(UiState.activityAt(opened), "2026-11-23T13:26:00Z");
   assert.equal(UiState.activityAt(unknown), "2026-11-23T15:00:00Z");
 });
+
+test("slotPanel: the choice if available, else the other, else nothing", () => {
+  const { slotPanel } = UiState;
+  assert.equal(slotPanel("activity", true, true), "activity");
+  assert.equal(slotPanel("comms", true, true), "comms");
+  assert.equal(slotPanel("comms", true, false), "activity");
+  assert.equal(slotPanel("activity", false, true), "comms");
+  assert.equal(slotPanel("comms", false, true), "comms");
+  assert.equal(slotPanel("activity", false, false), null);
+  assert.equal(slotPanel("comms", false, false), null);
+});
+
+test("clampSplit: default, out of range, too small total", () => {
+  const { clampSplit } = UiState;
+  assert.equal(clampSplit(undefined, 600), 0.5);
+  assert.equal(clampSplit(NaN, 600), 0.5);
+  assert.equal(clampSplit(0.4, 600), 0.4);
+  assert.equal(clampSplit(0.01, 600), 120 / 600);
+  assert.equal(clampSplit(0.99, 600), 1 - 120 / 600);
+  assert.equal(clampSplit(-3, 600), 120 / 600);
+  assert.equal(clampSplit(0.1, 1000, 200), 0.2);
+  assert.equal(clampSplit(0.9, 239), 0.5); // no room for two parts of 120
+  assert.equal(clampSplit(0.9, 0), 0.5);
+});

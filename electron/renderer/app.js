@@ -251,6 +251,16 @@ let links = []; // the broker's sub-session links (api.getLinks / api.onLinks), 
 let tree = SessionTree.index(links); // parent/child index over `links` (bare session ids)
 let heldByKey = {}; // the broker's count of held messages per key "cli:<sessionId>" (for sessions not open here)
 let heldByKindKey = {}; // the same by kind: { "cli:<sessionId>": { child, parent, other } }
+// the Communication panel's data, per tree (key = its root's "cli:<id>"): the broker's { root, keys (Set), events,
+// peers, ids (Set of event ids) }, or { loading, keys } before the first answer, { unsupported } (an older broker),
+// { error }; fetched when a panel of the tree is first shown, when the tree changes and (throttled) on every links
+// change while a panel shows it (commsLinksChanged), then fed by comms events
+const commsByRoot = new Map();
+const commsFetching = new Map(); // root key -> the events pushed while its fetch runs (merged into the answer)
+const commsSoon = new Map(); // root key -> the timer of its refetch after a links change (at most one per 2 s)
+const commsStale = new Set(); // root keys whose links changed while their fetch ran: fetched again once it answers
+let commsQueued = false; // a redraw of the shown Communication panels is due
+let commsTicker = null; // the 1 s redraw while a shown graph has a running timer
 const HOLD_TITLES = {
   child: "Replies from your sub-sessions wait here until you approve them",
   parent: "Orders from the parent session wait here until you approve them",
@@ -309,6 +319,10 @@ class SessionView {
     // requestId -> previews element of its reopen card while it is open, null once answered (the broker re-emits a
     // request, with every queued message, until it is answered)
     this.reopenRequests = new Map();
+    // the cards open now that the Communication panel lists: [{ kind: "create" | "permission" | "link" | "reopen", id, name? }]
+    // (openCard/closeCard keep it; a card carries its entry as `_pending`)
+    this.pendingCards = [];
+    this.panelKind = null; // which panel holds the right-hand slot: "activity" | "comms" | null (updatePanelShown)
     this.linkRequests = new Set(); // requestIds of the link cards shown (main replays an unanswered one)
     this.busy = false;
     this.dead = false;
@@ -369,18 +383,25 @@ class SessionView {
     this.panelBody = h("div", { class: "panel-body" }); // the panel's scroller, zoomed with the chat
     this.panelClose = h("button", { onclick: () => this.hidePanel() }); // collapse, or close the drawer
     const panelHead = h("div", { class: "panel-head" }, h("span", { class: "title" }, "Activity"), this.panelClose);
-    this.panel = h("aside", { class: "activity-panel", hidden: true }, panelHead, this.panelBody); // hidden: no entry
+    this.panel = h("aside", { class: "activity-panel", hidden: true }, panelHead, this.panelBody); // hidden: not in the slot
+    // the Communication panel: the other occupant of the same slot (width, collapse, drawer and handle are shared);
+    // its body is filled by comms-view
+    this.commsBody = h("div", { class: "comms-body" });
+    this.commsClose = h("button", { onclick: () => this.hidePanel() });
+    this.commsPanel = h("aside", { class: "comms-panel", hidden: true }, h("div", { class: "panel-head" }, h("span", { class: "title" }, "Communication"), this.commsClose), this.commsBody);
     // Esc inside the open drawer closes it; listened to here only, so Esc elsewhere keeps its meaning (stop the
     // turn, cancel an edit, close the command popup, the image viewer or the file preview). A held Esc's repeats do
     // nothing: one press closes the drawer and no more
-    this.panel.addEventListener("keydown", (e) => {
-      if (e.key !== "Escape" || e.repeat || !this.row.classList.contains("drawer-open")) return;
-      e.preventDefault();
-      e.stopPropagation();
-      this.setDrawer(false);
-    });
+    for (const aside of [this.panel, this.commsPanel]) {
+      aside.addEventListener("keydown", (e) => {
+        if (e.key !== "Escape" || e.repeat || !this.row.classList.contains("drawer-open")) return;
+        e.preventDefault();
+        e.stopPropagation();
+        this.setDrawer(false);
+      });
+    }
     this.panelHandle = h("div", { class: "panel-handle", hidden: true, onpointerdown: (e) => this.dragPanel(e) });
-    this.row = h("div", { class: "chat-row" }, this.log, this.panelHandle, this.panel);
+    this.row = h("div", { class: "chat-row" }, this.log, this.panelHandle, this.panel, this.commsPanel);
     this.drawerOpen = false; // the narrow layout's drawer: per view, not stored (layoutPanel)
     new ResizeObserver(() => this.layoutPanel()).observe(this.row); // the layout follows the view's width
     this.follow = true; // follow streamed output: off once you scroll up, on again near the bottom
@@ -424,7 +445,10 @@ class SessionView {
     this.cmdIndex = 0;
     this.cmdToken = null;
     // shown while the view has a panel entry: shows or hides the panel (wide layout) or the drawer (narrow)
-    this.activityBtn = h("button", { title: "Show or hide the activity panel", hidden: true, onclick: () => this.togglePanel() }, "Activity");
+    this.activityBtn = h("button", { title: "Show or hide the activity panel", hidden: true, onclick: () => this.switchPanel("activity") }, "Activity");
+    // shown while the session belongs to a tree (a parent or sub-sessions)
+    this.commsBtn = h("button", { title: "Show or hide the communication panel", hidden: true, onclick: () => this.switchPanel("comms") }, "Communication");
+    this.updatePanelShown(); // a session that already belongs to a tree
     this.cmdPopup = h("div", { class: "cmd-popup", role: "listbox", hidden: true, onmousedown: (e) => e.preventDefault() });
     this.editText = h("span");
     this.queueEl = h("div", { class: "queue-strip", hidden: true });
@@ -454,6 +478,7 @@ class SessionView {
         this.closeChildrenBtn,
         h("button", { title: "Changes in this session's repositories", onclick: () => filePreview.show(this) }, "Changes"),
         this.activityBtn,
+        this.commsBtn,
         h("button", { title: "Copy the whole conversation as Markdown", onclick: (e) => this.copyThread(e.currentTarget) }, "Copy thread"),
         h("button", { class: "danger", title: "Close this session in the app (it stays resumable)", onclick: () => closeView(this.sessionId) }, "Close"),
         h("button", { class: "danger", title: "Delete this whole session from disk", onclick: () => deleteSessionFlow({ sessionId: this.sessionId, cwd: this.cwd, title: this.title }) }, "Delete"),
@@ -833,11 +858,13 @@ class SessionView {
     }, 300);
   }
 
-  /** The view is closed or replaced: no more reports for its session, no countdown tick. */
+  /** The view is closed or replaced: no more reports for its session, no countdown tick, no Communication panel. */
   stopKeeper() {
     this.keeperStopped = true;
     clearTimeout(this.keeperHeldTimer);
     clearInterval(this.keeperTimer);
+    this.commsView?.destroy();
+    this.commsView = null;
   }
 
   /** A keeper:state payload: the chip, its countdown, and the ⏳ mark in the session list. */
@@ -851,6 +878,7 @@ class SessionView {
     }, 1000) : null;
     this.drawKeeper();
     if ((was === "countdown") !== (state.phase === "countdown")) renderList();
+    commsRefresh(); // the node's "⏳ 1:45 / Compacting… / pings"
   }
 
   drawKeeper() {
@@ -1232,6 +1260,7 @@ class SessionView {
     this.promptBtn.disabled = b || this.deleting;
     this.showQueueStatus();
     renderList();
+    commsRefresh(); // the node's working / idle
     if (!b) queueMicrotask(() => this.pump());
   }
 
@@ -1347,7 +1376,7 @@ class SessionView {
   /** Acknowledges a discarded message; only a confirmed ack (not false, not an error) lets the id go. */
   ackDiscarded(id) {
     api
-      .relayAck(this.sessionId, id)
+      .relayAck(this.sessionId, id, "discarded")
       .then((ok) => ok !== false && this.discarded.delete(id))
       .catch(() => {});
   }
@@ -1401,7 +1430,7 @@ class SessionView {
     if (!this.queue.length) this.endPauseOnEmpty();
     if (item.kind === "relay") {
       // the broker must not deliver it again (a message without an id, such as a delegated task, has nothing to ack)
-      if (item.deliveryId) api.relayAck(this.sessionId, item.deliveryId).catch(() => {});
+      if (item.deliveryId) api.relayAck(this.sessionId, item.deliveryId, "discarded").catch(() => {});
       this.system(`Removed a queued message from ${item.from}.`);
     }
     this.renderQueue();
@@ -1489,6 +1518,7 @@ class SessionView {
     if (name && name !== this.relayName) {
       this.relayName = name;
       this.renderHoldSwitches(); // the switch of other sessions' messages shows once the session has a relay name
+      commsRefresh(); // its node's name when the broker gives none
     }
     if (parentChanged) {
       // the user linked or unlinked this session (adopt_session, release_session): null is a release
@@ -1902,42 +1932,68 @@ class SessionView {
     this.followBottom(); // bodies that moved changed the content of the log and the panel, not always their size
   }
 
-  /** The panel shows while it has an entry. */
+  /** The slot holds Activity while it has an entry, Communication while the session belongs to a tree; when both
+   *  are available, the stored choice (ui.rightPanel) wins; never both shown. */
   updatePanelShown() {
-    const hidden = !this.panelBody.firstElementChild;
-    if (hidden === this.panel.hidden) return;
-    this.panel.hidden = this.panelHandle.hidden = hidden;
+    const activity = !!this.panelBody.firstElementChild;
+    const comms = CommsModel.inTree(tree, this.sessionId);
+    const kind = UiState.slotPanel(ui.rightPanel, activity, comms);
+    if (kind === this.panelKind && activity === this.activityAvailable && comms === this.commsAvailable) return;
+    Object.assign(this, { panelKind: kind, activityAvailable: activity, commsAvailable: comms });
+    this.panel.hidden = kind !== "activity";
+    this.commsPanel.hidden = kind !== "comms";
+    this.panelHandle.hidden = kind === null;
     this.layoutPanel();
+    if (kind === "comms") commsRefresh();
   }
 
   /** The panel's geometry for the view's width (UiState.panelLayout): its width, the narrow layout (a drawer over
    *  the log) and what shows: in the wide layout the panel unless collapsed (ui.panelCollapsed), in the narrow one
-   *  the drawer while open (drawerOpen). panel.hidden keeps meaning "no entry"; the rest is classes on the row. */
+   *  the drawer while open (drawerOpen). panel.hidden / commsPanel.hidden mean "not in the slot"; the rest is
+   *  classes on the row. */
   layoutPanel() {
-    this.activityBtn.hidden = this.panel.hidden;
+    this.activityBtn.hidden = !this.activityAvailable;
+    this.commsBtn.hidden = !this.commsAvailable;
     const viewWidth = this.row.clientWidth;
     if (!viewWidth) return; // not shown: laid out when it shows (the row's ResizeObserver)
     const { narrow, width } = UiState.panelLayout(viewWidth, ui.panelWidth);
-    this.panel.style.width = `${width}px`;
+    this.panel.style.width = this.commsPanel.style.width = `${width}px`;
     this.row.classList.toggle("narrow", narrow);
     this.row.classList.toggle("collapsed", !narrow && ui.panelCollapsed);
     this.row.classList.toggle("drawer-open", narrow && this.drawerOpen);
-    this.panelClose.textContent = narrow ? "✕" : "»";
+    this.panelClose.textContent = this.commsClose.textContent = narrow ? "✕" : "»";
     this.panelClose.title = narrow ? "Close (Esc)" : "Hide the activity panel";
+    this.commsClose.title = narrow ? "Close (Esc)" : "Hide the communication panel";
   }
   /** The layout applied: the panel is a drawer over the log. */
   isNarrow() {
     return this.row.classList.contains("narrow");
   }
+  /** The aside in the slot (null when none). */
+  shownPanel() {
+    return this.panelKind === "comms" ? this.commsPanel : this.panelKind === "activity" ? this.panel : null;
+  }
   setDrawer(open) {
-    const closing = !open && this.row.classList.contains("drawer-open") && this.panel.contains(document.activeElement);
+    const closing = !open && this.row.classList.contains("drawer-open") && !!this.shownPanel()?.contains(document.activeElement);
     this.drawerOpen = open;
     this.layoutPanel();
+    if (open) commsRefresh(); // a Communication panel back on screen retries a failed load (drawComms)
     // the focus leaves the drawer it was in for the button that opens it again (not the message box, where the next
     // Esc would stop the turn)
-    if (closing) this.activityBtn.focus();
+    if (closing) (this.panelKind === "comms" ? this.commsBtn : this.activityBtn).focus();
   }
-  /** The "Activity" button. */
+  /** A header button ("Activity" / "Communication"): the other panel's button switches the slot to its panel and
+   *  reveals it; the shown panel's button hides or shows it. */
+  switchPanel(kind) {
+    if (this.panelKind === kind) this.togglePanel();
+    else this.showPanel(kind);
+  }
+  /** The slot's choice is `kind` (stored, every view follows); this view reveals it. */
+  showPanel(kind) {
+    setRightPanel(kind);
+    this.revealPanel();
+  }
+  /** The shown panel's button. */
   togglePanel() {
     if (this.isNarrow()) this.setDrawer(!this.drawerOpen);
     else setPanelCollapsed(!ui.panelCollapsed);
@@ -1958,7 +2014,7 @@ class SessionView {
     if (e.button !== 0) return;
     e.preventDefault(); // no text selection while dragging
     const startX = e.clientX;
-    const start = this.panel.getBoundingClientRect().width;
+    const start = (this.shownPanel() ?? this.panel).getBoundingClientRect().width; // the one in the slot (the other is display:none)
     const move = (m) => {
       ui.panelWidth = UiState.panelLayout(this.row.clientWidth, start + startX - m.clientX).width;
       this.layoutPanel();
@@ -1995,7 +2051,9 @@ class SessionView {
   /** An in-panel group's header clicked in the chat (or "N subagents running"): its entry opened, scrolled into view
    *  and highlighted for a second. The panel stops following, and the scroll made here does not turn it back on. */
   showInPanel(group) {
-    this.revealPanel();
+    // the entry is in Activity: bring it into the slot first (setRightPanel re-evaluates every view synchronously)
+    if (this.panelKind !== "activity") this.showPanel("activity");
+    else this.revealPanel();
     const entry = group._entry;
     entry.open = true;
     this.panelFollow = false;
@@ -2190,6 +2248,7 @@ class SessionView {
     card._toolCallId = toolCall?.toolCallId ?? null; // a mid-turn switch dismisses the cards of the tools it killed
     // a subagent's question (a background subagent runs on after the turn): see dismissPermissions
     card._agentId = ToolCalls.agentOf(toolCall) ?? ToolCalls.agentOf(this.tools.get(card._toolCallId)?.data);
+    card._pending = { kind: "permission", id: reqId };
     card._reqId = reqId; // ...and answers their requests
     card._group = this.tools.get(card._toolCallId)?.group ?? null; // its header shows ⏸ while the card is open
     if (card._group) {
@@ -2338,6 +2397,7 @@ class SessionView {
         promptSlot.replaceChildren(h("p", { class: "hint" }, `Could not read the prompt parts (${e.message}). Approve starts the session without an own part, with ${using}.`), ...commandMarks().filter(Boolean));
       })
       .finally(() => (approveBtn.disabled = false));
+    card._pending = { kind: "create", id: requestId, name };
     this.append(card);
     this.openCard(card);
   }
@@ -2406,6 +2466,7 @@ class SessionView {
       previewsEl,
       opts,
     );
+    card._pending = { kind: "reopen", id: requestId };
     this.append(card);
     this.openCard(card);
   }
@@ -2456,6 +2517,7 @@ class SessionView {
       ),
       opts,
     );
+    card._pending = { kind: "link", id: requestId };
     this.append(card);
     this.openCard(card);
   }
@@ -2476,6 +2538,11 @@ class SessionView {
     this.renderHoldSwitches();
   }
 
+  /** pendingCards changed: the Communication panel marks the waiting cards (comms-view). */
+  cardsChanged() {
+    commsRefresh();
+  }
+
   get needsAttention() {
     return !this.dead && this.openCards.size > 0;
   }
@@ -2483,11 +2550,21 @@ class SessionView {
   openCard(card) {
     this.setDrawer(false); // the question must be visible (permission, delegation, reopen and link cards)
     this.openCards.add(card);
+    const p = card._pending;
+    if (p && !this.pendingCards.some((c) => c.kind === p.kind && c.id === p.id)) {
+      this.pendingCards.push(p);
+      this.cardsChanged();
+    }
     renderList();
   }
 
   closeCard(card) {
     if (this.openCards.delete(card)) renderList();
+    const p = card._pending;
+    if (p && this.pendingCards.includes(p)) {
+      this.pendingCards = this.pendingCards.filter((c) => c !== p);
+      this.cardsChanged();
+    }
     const g = card._group;
     if (g && ![...this.openCards].some((c) => c._group === g)) {
       g._info.waiting = false;
@@ -2975,6 +3052,7 @@ function activate(id, { keepSchedules = false } = {}) {
   for (const [sid, v] of views) v.el.classList.toggle("active", sid === id);
   $("#empty").style.display = id ? "none" : "";
   renderList();
+  commsRefresh(); // the shown panel's timers tick
   const v = views.get(id);
   if (v && !v.dead) v.input.focus();
 }
@@ -3084,6 +3162,7 @@ function dropView(id) {
   early.delete(id);
   v?.el.remove();
   if (activeId === id) activate([...views.keys()].pop() ?? null, { keepSchedules: true });
+  commsRefresh(); // its node is closed now
 }
 
 /** Rebuild a closed session's view from its files (after its history changed or a delete failed); queued items
@@ -3498,6 +3577,9 @@ function loadUi() {
     chatScale: Number.isFinite(raw.chatScale) ? raw.chatScale : 1,
     panelWidth: Number.isFinite(raw.panelWidth) ? raw.panelWidth : UiState.PANEL.def, // the activity panel's width, every view's
     panelCollapsed: raw.panelCollapsed === true, // applies to the wide layout only
+    rightPanel: raw.rightPanel === "comms" ? "comms" : "activity", // which panel holds the right-hand slot
+    commsSplit: Number.isFinite(raw.commsSplit) && raw.commsSplit >= 0 && raw.commsSplit <= 1 ? raw.commsSplit : 0.5, // the graph's share of the Communication panel
+    commsSplitSet: raw.commsSplitSet === true, // you dragged the split: until then the graph gets the height it needs
   };
 }
 const ui = loadUi();
@@ -3648,18 +3730,163 @@ const viewer = (() => {
 })();
 function saveUi() {
   try {
-    const { pinned, collapsed, chatScale, panelWidth, panelCollapsed } = ui;
-    localStorage.setItem(UI_KEY, JSON.stringify({ pinned: [...pinned], collapsed: [...collapsed], chatScale, panelWidth, panelCollapsed }));
+    const { pinned, collapsed, chatScale, panelWidth, panelCollapsed, rightPanel, commsSplit, commsSplitSet } = ui;
+    localStorage.setItem(UI_KEY, JSON.stringify({ pinned: [...pinned], collapsed: [...collapsed], chatScale, panelWidth, panelCollapsed, rightPanel, commsSplit, commsSplitSet }));
   } catch {}
 }
 /** The activity panel's stored width or collapsed state changed: every view lays its panel out again. */
 function layoutPanels() {
   for (const v of views.values()) v.layoutPanel();
 }
+/** The right-hand slot's choice changed: stored, and every view re-evaluates what it shows. */
+function setRightPanel(kind) {
+  ui.rightPanel = kind;
+  saveUi();
+  for (const v of views.values()) v.updatePanelShown();
+}
+/** The Communication panel's content changed (a graph or log input, a pending card): every view showing it redraws,
+ *  once for a burst of calls (and safe to call while a view is being built: it draws once it is registered). */
+function commsRefresh() {
+  if (commsQueued) return;
+  commsQueued = true;
+  setTimeout(drawComms, 0);
+}
+/** The bare id of the top of id's tree (cycle-safe). */
+function commsRootOf(id) {
+  const seen = new Set([id]);
+  let cur = id;
+  for (let p = tree.parentOf.get(cur); p != null && !seen.has(p); p = tree.parentOf.get(cur)) seen.add((cur = p));
+  return cur;
+}
+const commsKeysOf = (rootId) => [rootId, ...SessionTree.descendants(tree, rootId)].map((id) => `cli:${id}`);
+/** Facts of the sessions open in this app for CommsModel.build's `live` (they override what links and peers say). */
+function commsLive() {
+  const live = {};
+  for (const [id, v] of views) {
+    const k = v.keeperState;
+    live[id] = {
+      online: !v.dead, busy: !v.dead && v.busy === true, ctx: lastUsage.get(id)?.context ?? undefined,
+      keeper: k && ["pinging", "countdown", "compacting"].includes(k.phase) ? k : undefined, cards: v.pendingCards,
+      name: v.relayName || (v.title ? shortTitle(v.title) : undefined), // for a node the broker names nowhere (an older one)
+    };
+  }
+  return live;
+}
+function drawComms() {
+  commsQueued = false;
+  clearTimeout(commsTicker);
+  commsTicker = null;
+  let tick = false;
+  const live = commsLive();
+  for (const v of views.values()) {
+    if (v.panelKind !== "comms") continue;
+    const rootKey = `cli:${commsRootOf(v.sessionId)}`;
+    if (v.commsRoot !== rootKey) Object.assign(v, { commsRoot: rootKey, commsFilter: null }); // another tree: no filter
+    const cached = commsByRoot.get(rootKey);
+    // not fetched yet, or (in a panel on screen) a failed / older broker's answer of more than 5 s ago: the broker may
+    // be back or restarted; what the panel shows stays until the answer comes
+    if (!cached || ((cached.error || cached.unsupported) && Date.now() - cached.at > 5000 && commsOnScreen(v))) fetchComms(rootKey);
+    const entry = commsByRoot.get(rootKey);
+    const comms = entry?.events ? { root: rootKey, keys: [...entry.keys], events: entry.events, peers: entry.peers } : null;
+    const model = CommsModel.build({ comms, links, heldByKind: heldByKindKey, current: v.sessionId, live, now: Date.now(), filter: v.commsFilter });
+    v.commsView ??= CommsView.create({
+      h, el: v.commsBody, on: {
+        openSession: (id) => openRelative(id),
+        fetchText: (id) => api.getCommsText(v.sessionId, id).then((r) => (typeof r?.text === "string" ? r.text : Promise.reject(new Error(r?.error ?? "not found")))),
+        filter: (f) => {
+          v.commsFilter = f;
+          commsRefresh();
+        },
+        split: (ratio, done) => {
+          ui.commsSplit = ratio;
+          if (done) {
+            ui.commsSplitSet = true; // your share from now on, not the graph's needed height
+            saveUi();
+            commsRefresh(); // every view's panel takes the new split
+          }
+        },
+        autoSplit: () => {
+          ui.commsSplitSet = false; // the graph's needed height again, in every view
+          saveUi();
+          commsRefresh();
+        },
+      },
+    });
+    const note = entry?.loading ? "Loading the message history…" : entry?.error ? `Could not load the message history: ${entry.error}` : null;
+    v.commsView.render(model, { split: ui.commsSplit, autoSplit: !ui.commsSplitSet, filter: v.commsFilter, note });
+    if (v.el.classList.contains("active") && CommsView.hasTimer(model)) tick = true;
+  }
+  if (tick) commsTicker = setTimeout(commsRefresh, 1000);
+}
+/** The view's Communication panel is on the screen (its view active, the panel neither collapsed nor a closed drawer). */
+const commsOnScreen = (v) => v.panelKind === "comms" && v.el.classList.contains("active") && v.commsPanel.checkVisibility();
+/** Fetches the log of the tree whose root is rootKey; what it held (the events, a failure or an older broker's note)
+ *  stays shown until the answer comes; only the first load shows "Loading…". */
+function fetchComms(rootKey) {
+  if (commsFetching.has(rootKey)) return;
+  const pushed = [];
+  commsFetching.set(rootKey, pushed);
+  const held = commsByRoot.get(rootKey);
+  if (!held || held.loading) commsByRoot.set(rootKey, { loading: true, keys: new Set(commsKeysOf(rootKey.slice(4))) });
+  const done = (r) => {
+    if (commsFetching.get(rootKey) !== pushed) return;
+    commsFetching.delete(rootKey);
+    const at = Date.now();
+    const prev = commsByRoot.get(rootKey);
+    if (r?.unsupported) commsByRoot.set(rootKey, { unsupported: true, at });
+    else if (!Array.isArray(r?.events)) {
+      if (!prev?.events) commsByRoot.set(rootKey, { error: r?.error ?? "no answer", at });
+      // a failed first load is tried once more in 5 s; later failures only when a panel on screen draws it (drawComms)
+      if (prev?.loading) setTimeout(() => commsByRoot.get(rootKey)?.error && fetchComms(rootKey), 5000);
+    } else {
+      const ids = new Set(r.events.map((e) => e.id));
+      const events = [...r.events, ...pushed.filter((e) => !ids.has(e.id))]; // what came while the broker answered
+      for (const e of events) ids.add(e.id);
+      const keys = new Set([...(Array.isArray(r.keys) ? r.keys : []), ...commsKeysOf(rootKey.slice(4))]);
+      commsByRoot.set(rootKey, { root: rootKey, keys, events, peers: r.peers ?? {}, ids, at, tree: commsTreeOf(rootKey) });
+    }
+    if (commsStale.delete(rootKey) && commsByRoot.has(rootKey)) commsRefetchSoon(rootKey); // the links changed meanwhile
+    commsRefresh();
+  };
+  api.getComms(rootKey.slice(4)).then(done, (e) => done({ error: e.message }));
+}
+/** The sessions of the tree under rootKey as this app's links see them (to tell whether it gained or lost any). */
+const commsTreeOf = (rootKey) => commsKeysOf(rootKey.slice(4)).sort().join(" ");
+/** The tree's log fetched again soon: at once when the last answer is 2 s old, else when it is (one timer per tree);
+ *  a fetch running now is followed by another once it answers. */
+function commsRefetchSoon(rootKey) {
+  if (commsSoon.has(rootKey)) return;
+  const wait = Math.max(0, (commsByRoot.get(rootKey)?.at ?? 0) + 2000 - Date.now());
+  commsSoon.set(rootKey, setTimeout(() => {
+    commsSoon.delete(rootKey);
+    if (!commsByRoot.get(rootKey)?.events) return; // dropped, or not loaded (a first load or a failure has its own retry)
+    if (commsFetching.has(rootKey)) commsStale.add(rootKey);
+    else fetchComms(rootKey);
+  }, wait));
+}
+/** The links changed: a cached tree whose root is no longer a root is dropped (fetched again under its new root when
+ *  shown); a loaded tree is fetched again (at most every 2 s) when it gained or lost sessions, and on every change
+ *  while a panel shows it (links_changed follows every peer change: the root's and outside nodes' online/busy come
+ *  from the answer's peers). A failed or older broker's answer is retried by a panel on screen (drawComms). */
+function commsLinksChanged() {
+  const shown = new Set([...views.values()].filter((v) => v.panelKind === "comms").map((v) => `cli:${commsRootOf(v.sessionId)}`));
+  for (const [rootKey, entry] of commsByRoot) {
+    const id = rootKey.slice(4);
+    if (commsRootOf(id) !== id || !tree.childrenOf.get(id)?.length) {
+      commsByRoot.delete(rootKey);
+      continue;
+    }
+    if (!shown.has(rootKey) && entry.tree === commsTreeOf(rootKey)) continue;
+    if (commsFetching.has(rootKey)) commsStale.add(rootKey); // its answer may predate the change
+    else if (entry.events) commsRefetchSoon(rootKey);
+  }
+  commsRefresh();
+}
 function setPanelCollapsed(collapsed) {
   ui.panelCollapsed = collapsed;
   saveUi();
   layoutPanels();
+  if (!collapsed) commsRefresh(); // a Communication panel back on screen retries a failed load (drawComms)
 }
 
 /** Collapse / expand one project in place (no re-render, so the transition runs). */
@@ -3958,6 +4185,8 @@ function setLinks(next) {
   heldByKey = (!Array.isArray(next) && next?.held) || {};
   heldByKindKey = (!Array.isArray(next) && next?.heldByKind) || {};
   tree = SessionTree.index(links);
+  for (const v of views.values()) v.updatePanelShown(); // a session may have joined or left a tree
+  commsLinksChanged();
   renderList(); // redraws the relation bars too
 }
 api.onLinks((l) => {
@@ -3990,6 +4219,24 @@ const lastUsage = new Map();
 api.onUsage(({ sessionId, view }) => {
   lastUsage.set(sessionId, view);
   forView(sessionId, (v) => v.usage(view));
+  commsRefresh(); // the node's context bar
+});
+// a communication event of any tree: appended (once) to every cached tree it belongs to
+api.onCommsEvent((event) => {
+  if (!event?.id) return;
+  let changed = false;
+  for (const [rootKey, entry] of commsByRoot) {
+    const pushed = commsFetching.get(rootKey);
+    const mine = event.kind === "status" ? !!pushed || !!entry.ids?.has(event.ref) : !!(entry.keys?.has(event.fromKey) || entry.keys?.has(event.toKey));
+    if (!mine) continue;
+    if (pushed && !pushed.some((e) => e.id === event.id)) pushed.push(event);
+    if (entry.ids && !entry.ids.has(event.id)) {
+      entry.ids.add(event.id);
+      entry.events.push(event);
+      changed = true;
+    }
+  }
+  if (changed) commsRefresh();
 });
 
 $("#btn-new").addEventListener("click", () => newSession());

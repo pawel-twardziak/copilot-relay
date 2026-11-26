@@ -2,6 +2,7 @@
 // run(app) }, each throwing on failure. app is a driver (driver.mjs) launched with the check's scenario (default
 // panel-scenario.mjs), settings, sessionId, broker and env, its mode already set.
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -9,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { LATE_TEXT } from "../../electron/test/fixtures/acp/late-group-scenario.mjs";
 import { PARTS } from "../../electron/test/fixtures/acp/panel-scroll-scenario.mjs";
 import { RUNNING_TITLE } from "../../electron/test/fixtures/acp/tool-split-scenario.mjs";
+import { SLOW } from "../../electron/test/fixtures/acp/comms-scenario.mjs";
 import { CHILD_PART, DEFAULT_PART } from "../../electron/session-prompts.mjs";
 import { REMINDER } from "../../electron/delegation.mjs";
 import { KEEPALIVE_MARKER } from "../../electron/cache-keeper.mjs";
@@ -65,7 +67,8 @@ const savedMode = (app) => app.ev(`api.getSettings().then((s) => s.activityPanel
 
 /** What breaks "every group's body is where the mode says" in the page, one message each (none: it holds): inline
  *  the body is inside its group, in a panel mode inside the group's entry in panelBody; the entries are those of the
- *  log's panel groups, in log order; the panel is hidden exactly when it has no entry. */
+ *  log's panel groups, in log order; the panel holds the slot exactly when it has an entry (and the session belongs to
+ *  no tree, or Activity is the chosen one), and is hidden exactly when it does not hold it. */
 function placementErrors(app, mode) {
   return app.ev(`(() => {
     const v = ${V}, mode = ${JSON.stringify(mode)}, errors = [];
@@ -85,7 +88,9 @@ function placementErrors(app, mode) {
     const entries = [...v.panelBody.children];
     const expected = groups.filter(inPanel).map((g) => g._entry);
     if (entries.length !== expected.length || entries.some((e, i) => e !== expected[i])) errors.push("the panel's entries are not those of the log's panel groups in log order");
-    if (v.panel.hidden !== !entries.length) errors.push("panel.hidden is " + v.panel.hidden + " with " + entries.length + " entries");
+    const activity = !!entries.length && (!v.commsAvailable || ui.rightPanel === "activity");
+    if ((v.panelKind === "activity") !== activity) errors.push("panelKind is " + v.panelKind + " with " + entries.length + " entries");
+    if (v.panel.hidden !== (v.panelKind !== "activity")) errors.push("panel.hidden is " + v.panel.hidden + " with panelKind " + v.panelKind);
     if (v.activityBtn.hidden !== !entries.length) errors.push("the Activity button's hidden is " + v.activityBtn.hidden + " with " + entries.length + " entries");
     return errors;
   })()`);
@@ -171,8 +176,8 @@ async function followingPanel(app) {
 // a folder that does not exist: the broker-restart check restarts nothing
 const NO_BROKER_REPO = path.join(os.tmpdir(), "copilot-relay-ui-check-no-such-repo");
 const LONG_WAIT_SCENARIO = path.join(FIXTURES, "panel-long-wait-scenario.mjs");
-/** The view's panel as you see it: its width in real pixels, 0 when it is not shown. */
-const panelWidth = (app, v = V) => app.ev(`(() => { const p = ${v}.panel; return p.checkVisibility() ? Math.round(p.getBoundingClientRect().width) : 0; })()`);
+/** The view's panel as you see it (the one in the right-hand slot): its width in real pixels, 0 when it is not shown. */
+const panelWidth = (app, v = V) => app.ev(`(() => { const p = ${v}.shownPanel() ?? ${v}.panel; return p.checkVisibility() ? Math.round(p.getBoundingClientRect().width) : 0; })()`);
 const shown = (app, el) => app.ev(`${el}.checkVisibility()`);
 /** Drags the view's handle dx px (negative: left) with the pointer, as you would; then waits for the layout. */
 async function dragHandle(app, dx, v = V) {
@@ -685,6 +690,487 @@ const keeperChecks = [
     assert.deepEqual(agentPrompts(app), ["hello"], "nothing must be sent after hello");
     assert.equal(await keeperChip(app), null);
   }),
+];
+
+// --- the Communication panel (comms-*): a tree through a real broker. Every session lives in a folder named by a UUID,
+// so its id is that UUID (the scripted agent takes such a folder name as the id; main serves comms:get and comms:text
+// for UUID session ids only).
+const COMMS_SCENARIO = path.join(FIXTURES, "comms-scenario.mjs");
+const J = JSON.stringify;
+const VC = (id) => `views.get(${J(id)})`;
+const relayConnected = (id) => `(() => { const v = ${VC(id)}; return !!v?.relayName && !v.relayChip.hidden && !v.relayChip.classList.contains("off"); })()`;
+/** A new session in a new UUID folder of the launch, connected to the broker and idle; its id. */
+async function commsSession(app, dir = app.dir) {
+  const id = randomUUID();
+  mkdirSync(path.join(dir, id));
+  await app.startSession(path.join(dir, id));
+  await app.check(`${relayConnected(id)} && !${VC(id)}.busy`, `session ${id} to connect to the broker`);
+  return id;
+}
+/** Types text into the view's message box and presses Enter; resolves once its message is in the log, and (unless
+ *  idle is false) once the turn has ended. */
+async function commsSend(app, id, text, { idle = true } = {}) {
+  const mine = `${VC(id)}.log.querySelectorAll(":scope > .msg.user").length`;
+  const before = await app.ev(mine);
+  await app.ev(`(() => { const v = ${VC(id)}; v.input.value = ${J(text)}; v.input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); })()`);
+  await app.check(`${mine} > ${before}`, `the message to ${id} to be sent`);
+  if (idle) await app.check(`!${VC(id)}.busy`, `the turn of ${id} to end`);
+}
+/** The parent asks for a child (create_session in a new UUID folder) and its card is approved: the child's view is
+ *  open, connected, under the parent in the tree; its id. */
+async function commsChild(app, parent, name, task) {
+  const id = randomUUID();
+  mkdirSync(path.join(app.dir, id));
+  await commsSend(app, parent, `create_session_json ${J({ name, task, folder: path.join(app.dir, id) })}`, { idle: false });
+  const card = `[...${VC(parent)}.el.querySelectorAll(".perm.delegation")].at(-1)`;
+  await app.check(`!!${card} && !${card}.classList.contains("done") && !${card}.querySelector(".opts button.primary").disabled`, `the card for ${name}`);
+  await app.ev(`${card}.querySelector(".opts button.primary").click()`);
+  await app.check(`!!${VC(id)} && ${relayConnected(id)}`, `the view of ${name}`);
+  await app.check(`!${VC(parent)}.busy && tree.parentOf.get(${J(id)}) === ${J(parent)}`, `${name} under its parent`);
+  return id;
+}
+/** What the view's right-hand slot shows (the view must be the active one: a hidden view shows nothing). */
+const slotOf = (app, id) => app.ev(`(() => {
+  const v = ${VC(id)};
+  return { kind: v.panelKind, activity: v.panel.checkVisibility(), comms: v.commsPanel.checkVisibility(), activityBtn: !v.activityBtn.hidden, commsBtn: !v.commsBtn.hidden };
+})()`);
+/** The graph's nodes in the view's Communication panel: id, classes, status line and whether that line shows whole. */
+const graphNodes = (app, id) => app.ev(`[...${VC(id)}.commsBody.querySelectorAll(".cn")].map((n) => {
+  const s = n.querySelector(".cn-status"), sr = s.getBoundingClientRect(), nr = n.getBoundingClientRect();
+  return { id: n.dataset.id, cls: [...n.classList], name: n.querySelector(".cn-name").textContent, status: s.textContent,
+    whole: s.scrollWidth <= s.clientWidth && sr.left >= nr.left && sr.right <= nr.right };
+})`);
+const nodeOf = async (app, view, id) => (await graphNodes(app, view)).find((n) => n.id === id);
+/** The classes of the edge from → to in the view's graph (null: no such edge). */
+const edgeClasses = (app, view, from, to) => app.ev(`${VC(view)}.commsBody.querySelector(${J(`.ce-lines > g[data-from="${from}"][data-to="${to}"]`)})?.getAttribute("class").split(" ") ?? null`);
+const commsPart = (view, sel) => `${VC(view)}.commsBody.querySelector(${J(sel)})`;
+/** Heights (px) of the Communication panel's parts. */
+const commsHeights = (app, view) => app.ev(`(() => {
+  const b = ${VC(view)}.commsBody, q = (s) => b.querySelector(s).getBoundingClientRect().height;
+  return { body: b.clientHeight, graph: q(".comms-graph"), bar: q(".comms-split"), summary: q(".comms-summary"), log: q(".comms-log") };
+})()`);
+/** Drags the split bar dy px (negative: up) with the pointer, as you would; then waits for the layout. */
+async function dragSplit(app, view, dy) {
+  await app.ev(`(() => {
+    const bar = ${commsPart(view, ".comms-split")}, r = bar.getBoundingClientRect();
+    const x = r.left + r.width / 2, y = r.top + r.height / 2;
+    const ev = (type, clientY) => new PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 1, isPrimary: true, pointerType: "mouse", button: 0, buttons: type === "pointerup" ? 0 : 1, clientX: x, clientY });
+    bar.dispatchEvent(ev("pointerdown", y));
+    document.body.dispatchEvent(ev("pointermove", y + ${dy} / 2));
+    document.body.dispatchEvent(ev("pointermove", y + ${dy}));
+    document.body.dispatchEvent(ev("pointerup", y + ${dy}));
+  })()`);
+  await frames(app);
+}
+/** A parent (the active view) with the Communication panel shown, and its children (names), created in order. */
+async function commsTree(app, names) {
+  const parent = await commsSession(app);
+  const kids = [];
+  for (const name of names) kids.push(await commsChild(app, parent, name, `Do the ${name} part.`));
+  await activate(app, parent);
+  return { parent, kids };
+}
+
+const commsChecks = [
+  {
+    // the Communication button only while the session belongs to a tree; the two header buttons switch the slot and
+    // exactly one of the two panels shows; the shown one's button collapses it; the choice is stored and comes back
+    // after a relaunch (also over Activity, which the session has too)
+    name: "comms-switch",
+    modes: ["all"],
+    scenario: COMMS_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      const parent = await commsSession(app);
+      await commsSend(app, parent, "work");
+      await app.check(`!!${VC(parent)}.panelBody.firstElementChild`, "an Activity entry");
+      await frames(app);
+      assert.deepEqual(await slotOf(app, parent), { kind: "activity", activity: true, comms: false, activityBtn: true, commsBtn: false }, "no tree: Activity only, no Communication button");
+      const kid = await commsChild(app, parent, "helper", "Help.");
+      await activate(app, parent);
+      assert.deepEqual(await slotOf(app, parent), { kind: "activity", activity: true, comms: false, activityBtn: true, commsBtn: true }, "a child: the Communication button, Activity still chosen");
+
+      await app.ev(`${VC(parent)}.commsBtn.click()`);
+      await frames(app);
+      assert.deepEqual(await slotOf(app, parent), { kind: "comms", activity: false, comms: true, activityBtn: true, commsBtn: true }, "Communication switches the slot");
+      await app.check(`${VC(parent)}.commsBody.querySelectorAll(".cn").length === 2`, "the graph of parent and child");
+      assert.equal(JSON.parse(await storedUi(app)).rightPanel, "comms", "the choice is stored");
+      await app.ev(`${VC(parent)}.activityBtn.click()`);
+      await frames(app);
+      assert.deepEqual(await slotOf(app, parent), { kind: "activity", activity: true, comms: false, activityBtn: true, commsBtn: true }, "Activity switches back");
+      assert.equal(JSON.parse(await storedUi(app)).rightPanel, "activity");
+      await app.ev(`${VC(parent)}.commsBtn.click()`);
+      await frames(app);
+      assert.equal((await slotOf(app, parent)).comms, true, "Communication again");
+      // the shown panel's button collapses it (nothing shows) and brings it back
+      await app.ev(`${VC(parent)}.commsBtn.click()`);
+      await frames(app);
+      assert.deepEqual(await slotOf(app, parent), { kind: "comms", activity: false, comms: false, activityBtn: true, commsBtn: true }, "collapsed");
+      await app.ev(`${VC(parent)}.commsBtn.click()`);
+      await frames(app);
+      assert.deepEqual(await slotOf(app, parent), { kind: "comms", activity: false, comms: true, activityBtn: true, commsBtn: true }, "shown again");
+
+      // the child's view follows the stored choice (it has no Activity entry)
+      await activate(app, kid);
+      assert.deepEqual(await slotOf(app, kid), { kind: "comms", activity: false, comms: true, activityBtn: false, commsBtn: true }, "the child shows Communication");
+
+      // relaunched (a new broker with the same state files): the parent's replay has its Activity entry again, the
+      // stored choice wins
+      await app.close({ keep: true });
+      const again = await launch({ scenario: COMMS_SCENARIO, dir: app.dir, broker: true });
+      try {
+        assert.equal(await again.ev("ui.rightPanel"), "comms", "the choice read back");
+        await again.ev(`openSession({ sessionId: ${J(parent)}, cwd: ${J(path.join(app.dir, parent))} })`, "the parent to reopen");
+        await again.check(`(() => { const v = ${VC(parent)}; return v && !v.busy && !v.resuming && !!v.panelBody.firstElementChild; })()`, "the replay");
+        await again.check(`tree.parentOf.get(${J(kid)}) === ${J(parent)}`, "the link from the broker");
+        await again.check(`${VC(parent)}.panelKind === "comms"`, "Communication in the slot");
+        await frames(again);
+        assert.deepEqual(await slotOf(again, parent), { kind: "comms", activity: false, comms: true, activityBtn: true, commsBtn: true }, "after the relaunch");
+      } finally {
+        await again.close();
+      }
+    },
+  },
+  {
+    // a parent with two children through a real broker: three nodes; a child working on its task (a permission it
+    // waits on) has the working state, its clock in full on its status line, and the parent's edge to it in progress;
+    // its report_result turns it into waiting for a task and adds a report row, whose expansion fetches the whole text
+    name: "comms-graph-e2e",
+    modes: ["off"],
+    scenario: COMMS_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      const parent = await commsSession(app);
+      const slow = await commsChild(app, parent, "log-analyst", `Analyse the logs ${SLOW}`);
+      await app.check(`${VC(slow)}.busy && !!${VC(slow)}.el.querySelector(".perm:not(.done)")`, "the slow child at work");
+      const quick = await commsChild(app, parent, "migration-writer", "Write the migration.");
+      await app.check(`!${VC(quick)}.busy`, "the quick child's task done");
+      await activate(app, parent);
+      assert.deepEqual(await slotOf(app, parent), { kind: "comms", activity: false, comms: true, activityBtn: false, commsBtn: true }, "Communication in the slot (mode off: no Activity)");
+      await app.check(`${VC(parent)}.commsBody.querySelectorAll(".cn").length === 3`, "three nodes");
+      const nodes = await graphNodes(app, parent);
+      assert.deepEqual(nodes.map((n) => n.id).sort(), [parent, slow, quick].sort(), "the parent and its two children");
+      assert.ok(nodes.every((n) => !n.cls.includes("outside")), "all in the tree");
+      assert.ok(nodes.find((n) => n.id === parent).cls.includes("current"), "the parent's node is the current one");
+      const relayNames = await app.ev(`[${J(parent)}, ${J(slow)}, ${J(quick)}].map((id) => views.get(id).relayName)`);
+      assert.match(relayNames[1], /^log-analyst-/);
+      assert.deepEqual(nodes.map((n) => n.name).sort(), [...relayNames].sort(), "the relay names");
+
+      // the slow child works: its clock first and whole, ticking; the parent's edge to it in progress
+      await app.check(`!!${commsPart(parent, `.cn[data-id="${slow}"].st-working`)}`, "the working child");
+      const working = await nodeOf(app, parent, slow);
+      assert.match(working.status, /^\d+:\d\d working$/, `the status line: ${working.status}`);
+      assert.equal(working.whole, true, `the status line shows whole: ${working.status}`);
+      await until(async () => (await nodeOf(app, parent, slow)).status !== working.status, "the clock to tick");
+      assert.ok((await edgeClasses(app, parent, parent, slow)).includes("live-in-progress"), "the parent's edge to the working child");
+      // the quick child did its task without a report: the parent waits for it
+      const quickNode = await nodeOf(app, parent, quick);
+      assert.match(quickNode.status, /^\d+:\d\d report due$/, `the quick child's status: ${quickNode.status}`);
+      assert.equal(quickNode.whole, true);
+      assert.ok((await edgeClasses(app, parent, quick, parent)).includes("live-waiting-report"));
+      const taskRows = await app.ev(`[...${VC(parent)}.commsBody.querySelectorAll(".cl-row.k-task")].length`);
+      assert.equal(taskRows, 2, "a task row per child");
+
+      // the work ends and the child reports (a text longer than the preview)
+      await app.ev(`${VC(slow)}.el.querySelector(".perm:not(.done) .opts button.primary").click()`);
+      await app.check(`!${VC(slow)}.busy`, "the slow child's turn to end");
+      const report = `Found three issues in the logs. ${words(12, "The cache leaks under load and the retries pile up.")} End of report.`;
+      assert.ok(report.length > 400);
+      await commsSend(app, slow, `report_result ${report}`);
+      await app.check(`!!${commsPart(parent, `.cn[data-id="${slow}"].st-waiting-task`)}`, "the reported child waits for a task");
+      assert.equal((await edgeClasses(app, parent, parent, slow)).includes("live-in-progress"), false, "no task in progress any more");
+      const row = `${commsPart(parent, ".cl-row.k-report")}`;
+      await app.check(`!!${row}`, "the report row");
+      const preview = await app.ev(`${row}.querySelector(".cl-text").textContent`);
+      assert.ok(preview.endsWith("…") && preview.length < report.length && report.startsWith(preview.slice(0, -1)), `the preview: ${preview}`);
+      assert.equal(await app.ev(`${row}.querySelector(".cl-route").textContent`), `${relayNames[1]} → ${relayNames[0]}`);
+      await app.ev(`${row}.click()`);
+      await app.check(`${row}.classList.contains("open") && ${row}.querySelector(".cl-text").textContent === ${J(report)}`, "the whole report in the expanded row");
+    },
+  },
+  {
+    // dragging the bar between graph and log changes the split and stores it (every view of the tree takes it); each
+    // part keeps at least 120 px however far it is dragged
+    name: "comms-split",
+    modes: ["off"],
+    scenario: COMMS_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      const { parent, kids } = await commsTree(app, ["helper"]);
+      await app.check(`${VC(parent)}.commsBody.querySelectorAll(".cn").length === 2`, "the graph");
+      await frames(app);
+      const start = await commsHeights(app, parent);
+      const total = start.body - start.bar - start.summary;
+      assert.ok(total >= 300, `room for both parts: ${total} px`);
+      assert.equal(await app.ev("ui.commsSplitSet"), false, "not dragged yet");
+      const dy = start.graph - 60 >= 140 ? -60 : 60; // within the limits from where the graph starts
+      await dragSplit(app, parent, dy);
+      const moved = await commsHeights(app, parent);
+      assert.ok(Math.abs(moved.graph - (start.graph + dy)) <= 1, `the graph follows the bar (no jump where it was grabbed): ${start.graph} → ${moved.graph}`);
+      const split = await app.ev("ui.commsSplit");
+      assert.ok(Math.abs(split - moved.graph / total) < 0.01, `the share ${split} for ${moved.graph} of ${total} px`);
+      const stored = JSON.parse(await storedUi(app));
+      assert.deepEqual([stored.commsSplit, stored.commsSplitSet], [split, true], "stored");
+      // far up and far down: each part keeps its 120 px
+      for (const dy of [-2000, 4000]) {
+        await dragSplit(app, parent, dy);
+        const h = await commsHeights(app, parent);
+        assert.ok(h.graph >= 119.5 && h.log >= 119.5, `dragged ${dy} px: graph ${h.graph}, log ${h.log}`);
+        assert.ok(Math.abs(h.graph + h.log - total) <= 2, `the two parts fill the panel: ${h.graph} + ${h.log} of ${total}`);
+      }
+      const last = await commsHeights(app, parent);
+      assert.ok(Math.abs(last.log - 120) <= 1, `the log at its minimum: ${last.log}`);
+      // the child's view of the same tree takes the stored split
+      await activate(app, kids[0]);
+      await frames(app);
+      assert.ok(Math.abs((await commsHeights(app, kids[0])).graph - last.graph) <= 1, "the same split in the child's view");
+    },
+  },
+  {
+    // a narrow window: the panel is a drawer over the log; a tree too big for it scrolls in the graph area, its labels
+    // keep the UI font (size and family)
+    name: "comms-narrow",
+    modes: ["off"],
+    scenario: COMMS_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      const { parent } = await commsTree(app, ["first-helper", "second-helper", "third-helper"]);
+      await app.resize(620, 520);
+      await frames(app);
+      const P = VC(parent);
+      assert.equal(await app.ev(`${P}.isNarrow()`), true, "the narrow layout");
+      assert.equal((await slotOf(app, parent)).comms, false, "the drawer closed");
+      await app.ev(`${P}.commsBtn.click()`);
+      await frames(app);
+      assert.deepEqual(await slotOf(app, parent), { kind: "comms", activity: false, comms: true, activityBtn: false, commsBtn: true }, "Communication opens the drawer");
+      const over = await app.ev(`(() => {
+        const v = ${P}, p = v.commsPanel.getBoundingClientRect(), r = v.row.getBoundingClientRect();
+        return { position: getComputedStyle(v.commsPanel).position, right: p.right === r.right, logWidth: v.log.offsetWidth === v.row.clientWidth, width: Math.round(p.width) };
+      })()`);
+      assert.deepEqual(over, { position: "absolute", right: true, logWidth: true, width: 280 }, "the drawer over the log");
+      await app.check(`${P}.commsBody.querySelectorAll(".cn").length === 4`, "four nodes");
+      await frames(app);
+      const fit = await app.ev(`(() => {
+        const g = ${P}.commsBody.querySelector(".comms-graph"), body = getComputedStyle(document.body);
+        const ui = parseFloat(body.fontSize);
+        const labels = [...g.querySelectorAll(".cn-name, .cn-status, .ce-label text")].filter((e) => e.checkVisibility());
+        const small = labels.filter((e) => parseFloat(getComputedStyle(e).fontSize) < ui - 0.01).map((e) => e.textContent + " " + getComputedStyle(e).fontSize);
+        const family = labels.filter((e) => getComputedStyle(e).fontFamily !== body.fontFamily).map((e) => e.textContent + " " + getComputedStyle(e).fontFamily);
+        const widths = [...g.querySelectorAll(".cn")].map((n) => n.getBoundingClientRect().width);
+        return { ui, labels: labels.length, small, family, minWidth: Math.min(...widths), scrolls: g.scrollHeight > g.clientHeight + 1 || g.scrollWidth > g.clientWidth + 1, overflow: getComputedStyle(g).overflow };
+      })()`);
+      assert.ok(fit.labels >= 8, `labels found: ${fit.labels}`);
+      assert.deepEqual(fit.small, [], `no label below the UI font (${fit.ui} px)`);
+      assert.deepEqual(fit.family, [], "every label in the UI font");
+      assert.ok(fit.minWidth >= 139.5, `boxes at least 140 px wide: ${fit.minWidth}`);
+      assert.equal(fit.scrolls, true, "the graph area scrolls");
+      assert.equal(fit.overflow, "auto");
+      // its button closes the drawer again
+      await app.ev(`${P}.commsBtn.click()`);
+      await frames(app);
+      assert.equal((await slotOf(app, parent)).comms, false, "the drawer closed");
+    },
+  },
+  {
+    // sessions of one tree show the same graph: opening a child from the parent's graph (double click) shows the same
+    // nodes at once, from the cache (no fetch, no node removed or redrawn); a released child loses its Communication
+    // button and falls back to Activity, while the parent's graph marks it released
+    name: "comms-same-tree",
+    modes: ["all"],
+    scenario: COMMS_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      const { parent, kids: [kid, other] } = await commsTree(app, ["helper", "second-helper"]);
+      // an Activity entry in both: Communication is the stored choice, not the only panel there is
+      for (const id of [kid, parent]) await commsSend(app, id, "work");
+      await activate(app, parent);
+      await app.ev(`${VC(parent)}.commsBtn.click()`);
+      await app.check(`ui.rightPanel === "comms" && ${VC(parent)}.panelKind === "comms"`, "Communication chosen");
+      await app.check(`${VC(parent)}.commsBody.querySelectorAll(".cn").length === 3`, "the parent's graph");
+      // (and no refetch after a links change still due)
+      await app.check(`!commsFetching.size && !commsSoon.size && !commsStale.size && !!commsByRoot.get(${J(`cli:${parent}`)})?.events`, "the tree's log fetched");
+      await frames(app);
+      const ids = (await graphNodes(app, parent)).map((n) => n.id).sort();
+      // watch the child's panel from here on: a node removed (its first draw only adds them) or a note over the log
+      await app.ev(`(() => {
+        window.__entry = commsByRoot.get(${J(`cli:${parent}`)});
+        window.__mutations = [];
+        window.__watch = new MutationObserver((list) => {
+          for (const m of list) {
+            for (const n of m.removedNodes) if (n.nodeType === 1 && (n.matches(".cn") || n.querySelector(".cn"))) __mutations.push("removed " + n.className);
+            for (const n of m.addedNodes) if (n.nodeType === 1 && n.matches(".cl-note")) __mutations.push("note " + n.textContent);
+          }
+        });
+        __watch.observe(${VC(kid)}.commsBody, { childList: true, subtree: true });
+        return true;
+      })()`);
+      await app.ev(`${commsPart(parent, `.cn[data-id="${kid}"]`)}.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }))`);
+      await app.check(`activeId === ${J(kid)}`, "the child's view active");
+      await frames(app);
+      await frames(app);
+      const kidSlot = await slotOf(app, kid);
+      assert.deepEqual(kidSlot, { kind: "comms", activity: false, comms: true, activityBtn: true, commsBtn: true }, "the child shows Communication too");
+      const kidNodes = await graphNodes(app, kid);
+      assert.deepEqual(kidNodes.map((n) => n.id).sort(), ids, "the same nodes");
+      assert.ok(kidNodes.find((n) => n.id === kid).cls.includes("current"), "the child's own node highlighted");
+      assert.ok(!kidNodes.find((n) => n.id === parent).cls.includes("current"));
+      assert.equal(await app.ev(`commsByRoot.get(${J(`cli:${parent}`)}) === __entry && !commsFetching.size`), true, "no fetch: the tree's cached log");
+      assert.deepEqual(await app.ev("(__watch.disconnect(), __mutations)"), [], "no node removed, no note in the child's panel");
+      assert.equal(await app.ev(`!!${commsPart(kid, ".cl-note")}`), false, "no note over the log");
+
+      // the parent releases the child: its Communication button goes, Activity holds the slot
+      await activate(app, parent);
+      const kidName = await app.ev(`${VC(kid)}.relayName`);
+      await commsSend(app, parent, `release_session ${kidName}`, { idle: false });
+      await app.check(`!!${VC(parent)}.el.querySelector(".perm.link:not(.done)")`, "the release card");
+      await app.ev(`${VC(parent)}.el.querySelector(".perm.link:not(.done) .opts button.primary").click()`);
+      await app.check(`tree.parentOf.get(${J(kid)}) == null`, "the child released");
+      await app.check(`${VC(kid)}.panelKind === "activity"`, "the child falls back to Activity");
+      await activate(app, kid);
+      assert.deepEqual(await slotOf(app, kid), { kind: "activity", activity: true, comms: false, activityBtn: true, commsBtn: false }, "the released child: Activity, no Communication button");
+      assert.equal(await app.ev("ui.rightPanel"), "comms", "the stored choice stays");
+      // the parent keeps its tree (the other child) and shows the released one apart
+      await activate(app, parent);
+      assert.equal((await slotOf(app, parent)).comms, true, "the parent still shows Communication");
+      await app.check(`!!${commsPart(parent, `.cn.released[data-id="${kid}"]`)}`, "the released child marked in the parent's graph");
+      assert.ok((await graphNodes(app, parent)).some((n) => n.id === other && !n.cls.includes("outside")), "the other child still in the tree");
+    },
+  },
+  {
+    // the panel follows the broker after its first load: the root's view closed (its online state comes from the
+    // broker's peers, it has no link) turns its node closed in a child's panel; a child forgotten by the broker (a
+    // delete) leaves the graph and the log with its events
+    name: "comms-refresh",
+    modes: ["off"],
+    scenario: COMMS_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      const { parent, kids: [kid, other] } = await commsTree(app, ["helper", "second-helper"]);
+      const otherName = await app.ev(`${VC(other)}.relayName`);
+      await activate(app, kid);
+      await app.check(`${VC(kid)}.commsBody.querySelectorAll(".cn").length === 3`, "the child's graph");
+      await app.check(`!!${commsPart(kid, `.cn[data-id="${parent}"]:not(.st-closed)`)}`, "the open root not closed");
+      // the routes of the log's rows (the relay's notices to the parent name the child in their text, not their route)
+      const routes = () => app.ev(`[...${VC(kid)}.commsBody.querySelectorAll(".cl-row .cl-route")].map((r) => r.textContent)`);
+      assert.ok((await routes()).some((t) => t.includes(otherName)), "the other child's task row");
+
+      // the root's view closes (only it): its node turns closed from the broker's fresh peers
+      await app.ev(`closeViews([${J(parent)}])`);
+      await app.check(`!views.has(${J(parent)})`, "the root's view to close");
+      await app.check(`!!${commsPart(kid, `.cn[data-id="${parent}"].st-closed`)}`, "the closed root's node closed");
+
+      // the other child is closed and forgotten (as a delete does): its node and its rows go
+      await app.ev(`closeViews([${J(other)}])`);
+      await app.check(`!views.has(${J(other)})`, "the other child's view to close");
+      await app.ev(`api.forgetLinks([${J(`cli:${other}`)}])`);
+      await app.check(`tree.parentOf.get(${J(other)}) === undefined`, "the forgotten child out of the links");
+      await app.check(`!${commsPart(kid, `.cn[data-id="${other}"]`)}`, "the forgotten child's node to go");
+      const left = await routes();
+      assert.equal(left.some((t) => t.includes(otherName)), false, `no row of the forgotten child: ${JSON.stringify(left)}`);
+      assert.deepEqual((await graphNodes(app, kid)).map((n) => n.id).sort(), [parent, kid].sort(), "the root and the child left");
+    },
+  },
+  {
+    // a failed load: "Loading…" only for the first one, then the failure stays on screen; one timed retry, after it no
+    // fetch while no panel shows the tree; a panel back on screen fetches again (at most every 5 s) keeping the failure
+    // (or the older broker's note) shown until the answer comes. No broker and the relay off: every load fails.
+    name: "comms-fetch-retry",
+    modes: ["off"],
+    async run(app) {
+      const id = await app.newSession();
+      const root = `cli:${id}`;
+      const V0 = VC(id);
+      await app.ev(`(() => {
+        window.__starts = [];
+        window.__sets = [];
+        const fetch0 = fetchComms;
+        window.fetchComms = (k) => { if (k === ${J(root)} && !commsFetching.has(k)) __starts.push(Date.now()); return fetch0(k); };
+        const set0 = commsByRoot.set.bind(commsByRoot);
+        commsByRoot.set = (k, v) => { if (k === ${J(root)}) __sets.push(["loading", "error", "unsupported", "events"].find((x) => x in v)); return set0(k, v); };
+        setLinks({ links: [{ key: ${J(root)}, parent: null, name: "root", createdAt: 1 }, { key: "cli:fake-child", parent: ${J(root)}, name: "fake-child", createdAt: 2 }] });
+        return true;
+      })()`);
+      await app.check(`!${V0}.commsBtn.hidden`, "the Communication button");
+      if ((await app.ev(`${V0}.panelKind`)) !== "comms") await app.ev(`${V0}.commsBtn.click()`);
+      await app.check(`${V0}.commsPanel.checkVisibility()`, "the panel on screen");
+      await app.check(`!!commsByRoot.get(${J(root)})?.error && !commsFetching.size`, "the first load to fail");
+      const note = () => app.ev(`${commsPart(id, ".cl-note")}?.textContent ?? null`);
+      await app.check(`${commsPart(id, ".cl-note")}?.textContent.startsWith("Could not load the message history")`, "the failure shown");
+      // off the screen: the one retry in 5 s, then nothing
+      await app.ev(`${V0}.hidePanel()`);
+      await frames(app);
+      assert.equal(await app.ev(`${V0}.commsPanel.checkVisibility()`), false, "the panel collapsed");
+      await keeperSleep(6500);
+      assert.equal(await app.ev("__starts.length"), 2, "the first load and one retry");
+      await keeperSleep(6000);
+      assert.equal(await app.ev("__starts.length"), 2, "no fetch after the retry");
+      assert.deepEqual(await app.ev("__sets"), ["loading", "error", "error"], "Loading… only for the first load");
+
+      // back on screen: one fetch, the failure stays shown while it runs
+      const back = await app.ev(`(() => {
+        ${V0}.togglePanel();
+        drawComms();
+        const e = commsByRoot.get(${J(root)});
+        return { starts: __starts.length, fetching: commsFetching.has(${J(root)}), error: !!e.error, loading: !!e.loading, note: ${commsPart(id, ".cl-note")}?.textContent ?? null };
+      })()`);
+      assert.equal(back.starts, 3, "a panel on screen fetches the old failure again");
+      assert.deepEqual([back.fetching, back.error, back.loading], [true, true, false], "the failure kept while it runs");
+      assert.match(back.note ?? "", /^Could not load the message history/);
+      await app.check("!commsFetching.size", "its answer");
+      assert.match((await note()) ?? "", /^Could not load the message history/);
+      await keeperSleep(6000);
+      assert.ok((await app.ev("__starts.length")) <= 4, "no timed retry after a later failure (a draw may fetch every 5 s)");
+
+      // an older broker's note stays shown while a panel on screen asks again
+      await app.check("!commsFetching.size", "no fetch running");
+      const old = await app.ev(`(() => {
+        commsByRoot.set(${J(root)}, { unsupported: true, at: Date.now() - 6000 });
+        const before = __starts.length;
+        drawComms();
+        const e = commsByRoot.get(${J(root)});
+        const n = ${commsPart(id, ".cl-note")};
+        return { started: __starts.length - before, fetching: commsFetching.has(${J(root)}), unsupported: !!e.unsupported, loading: !!e.loading, note: n?.textContent ?? null, hint: !!n?.classList.contains("hint") };
+      })()`);
+      assert.deepEqual(old, { started: 1, fetching: true, unsupported: true, loading: false, note: await app.ev("CommsView.OLD_BROKER"), hint: true }, "the note kept while it runs");
+      assert.ok(!(await app.ev("__sets")).slice(1).includes("loading"), "never Loading… again");
+    },
+  },
+  {
+    // a click on the split bar without a drag keeps the graph's auto height (nothing stored); a drag stores the share;
+    // a double click gives the graph its needed height again
+    name: "comms-split-click",
+    modes: ["off"],
+    scenario: COMMS_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      const { parent } = await commsTree(app, ["helper"]);
+      await app.check(`${VC(parent)}.commsBody.querySelectorAll(".cn").length === 2`, "the graph");
+      await frames(app);
+      const auto = (await commsHeights(app, parent)).graph;
+      await dragSplit(app, parent, 0);
+      await dragSplit(app, parent, 2); // under 3 px: still a click
+      assert.equal(await app.ev("ui.commsSplitSet"), false, "a click stores no split");
+      assert.equal((JSON.parse(await storedUi(app)) ?? {}).commsSplitSet ?? false, false, "nothing stored");
+      assert.ok(Math.abs((await commsHeights(app, parent)).graph - auto) <= 1, "the graph keeps its auto height");
+      await dragSplit(app, parent, auto - 80 >= 140 ? -80 : 80); // within the limits from the auto height
+      assert.equal(await app.ev("ui.commsSplitSet"), true, "a drag stores the split");
+      const dragged = (await commsHeights(app, parent)).graph;
+      assert.ok(Math.abs(dragged - auto) > 40, `the graph follows the drag: ${auto} → ${dragged}`);
+      await app.ev(`${commsPart(parent, ".comms-split")}.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }))`);
+      await frames(app);
+      await frames(app);
+      assert.equal(await app.ev("ui.commsSplitSet"), false, "a double click: auto again");
+      assert.equal(JSON.parse(await storedUi(app)).commsSplitSet, false, "stored");
+      assert.ok(Math.abs((await commsHeights(app, parent)).graph - auto) <= 1, "the graph's needed height again");
+    },
+  },
 ];
 
 export const checks = [
@@ -3971,4 +4457,5 @@ export const checks = [
       assert.deepEqual(strip(out.second), ["# 📌 Pinned", "Q:0", "P:0", "C:1", "# Open in app", "scripted-work:0", "# work (0) +", "# a (1) +", "R:0", "# b (0) +"]);
     },
   },
+  ...commsChecks,
 ];

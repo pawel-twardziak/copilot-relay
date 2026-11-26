@@ -187,7 +187,7 @@ export async function launch({ scenario, settings = {}, width = 1280, height = 8
   // the broker's state files, also in the app's environment: a broker the app starts by itself (RelayClient's
   // #autostart, when its connection is refused) inherits it and must never fall back to the real state files
   const namesFile = path.join(tmp, "relay-names.json");
-  const relayEnv = { COPILOT_RELAY_PORT: String(relayPort), COPILOT_RELAY_NAMES_FILE: namesFile, COPILOT_RELAY_DELEGATIONS_FILE: path.join(tmp, "relay-delegations.json") };
+  const relayEnv = { COPILOT_RELAY_PORT: String(relayPort), COPILOT_RELAY_NAMES_FILE: namesFile, COPILOT_RELAY_DELEGATIONS_FILE: path.join(tmp, "relay-delegations.json"), COPILOT_RELAY_COMMS_FILE: path.join(tmp, "relay-communications.jsonl") };
   const brokerEnv = { ...env, ...relayEnv };
   const brokerConfig = path.join(tmp, "no-relay-config.json"); // does not exist: the broker's defaults, not relay.config.json
   let brokerProc = null;

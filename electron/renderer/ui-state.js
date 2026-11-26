@@ -158,6 +158,23 @@ function panelLayout(viewWidth, stored) {
   return { narrow, width: Math.max(PANEL.min, Math.min(want, room)) };
 }
 
-const UiState = { PANEL, panelLayout, listModel, activityAt, CHAT_SCALE, stepScale, imageMentions, VIEWER_ZOOM, fitScale, zoomAt, acceptDelivery, deliveryAck };
+/** Which panel holds the right-hand slot: the choice ("activity" | "comms") if available, else the other one if
+ *  available, else null. */
+function slotPanel(choice, activityAvailable, commsAvailable) {
+  const first = choice === "comms" ? "comms" : "activity";
+  const ok = { activity: !!activityAvailable, comms: !!commsAvailable };
+  if (ok[first]) return first;
+  const other = first === "comms" ? "activity" : "comms";
+  return ok[other] ? other : null;
+}
+
+/** The Communication panel's graph/log split (the graph's share of `total` px): 0.5 when unset or when the two parts
+ *  cannot both keep `min` px, else the ratio kept within [min / total, 1 - min / total]. */
+function clampSplit(ratio, total, min = 120) {
+  if (!Number.isFinite(ratio) || !Number.isFinite(total) || total < 2 * min) return 0.5;
+  return Math.max(min / total, Math.min(1 - min / total, ratio));
+}
+
+const UiState = { slotPanel, clampSplit, PANEL, panelLayout, listModel, activityAt, CHAT_SCALE, stepScale, imageMentions, VIEWER_ZOOM, fitScale, zoomAt, acceptDelivery, deliveryAck };
 globalThis.UiState = UiState;
 if (typeof module !== "undefined") module.exports = UiState;

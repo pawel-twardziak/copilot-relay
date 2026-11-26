@@ -8,6 +8,7 @@ import { isReservedName, Registry, sanitizeName } from "./src/registry.mjs";
 import { createMcpHandler } from "./src/mcp.mjs";
 import { Delegation } from "./src/delegation.mjs";
 import { DelegationStore } from "./src/delegation-store.mjs";
+import { CommsLog } from "./src/comms-log.mjs";
 import { linksRoutes } from "./src/links-api.mjs";
 import { NameStore, randomName } from "./src/name-store.mjs";
 
@@ -31,13 +32,22 @@ const delegationStore = new DelegationStore();
 const names = new NameStore(process.env.COPILOT_RELAY_NAMES_FILE || undefined, {
   keep: (k) => delegationStore.parentOf(k) != null || delegationStore.childrenOf(k).length > 0,
 });
-const delegation = new Delegation({ registry, store: delegationStore, nameOf: (k) => names.get(k)?.name });
+// The communication log is diagnostics only: one that cannot be read (or capped) must not stop relaying, so the broker
+// runs without it (no events written, /api/comms answers an empty log).
+let comms = null;
+try {
+  comms = new CommsLog();
+} catch (e) {
+  console.warn(`comms: the communication log cannot be used, running without it: ${e.message}`);
+}
+registry.comms = comms;
+const delegation = new Delegation({ registry, store: delegationStore, comms, nameOf: (k) => names.get(k)?.name });
 registry.offlineRelative = (f, n, t) => delegation.messageClosed(f, n, t);
 registry.decorate = (k, p) => delegation.decorate(k, p);
 registry.appMessage = (f, t, x) => delegation.appMessage(f, t, x);
 registry.userMessage = (t, x) => delegation.userMessage(t, x);
 const handleMcp = createMcpHandler(registry, delegation);
-const linkRoutes = linksRoutes({ delegation });
+const linkRoutes = linksRoutes({ delegation, comms, registry });
 
 // Tell every app connection the tree changed; peer_updated also fires on inbox enqueue, so bursts collapse to one event.
 let linksTimer = null;
@@ -54,6 +64,18 @@ delegation.onChange(() => {
     }
   }, 200);
   linksTimer.unref();
+});
+
+// Push every new communication event (preview only) to the app connections, no debounce.
+comms?.onAppend((event) => {
+  for (const p of registry.list()) {
+    try {
+      const peer = registry.get(p.key);
+      if (peer?.app && peer.control) peer.control("comms", { event });
+    } catch {
+      /* a dead stream must not stop the others */
+    }
+  }
 });
 
 // Persist names/roles of terminal sessions (key = Copilot sessionId, stable across --resume).
@@ -243,7 +265,7 @@ const server = http.createServer(async (req, res) => {
 
     const route = linkRoutes[`${req.method} ${url.pathname}`];
     if (route) {
-      const out = route(req.method === "POST" ? ((await readBody(req)) ?? {}) : {});
+      const out = route(req.method === "POST" ? ((await readBody(req)) ?? {}) : Object.fromEntries(q));
       if (out.json === undefined) return res.writeHead(out.status).end();
       return json(res, out.status, out.json);
     }
@@ -407,8 +429,8 @@ const server = http.createServer(async (req, res) => {
       }
 
       case "POST /api/peer/ack": {
-        const { key, id } = (await readBody(req)) ?? {};
-        return json(res, 200, { ok: delegation.ack(key, id) });
+        const { key, id, outcome } = (await readBody(req)) ?? {};
+        return json(res, 200, { ok: delegation.ack(key, id, outcome === "discarded" ? "discarded" : "taken") });
       }
 
       // The app reports what happened to a session request. Deliberately no endpoint approves a request.
@@ -452,6 +474,7 @@ server.listen(PORT, HOST, () => {
 
 const shutdown = () => {
   for (const a of acpAgents.values()) a.stop();
+  comms?.flush(); // a purge waiting in the rewrite debounce must not be lost
   process.exit(0);
 };
 process.on("SIGINT", shutdown);

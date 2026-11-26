@@ -40,6 +40,7 @@ export class RelayClient {
    * @param {string[]} [o.caps] stream capabilities this client supports, e.g. ["links"] (sent on every connection)
    * @param {(req:object)=>void} [o.onLinkRequest] the user must approve linking or releasing a session
    * @param {(p:{parentKey:?string,adopted:boolean})=>void} [o.onParentChanged] this session's parent changed
+   * @param {(event:object)=>void} [o.onComms] a new communication event (preview, no text) in the broker's log
    * @param {()=>void} [o.onReported] this delegated session's report was stored
    * @param {(name:string, payload?:{parentKey:?string,reported:boolean,adopted:boolean})=>void} [o.onRegistered]
    * @param {(name:string)=>void} [o.onRenamed]   renamed elsewhere (GUI)
@@ -121,8 +122,9 @@ export class RelayClient {
     await this.#post("/api/peer/human", { key: this.key }).catch(() => {});
   }
 
-  async ack(id) {
-    await this.#post("/api/peer/ack", { key: this.key, id }).catch(() => {});
+  /** Acknowledge a delivery; `outcome` is "taken" (default) or "discarded" (the app dropped it). */
+  async ack(id, outcome) {
+    await this.#post("/api/peer/ack", { key: this.key, id, ...(outcome ? { outcome } : {}) }).catch(() => {});
   }
 
   /** Tell the broker what became of a session request: { requestId, kind, name, text }. */
@@ -165,6 +167,19 @@ export class RelayClient {
     if (r.ok) return r.json();
     const error = await r.json().then((j) => j?.error, () => null);
     throw Object.assign(new Error(error ?? `broker answered ${r.status}`), { status: r.status });
+  }
+
+  /** The communication log of `key`'s tree: { root, keys, events, peers }. Throws on a non-2xx answer (404: older broker). */
+  async fetchComms(key = this.key) {
+    const r = await this.#fetch(`/api/comms?${new URLSearchParams({ key })}`);
+    if (!r.ok) throw Object.assign(new Error(`broker answered ${r.status}`), { status: r.status });
+    return r.json();
+  }
+
+  /** The stored text of one communication event, or null when the broker does not know it. */
+  async fetchCommsText(id) {
+    const r = await this.#fetch(`/api/comms/text?${new URLSearchParams({ id })}`);
+    return r.ok ? (await r.json()).text : null;
   }
 
   /** The broker's link tree (array of links). Throws on a non-2xx answer. */
@@ -280,6 +295,8 @@ export class RelayClient {
           this.onParentChanged?.(payload);
         } else if (event === "links_changed") {
           this.onLinksChanged?.();
+        } else if (event === "comms") {
+          this.onComms?.(payload.event);
         } else if (event === "reported") {
           this.onReported?.();
         } else if (event === "message") {

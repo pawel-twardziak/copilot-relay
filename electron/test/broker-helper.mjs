@@ -33,7 +33,8 @@ export async function until(pred, what, ms = 5000) {
 
 /**
  * A broker of its own (port, state files) for the test t, which stops it and every client when it ends.
- * `script` is the server file to run, `port` fixes the port (default: a free one), `env` adds environment variables.
+ * `script` is the server file to run, `port` fixes the port (default: a free one), `env` adds environment variables
+ * (and may replace the state file paths).
  */
 export async function startBroker(t, { script = SERVER, port: wanted, env } = {}) {
   const tmp = mkdtempSync(path.join(os.tmpdir(), "broker-test-"));
@@ -41,10 +42,11 @@ export async function startBroker(t, { script = SERVER, port: wanted, env } = {}
   const proc = spawn(process.execPath, [script, path.join(tmp, "no-config.json")], {
     env: {
       ...process.env,
-      ...env,
-      COPILOT_RELAY_PORT: String(port),
       COPILOT_RELAY_NAMES_FILE: path.join(tmp, "names.json"),
       COPILOT_RELAY_DELEGATIONS_FILE: path.join(tmp, "delegations.json"),
+      COPILOT_RELAY_COMMS_FILE: path.join(tmp, "communications.jsonl"),
+      ...env, // may point a state file elsewhere (a test of an unreadable one)
+      COPILOT_RELAY_PORT: String(port),
     },
     stdio: ["ignore", "pipe", "inherit"],
   });
@@ -63,14 +65,14 @@ export async function startBroker(t, { script = SERVER, port: wanted, env } = {}
   const url = `http://127.0.0.1:${port}`;
 
   /** A session's stream: resolves once registered; got holds every message it was pushed, in order. */
-  const connect = (key, { name, parentKey, alias, caps } = {}) =>
+  const connect = (key, { name, parentKey, alias, caps, onComms } = {}) =>
     new Promise((resolve) => {
       const got = [];
       const linkRequests = [];
       const parentChanges = [];
       const peer = { client: null, got, key, linkRequests, parentChanges, registered: null };
       const client = new RelayClient({
-        url, key, cwd: tmp, name, parentKey, alias, caps,
+        url, key, cwd: tmp, name, parentKey, alias, caps, onComms,
         onMessage: (m) => got.push(m),
         onLinkRequest: (p) => linkRequests.push(p),
         onParentChanged: (p) => parentChanges.push(p),
