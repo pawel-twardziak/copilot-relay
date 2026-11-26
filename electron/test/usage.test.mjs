@@ -112,54 +112,92 @@ describe("readLastContext", () => {
   const ev = (type, data = {}) => JSON.stringify({ type, data, timestamp: "2026-11-26T10:00:00.000Z" });
   const start = ev("session.start");
   const resume = ev("session.resume");
-  const record = (max) => ev("session.usage_record", { usage: { inputTokens: 100, maxPromptTokens: max } });
-  const shutdown = (current) => ev("session.shutdown", { currentTokens: current });
+  const record = (input, max = 200000, more = {}) =>
+    ev("session.usage_record", { usage: { inputTokens: input, maxPromptTokens: max, interactionType: "conversation-agent", toolTokenCount: 22215, ...more } });
+  const shutdown = (current, parts = {}) => ev("session.shutdown", { currentTokens: current, ...parts });
+  const compacted = (ok = true) => ev("session.compaction_complete", { success: ok, preCompactionTokens: 90000, postCompactionTokens: 27000 });
   const lines = (...l) => l.join("\n") + "\n";
+  const read = (content) => readLastContext(put(content), { copilotHome: home });
 
-  test("takes the last shutdown's currentTokens and its run's last maxPromptTokens", async () => {
-    const id = put(lines(start, record(128000), record(200000), shutdown(35443)));
-    assert.deepEqual(await readLastContext(id, { copilotHome: home }), { used: 35443, size: 200000 });
+  test("takes inputTokens and maxPromptTokens of the last call, not the shutdown's currentTokens", async () => {
+    // a corp-PC session: the shutdown counts 155 deferred MCP tools (105.5k) the model never receives (22.2k)
+    const parts = { systemTokens: 18269, conversationTokens: 15126, toolDefinitionsTokens: 105504 };
+    const content = lines(start, record(43525), shutdown(126100), resume, record(55770), record(56402, 200000, { initiator: "agent" }), shutdown(138904, parts));
+    assert.deepEqual(await read(content), { used: 56402, size: 200000 });
   });
 
-  test("skips a run without a turn (its currentTokens has no tools in it)", async () => {
-    const id = put(lines(start, record(200000), shutdown(35443), resume, shutdown(13806)));
-    assert.deepEqual(await readLastContext(id, { copilotHome: home }), { used: 35443, size: 200000 });
+  test("a run without a turn does not matter, nor does a missing shutdown (a crash)", async () => {
+    assert.deepEqual(await read(lines(start, record(35000), shutdown(35443), resume, shutdown(13806))), { used: 35000, size: 200000 });
+    assert.deepEqual(await read(lines(start, record(1000), shutdown(900), resume, record(2000, 1000000))), { used: 2000, size: 1000000 });
   });
 
-  test("a later run with a turn wins over an earlier one", async () => {
-    const id = put(lines(start, record(200000), shutdown(1000), resume, record(1000000), shutdown(2000)));
-    assert.deepEqual(await readLastContext(id, { copilotHome: home }), { used: 2000, size: 1000000 });
+  test("skips sub-agent and other non-main calls", async () => {
+    const id = randomUUID();
+    const content = lines(
+      start,
+      record(40000),
+      record(9000, 128000, { interactionType: "conversation-subagent" }),
+      record(8000, 128000, { accounting: { sourceSessionId: randomUUID() } }),
+      record(7000, 128000, { interactionType: "conversation-sampling" }),
+      shutdown(1),
+    );
+    assert.deepEqual(await readLastContext(put(content, id), { copilotHome: home }), { used: 40000, size: 200000 });
+    const own = lines(start, record(41000, 200000, { accounting: { sourceSessionId: id } }));
+    assert.deepEqual(await readLastContext(put(own, id), { copilotHome: home }), { used: 41000, size: 200000 });
   });
 
-  test("null when the last run with a turn never shut down (the figure would be stale)", async () => {
-    const id = put(lines(start, record(200000), shutdown(1000), resume, record(200000)));
-    assert.equal(await readLastContext(id, { copilotHome: home }), null);
+  test("a call without interactionType (older CLI) counts as the main one", async () => {
+    const old = ev("session.usage_record", { usage: { inputTokens: 30000, maxPromptTokens: 128000 } });
+    assert.deepEqual(await read(lines(start, old)), { used: 30000, size: 128000 });
   });
 
-  test("null without a shutdown, without currentTokens, or without maxPromptTokens", async () => {
+  test("after a compaction that follows the last call: the shutdown's system + conversation + the call's tools", async () => {
+    const after = shutdown(70000, { systemTokens: 18000, conversationTokens: 9000, toolDefinitionsTokens: 43000 });
+    assert.deepEqual(await read(lines(start, record(90000), compacted(), after)), { used: 18000 + 9000 + 22215, size: 200000 });
+    // a later run without a turn shuts down again: the newest shutdown is still after the compaction
+    const again = shutdown(60000, { systemTokens: 18000, conversationTokens: 9100, toolDefinitionsTokens: 0 });
+    assert.deepEqual(await read(lines(start, record(90000), compacted(), after, resume, again)), { used: 18000 + 9100 + 22215, size: 200000 });
+  });
+
+  test("a failed compaction changes nothing", async () => {
+    assert.deepEqual(await read(lines(start, record(90000), compacted(false), shutdown(1))), { used: 90000, size: 200000 });
+  });
+
+  test("null when the compaction has no shutdown after it, or the shutdown lacks its parts", async () => {
+    assert.equal(await read(lines(start, record(90000), shutdown(1, { systemTokens: 1, conversationTokens: 1 }), resume, compacted())), null);
+    assert.equal(await read(lines(start, record(90000), compacted(), shutdown(70000))), null);
+    const noTools = ev("session.usage_record", { usage: { inputTokens: 90000, maxPromptTokens: 200000, interactionType: "conversation-agent" } });
+    assert.equal(await read(lines(start, noTools, compacted(), shutdown(1, { systemTokens: 1, conversationTokens: 1 }))), null);
+  });
+
+  test("null when the context was cleared or truncated after the last call", async () => {
+    assert.equal(await read(lines(start, record(90000), ev("session.context_cleared", { messagesCleared: 4 }), shutdown(1))), null);
+    assert.equal(await read(lines(start, record(90000), ev("session.truncation", { messagesRemovedDuringTruncation: 3 }), shutdown(1))), null);
+  });
+
+  test("a compaction or truncation before the last call does not matter", async () => {
+    const content = lines(start, record(90000), compacted(), ev("session.truncation", {}), record(31000), shutdown(1));
+    assert.deepEqual(await read(content), { used: 31000, size: 200000 });
+  });
+
+  test("null without a call, without inputTokens, or without maxPromptTokens", async () => {
     for (const content of [
-      lines(start, record(200000)),
-      lines(start, record(200000), ev("session.shutdown", {})),
-      lines(start, ev("session.usage_record", { usage: {} }), shutdown(1000)),
+      lines(start, shutdown(1000)),
+      lines(start, ev("session.usage_record", { usage: { maxPromptTokens: 200000 } })),
+      lines(start, ev("session.usage_record", { usage: { inputTokens: 1000 } })),
+      lines(start, ev("session.usage_record", { usage: { inputTokens: 0, maxPromptTokens: 200000 } })),
     ]) {
-      assert.equal(await readLastContext(put(content), { copilotHome: home }), null);
+      assert.equal(await read(content), null);
     }
   });
 
-  test("a run without a turn is skipped even when its shutdown has no currentTokens", async () => {
-    const id = put(lines(start, record(200000), shutdown(500), resume, ev("session.shutdown", {})));
-    assert.deepEqual(await readLastContext(id, { copilotHome: home }), { used: 500, size: 200000 });
-  });
-
-  test("reads the whole file when the 2 MiB tail ends inside a run without a turn", async () => {
+  test("reads the whole file when the 2 MiB tail has no main call", async () => {
     const filler = JSON.stringify({ type: "assistant.message", data: { content: "x".repeat(1000) } });
-    const id = put(lines(start, record(200000), shutdown(700), resume, ...Array(2200).fill(filler), shutdown(1)));
-    assert.deepEqual(await readLastContext(id, { copilotHome: home }), { used: 700, size: 200000 });
+    assert.deepEqual(await read(lines(start, record(700), shutdown(1), resume, ...Array(2200).fill(filler), shutdown(1))), { used: 700, size: 200000 });
   });
 
   test("ignores garbage lines and rejects a non-UUID id or a missing file", async () => {
-    const id = put(lines(start, "{not json", record(200000), "garbage", shutdown(500)));
-    assert.deepEqual(await readLastContext(id, { copilotHome: home }), { used: 500, size: 200000 });
+    assert.deepEqual(await read(lines(start, "{not json", record(500), "garbage", shutdown(1))), { used: 500, size: 200000 });
     assert.equal(await readLastContext("../x", { copilotHome: home }), null);
     assert.equal(await readLastContext(randomUUID(), { copilotHome: home }), null);
   });
