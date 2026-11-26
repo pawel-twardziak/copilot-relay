@@ -220,7 +220,7 @@ function create({ h, el, on }) {
       if (it.label !== atLabel) labelLayer.insertBefore(it.label, atLabel);
       else atLabel = atLabel.nextSibling;
       const selected = f && f.from === e.from && f.to === e.to;
-      const kind = selected ? "sel" : e.live === "ended-no-report" ? "err" : e.live === "in-progress" ? "active" : e.live ? "wait" : "base";
+      const kind = selected ? "sel" : e.live === "ended-no-report" ? "err" : e.live === "in-progress" || e.live === "reading" ? "active" : e.live ? "wait" : "base";
       const cls = ["ce", e.tree ? "tree" : "other", e.live ? `live-${e.live}` : "", !e.live && closedEnd(e) ? "muted" : "", selected ? "selected" : "", edgeIn(e) ? "" : "dim"].filter(Boolean).join(" ");
       it.g.setAttribute("class", cls);
       it.label.setAttribute("class", `ce-label ${cls}`);

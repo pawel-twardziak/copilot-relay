@@ -1249,6 +1249,8 @@ class SessionView {
   }
 
   setBusy(b) {
+    if (b && this.busy !== true) this.busySince = Date.now(); // the turn's start (the panel's "reading" clock)
+    if (!b) this.busySince = null;
     this.busy = b;
     const off = b || this.dead || this.deleting; // this.deleting: the whole session is being deleted
     this.el.classList.toggle("busy", off); // disables the fork/delete actions
@@ -3765,7 +3767,7 @@ function commsLive() {
   for (const [id, v] of views) {
     const k = v.keeperState;
     live[id] = {
-      online: !v.dead, busy: !v.dead && v.busy === true, ctx: lastUsage.get(id)?.context ?? undefined,
+      online: !v.dead, busy: !v.dead && v.busy === true, busySince: v.busy === true ? v.busySince ?? undefined : undefined, ctx: lastUsage.get(id)?.context ?? undefined,
       keeper: k && ["pinging", "countdown", "compacting"].includes(k.phase) ? k : undefined, cards: v.pendingCards,
       name: v.relayName || (v.title ? shortTitle(v.title) : undefined), // for a node the broker names nowhere (an older one)
     };

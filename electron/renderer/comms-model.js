@@ -41,18 +41,21 @@ function messagesOf(events) {
   const seen = new Set();
   const out = [];
   for (const e of sorted) {
-    if (e.kind === "status") latest.set(e.ref, e.status);
+    if (e.kind === "status") latest.set(e.ref, { status: e.status, at: ms(e.ts) });
     else if (!seen.has(e.id)) {
       seen.add(e.id);
       out.push(e);
     }
   }
-  return out.map((e, seq) => ({ e, seq, src: nodeId(e.fromKey), dst: nodeId(e.toKey), status: latest.get(e.id) ?? e.status }));
+  return out.map((e, seq) => {
+    const l = latest.get(e.id);
+    return { e, seq, src: nodeId(e.fromKey), dst: nodeId(e.toKey), status: l?.status ?? e.status, statusAt: l?.at ?? ms(e.ts) };
+  });
 }
 
 /**
  * input = { comms: {root, keys, events, peers} | null, links, heldByKind, current, live, now, filter };
- *   live[id] = { online?, busy?, ctx?, keeper?, cards?, name? } (online/busy from a view open in this app override
+ *   live[id] = { online?, busy?, busySince?, ctx?, keeper?, cards?, name? } (online/busy from a view open in this app override
  *   links/peers; name: its relay name or title, used when the broker's peers and links have none)
  * -> { nodes, edges, rows, stats, unsupported }  (see the Communication panel design, section 6)
  *   node.held = { child, parent, other }: the node's unacknowledged held messages by kind (heldByKind is per
@@ -210,12 +213,28 @@ function build(input = {}) {
     if (message?.status === "awaiting-reopen") setLive(edge, "awaiting-reopen", ms(message.e.ts));
   }
   const ranked = new Set([...edges].filter(([, e]) => e.live).map(([k]) => k)); // pairs a higher state applies to
+  // the edge's last event while the recipient has not processed it yet: still queued for an app session that is not
+  // online (since it was sent; only an app session's delivery writes a status, an MCP inbox drain or a terminal's
+  // flush writes none, so other peers never show it), or delivered in the recipient's
+  // current turn (since delivery). Delivered to an idle recipient, before its current turn began, or answered back
+  // after it = processed, no state. A turn's start is known for a view open in this app only.
+  const DELIVERED = new Set(["delivered", "taken"]);
+  const TURN_SLACK = 5000; // a message starts the turn it is read in, or is taken when it starts
+  const inTurn = (id, at) => {
+    const since = live[id]?.busySince;
+    return typeof since !== "number" || at >= since - TURN_SLACK;
+  };
   for (const [k, edge] of edges) {
     const back = pairKey(edge.to, edge.from);
     const { event } = lastOf.get(k);
-    if (edge.live || ranked.has(back) || event?.e.kind !== "message") continue;
-    const answer = lastOf.get(back)?.event;
-    if (!answer || answer.seq < event.seq) setLive(edge, "waiting-reply", ms(event.e.ts));
+    if (edge.live || ranked.has(back) || !event) continue;
+    if ((lastOf.get(back)?.event?.seq ?? -1) > event.seq) continue;
+    if (event.status === "queued") {
+      const app = inTreeSet.has(edge.to) || tree.link.has(edge.to) || live[edge.to] != null;
+      if (app && stateById.get(edge.to) === "closed") setLive(edge, "queued", ms(event.e.ts));
+    } else if (DELIVERED.has(event.status) && stateById.get(edge.to) === "working" && inTurn(edge.to, event.statusAt)) {
+      setLive(edge, "reading", event.statusAt);
+    }
   }
 
   // held on an edge: exact only parent->child (a child has one parent); the other counts are on the target node
