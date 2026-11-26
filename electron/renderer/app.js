@@ -1998,7 +1998,7 @@ class SessionView {
     if (e.button !== 0) return;
     e.preventDefault(); // no text selection while dragging
     const startX = e.clientX;
-    const start = this.panel.getBoundingClientRect().width;
+    const start = (this.shownPanel() ?? this.panel).getBoundingClientRect().width; // the one in the slot (the other is display:none)
     const move = (m) => {
       ui.panelWidth = UiState.panelLayout(this.row.clientWidth, start + startX - m.clientX).width;
       this.layoutPanel();
@@ -2035,7 +2035,9 @@ class SessionView {
   /** An in-panel group's header clicked in the chat (or "N subagents running"): its entry opened, scrolled into view
    *  and highlighted for a second. The panel stops following, and the scroll made here does not turn it back on. */
   showInPanel(group) {
-    this.revealPanel();
+    // the entry is in Activity: bring it into the slot first (setRightPanel re-evaluates every view synchronously)
+    if (this.panelKind !== "activity") this.showPanel("activity");
+    else this.revealPanel();
     const entry = group._entry;
     entry.open = true;
     this.panelFollow = false;
