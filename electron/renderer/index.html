@@ -30,93 +30,118 @@
         <p>Pick a session on the left to resume it, or start a new one in any folder.</p>
         <button id="btn-new-2" class="primary">+ New session</button>
       </div>
-      <section id="schedules" hidden></section>
       <!-- one .session-view per open session is inserted here -->
     </main>
 
-    <dialog id="settings">
+    <!-- a page over the whole window (page-dialog): its sections in a grid of 3 / 2 / 1 columns by the window width -->
+    <dialog id="settings" class="page-dialog">
       <form method="dialog">
-        <h2>Settings</h2>
-        <label>
-          Copilot CLI command
-          <input id="set-command" placeholder="copilot" maxlength="4000" spellcheck="false" />
-        </label>
-        <p class="hint" id="set-hint"></p>
-        <label class="check">
-          <span><input id="set-relay" type="checkbox" /> Connect sessions to copilot-relay</span>
-        </label>
-        <p class="hint" id="set-relay-hint"></p>
-        <label class="check">
-          <span><input id="set-queue" type="checkbox" /> Deliver queued messages during a turn</span>
-        </label>
-        <p class="hint">Messages for a working session are delivered after its current tool step. Off: they wait until the turn ends.</p>
-        <label class="check">
-          <span><input id="set-keeper" type="checkbox" /> Keep idle sessions' prompt cache warm, then compact them</span>
-        </label>
-        <label>
-          Keep-alive prompts before compacting
-          <input id="set-keeper-pings" type="number" min="0" max="20" step="1" />
-        </label>
-        <label>
-          Minimum context (k tokens)
-          <input id="set-keeper-min" type="number" min="0" step="1" />
-        </label>
-        <p class="hint">Spends a few AI credits per pause to save the cost of rewriting the cache. Compaction replaces the conversation with a summary.</p>
-        <label>
-          Tool and subagent details
-          <select id="set-activity"><option value="off">In the chat</option><option value="subagents">Subagents in a side panel</option><option value="all">Everything in a side panel</option></select>
-        </label>
-        <p class="hint">Where the details of tool calls and subagents open. Applies at once to open sessions.</p>
-        <label>
-          Default context window
-          <select id="set-context"><option value="default">200k</option><option value="long_context">1M</option></select>
-        </label>
-        <p class="hint">Used by new sessions and by sessions whose Context is "Default", the next time their Copilot starts. Open sessions keep theirs. 1M needs a model with a long-context tier (e.g. Claude Sonnet 5.5) and may cost more.</p>
-        <h3>Prompts</h3>
-        <label>
-          Default part
-          <textarea id="set-prompt-default" rows="8" spellcheck="false" placeholder="Instructions for every session (optional)"></textarea>
-        </label>
-        <div class="store-actions"><button id="set-prompt-default-restore" type="button">Restore default</button></div>
-        <p class="hint">Every session starts with it, before its own part. The built-in text (delegating to sub-sessions) applies only with copilot-relay on. Empty: none.</p>
-        <label>
-          Working with the parent
-          <textarea id="set-prompt-child" rows="5" spellcheck="false"></textarea>
-        </label>
-        <div class="store-actions"><button id="set-prompt-child-restore" type="button">Restore default</button></div>
-        <p class="hint">Only for sub-sessions, between the default part and their own part. Empty: none.</p>
-        <div class="store-label">Templates</div>
-        <div id="set-templates"></div>
-        <div class="store-actions"><button id="set-template-add" type="button">Add template</button></div>
-        <p class="hint">A template's text is copied into a session's own part when you pick it in the prompt editor.</p>
-        <p class="hint" id="set-prompt-note"></p>
-        <h3>Relay broker</h3>
-        <label>
-          Repository folder
-          <span class="field-row"><input id="set-broker-repo" spellcheck="false" /><button id="set-broker-browse" type="button">Browse…</button></span>
-        </label>
-        <p class="hint">The copilot-relay folder the broker runs from. The button brings it to the latest main (uncommitted changes go to a stash), installs it and restarts the broker. The app and its sessions stay open.</p>
-        <div class="store-actions"><button id="broker-restart" type="button">Update and restart broker</button></div>
-        <ul id="broker-steps"></ul>
-        <p class="hint" id="broker-summary"></p>
-        <h3>Files</h3>
-        <div class="store">
-          <div class="store-label">Pasted images</div>
-          <code id="store-pastes" class="path"></code>
-          <p class="hint" id="store-pastes-info"></p>
-          <div class="store-actions">
-            <button id="store-open" type="button">Open folder</button>
-            <button id="store-clear" type="button" class="danger">Delete pasted images</button>
+        <div class="page-head">
+          <h2>Settings</h2>
+          <!-- Cancel first: Enter in a field submits through the first button, as before -->
+          <div class="dialog-actions">
+            <button value="cancel">Cancel</button>
+            <button id="set-save" value="save" class="primary">Save</button>
           </div>
-          <div class="store-label">Settings file</div>
-          <code id="store-settings" class="path"></code>
         </div>
-        <div class="dialog-actions">
-          <button value="cancel">Cancel</button>
-          <button id="set-save" value="save" class="primary">Save</button>
+        <div class="page-body">
+          <div class="set-grid">
+            <section class="set-card">
+              <h3>Copilot</h3>
+              <label>
+                Copilot CLI command
+                <input id="set-command" placeholder="copilot" maxlength="4000" spellcheck="false" />
+              </label>
+              <p class="hint" id="set-hint"></p>
+              <label>
+                Default context window
+                <select id="set-context"><option value="default">200k</option><option value="long_context">1M</option></select>
+              </label>
+              <p class="hint">Used by new sessions and by sessions whose Context is "Default", the next time their Copilot starts. Open sessions keep theirs. 1M needs a model with a long-context tier (e.g. Claude Sonnet 5.5) and may cost more.</p>
+            </section>
+            <section class="set-card">
+              <h3>Sessions</h3>
+              <label class="check">
+                <span><input id="set-queue" type="checkbox" /> Deliver queued messages during a turn</span>
+              </label>
+              <p class="hint">Messages for a working session are delivered after its current tool step. Off: they wait until the turn ends.</p>
+              <label>
+                Tool and subagent details
+                <select id="set-activity"><option value="off">In the chat</option><option value="subagents">Subagents in a side panel</option><option value="all">Everything in a side panel</option></select>
+              </label>
+              <p class="hint">Where the details of tool calls and subagents open. Applies at once to open sessions.</p>
+            </section>
+            <section class="set-card">
+              <h3>Cache keeper</h3>
+              <label class="check">
+                <span><input id="set-keeper" type="checkbox" /> Keep idle sessions' prompt cache warm, then compact them</span>
+              </label>
+              <label>
+                Keep-alive prompts before compacting
+                <input id="set-keeper-pings" type="number" min="0" max="20" step="1" />
+              </label>
+              <label>
+                Minimum context (k tokens)
+                <input id="set-keeper-min" type="number" min="0" step="1" />
+              </label>
+              <p class="hint">Spends a few AI credits per pause to save the cost of rewriting the cache. Compaction replaces the conversation with a summary.</p>
+            </section>
+            <section class="set-card wide">
+              <h3>Prompts</h3>
+              <label>
+                Default part
+                <textarea id="set-prompt-default" rows="8" spellcheck="false" placeholder="Instructions for every session (optional)"></textarea>
+              </label>
+              <div class="store-actions"><button id="set-prompt-default-restore" type="button">Restore default</button></div>
+              <p class="hint">Every session starts with it, before its own part. The built-in text (delegating to sub-sessions) applies only with copilot-relay on. Empty: none.</p>
+              <label>
+                Working with the parent
+                <textarea id="set-prompt-child" rows="5" spellcheck="false"></textarea>
+              </label>
+              <div class="store-actions"><button id="set-prompt-child-restore" type="button">Restore default</button></div>
+              <p class="hint">Only for sub-sessions, between the default part and their own part. Empty: none.</p>
+              <div class="store-label">Templates</div>
+              <div id="set-templates"></div>
+              <div class="store-actions"><button id="set-template-add" type="button">Add template</button></div>
+              <p class="hint">A template's text is copied into a session's own part when you pick it in the prompt editor.</p>
+              <p class="hint" id="set-prompt-note"></p>
+            </section>
+            <section class="set-card">
+              <h3>Relay</h3>
+              <label class="check">
+                <span><input id="set-relay" type="checkbox" /> Connect sessions to copilot-relay</span>
+              </label>
+              <p class="hint" id="set-relay-hint"></p>
+              <label>
+                Repository folder
+                <span class="field-row"><input id="set-broker-repo" spellcheck="false" /><button id="set-broker-browse" type="button">Browse…</button></span>
+              </label>
+              <p class="hint">The copilot-relay folder the broker runs from. The button brings it to the latest main (uncommitted changes go to a stash), installs it and restarts the broker. The app and its sessions stay open.</p>
+              <div class="store-actions"><button id="broker-restart" type="button">Update and restart broker</button></div>
+              <ul id="broker-steps"></ul>
+              <p class="hint" id="broker-summary"></p>
+            </section>
+            <section class="set-card">
+              <h3>Files</h3>
+              <div class="store">
+                <div class="store-label">Pasted images</div>
+                <code id="store-pastes" class="path"></code>
+                <p class="hint" id="store-pastes-info"></p>
+                <div class="store-actions">
+                  <button id="store-open" type="button">Open folder</button>
+                  <button id="store-clear" type="button" class="danger">Delete pasted images</button>
+                </div>
+                <div class="store-label">Settings file</div>
+                <code id="store-settings" class="path"></code>
+              </div>
+            </section>
+          </div>
         </div>
       </form>
     </dialog>
+
+    <!-- Schedules (schedules.js renders into it): a page over the whole window, like Settings -->
+    <dialog id="schedules" class="page-dialog"></dialog>
 
     <dialog id="delete-tree">
       <form method="dialog">

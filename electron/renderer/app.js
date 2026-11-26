@@ -3996,6 +3996,7 @@ async function openSettings() {
   $("#set-broker-repo").placeholder = s.brokerRepoDefault;
   renderPromptSettings(s);
   renderBroker(await api.brokerStatus().catch(() => null));
+  $("#settings").returnValue = ""; // Escape keeps the previous value, which may be the last Save's
   $("#settings").showModal();
 }
 // "Prompts" section: the default part and the child part (defaultDefault / childDefault: it shows the built-in text
@@ -4245,7 +4246,7 @@ $("#btn-new").addEventListener("click", () => newSession());
 $("#btn-new-2").addEventListener("click", () => newSession());
 $("#btn-refresh").addEventListener("click", refresh);
 $("#btn-settings").addEventListener("click", openSettings);
-// the page hides #empty and every .session-view (body.schedules-open); activeId stays, so the session list works as before
+// the page is a modal dialog over the whole window; activeId stays, so the session is there again when it closes
 $("#btn-schedules").addEventListener("click", () => {
   filePreview.close();
   Schedules.show();
@@ -4253,10 +4254,12 @@ $("#btn-schedules").addEventListener("click", () => {
 Schedules.init();
 // a notification click: the same path as ⏰, straight to the run (from any state, a session or an open job form too).
 // Registered at load time, so the message main sends after a fresh window's did-finish-load is not missed.
-api.onJobOpenRun(({ jobId, runId }) => {
+function openJobRun({ jobId, runId }) {
   filePreview.close();
+  if (viewer.isOpen) viewer.close(); // a fixed overlay: the modal page would cover it, its keys would still act
   Schedules.openRun(jobId, runId);
-});
+}
+api.onJobOpenRun(openJobRun);
 $("#search").addEventListener("input", renderList);
 // Left Shift for message recall (an arrow key's event doesn't say which Shift is down). Tracked on the whole document,
 // in the capture phase, so a Shift pressed before the message box got focus counts; reset whenever it can't be down.
