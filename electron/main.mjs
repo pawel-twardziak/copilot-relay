@@ -14,7 +14,7 @@ import { isNotFoundExit, normalizeCommand, resolveCommand, shellLine, startFailu
 import { countUserMessages, deleteSession, describeCut, forkSession, isSessionId, messageTimes, purgeDeleted, sessionCreatedAt, sessionDir, truncateSession } from "./history.mjs";
 import { createLastActivity } from "./last-activity.mjs";
 import { createUsagePusher, readCacheExpiry } from "./usage.mjs";
-import { createReplayFilter, normalizeKeeperSettings } from "./cache-keeper.mjs";
+import { createReplayFilter, normalizeKeeperSettings, TURN_CONTENT } from "./cache-keeper.mjs";
 import { createKeeperOptOut, createKeeperRunner } from "./cache-keeper-runner.mjs";
 import { JobScheduler } from "./scheduler.mjs";
 import { scheduleInfo } from "./jobs.mjs";
@@ -470,6 +470,9 @@ async function keeperRun(sessionId, text, kind) {
   return { text: turn.text, toolCalled: turn.toolCalled, error };
 }
 
+/** The keeper is on in Settings and this session is not opted out. */
+const keeperOn = (sessionId) => normalizeKeeperSettings(loadSettings().cacheKeeper).enabled && !keeperOptOut.get(sessionId);
+
 const keeper = createKeeperRunner({
   settings: () => normalizeKeeperSettings(loadSettings().cacheKeeper),
   optedOut: (sessionId) => keeperOptOut.get(sessionId),
@@ -486,8 +489,7 @@ const keeper = createKeeperRunner({
 /** Wire a session's connection to the window. */
 function attach(sessionId, conn, cwd, relay, link) {
   if (cwd) knownFolders.add(cwd);
-  // replayFilter: one per session/load while `replaying`, a fresh one for the live updates (see openSession)
-  const entry = { conn, cwd, permissions: new Map(), relay: relayStart(sessionId, cwd, relay, link), toolTitles: new Map(), configOptions: [], replayFilter: createReplayFilter() };
+  const entry = { conn, cwd, permissions: new Map(), relay: relayStart(sessionId, cwd, relay, link), toolTitles: new Map(), configOptions: [] };
   open.set(sessionId, entry);
   // one path for live and replayed updates (see sessions:new)
   entry.update = (u) => {
@@ -500,15 +502,17 @@ function attach(sessionId, conn, cwd, relay, link) {
       entry.configOptions = u.configOptions;
       u = { ...u, configOptions: viewConfig(sessionId, u.configOptions) };
     }
-    // a keeper turn leaves no trace: nothing reaches the window or the changes tracker; a tool call stops it
+    // a keeper turn leaves no trace: its turn content stays out of the window, nothing reaches the changes tracker,
+    // and a tool call stops it. Session state (config, commands, title) still reaches the window.
     const turn = entry.keeping;
     if (turn) {
       if (u?.sessionUpdate === "agent_message_chunk" && typeof u.content?.text === "string") turn.text += u.content.text;
       if (u?.sessionUpdate === "tool_call") stopKeeperTurn(sessionId, entry, turn);
+      if (!TURN_CONTENT.has(u?.sessionUpdate)) send("acp:update", { sessionId, update: u });
       return;
     }
-    // replayed keep-alive pings and their turns, and the CLI's /compact reply line (replayed or live)
-    if (!entry.replayFilter.pass(u)) return;
+    // replayed keep-alive pings and their turns, and the replayed /compact reply line
+    if (entry.replaying && !entry.replayFilter.pass(u)) return;
     // /rename answers with a chat line ("Session renamed to: …"); the new title arrives as session_info_update
     if (entry.renaming && u?.sessionUpdate === "agent_message_chunk") return;
     send("acp:update", { sessionId, update: u });
@@ -688,12 +692,9 @@ async function openSession(sessionId, cwd) {
   // the agent replays the history as session/update notifications before answering session/load
   const entry = attach(sessionId, conn, cwd, relay);
   entry.replaying = true; // until session/load settles, also when it fails (see attach: the changes tracker)
-  entry.replayFilter = createReplayFilter(); // one per replay
+  entry.replayFilter = createReplayFilter(); // one per replay, used only while it runs
   try {
-    const res = await conn.request("session/load", { sessionId, cwd, mcpServers: relay.mcpServers }).finally(() => {
-      entry.replaying = false;
-      entry.replayFilter = createReplayFilter(); // a replay ending inside a ping's turn must not swallow live updates
-    });
+    const res = await conn.request("session/load", { sessionId, cwd, mcpServers: relay.mcpServers }).finally(() => (entry.replaying = false));
     entry.configOptions = res?.configOptions ?? entry.configOptions;
     if (open.get(sessionId) === entry) usage.refresh(sessionId);
     return { sessionId, cwd, configOptions: viewConfig(sessionId, res?.configOptions) };
@@ -917,8 +918,9 @@ handle("sessions:prompt", async (sessionId, text, source = "relay") => {
     imagesSupported: conn.init?.agentCapabilities?.promptCapabilities?.image === true,
   });
   for (const note of notes) send("acp:notice", { sessionId, text: note });
-  // the checkpoint before the turn, read before the request: a short turn can write its own before a later read
-  await keeper.turnStarted(sessionId);
+  // the checkpoint before the turn, read before the request: a short turn can write its own before a later read.
+  // Not when the keeper can't act here: without a baseline the turn's end takes the first checkpoint it finds.
+  if (keeperOn(sessionId)) await keeper.turnStarted(sessionId);
   // fork/truncate refuse while a turn is running: the agent is still writing the history
   if (beginPrompt(entry)) entry.relay?.state(true);
   try {
@@ -1064,6 +1066,7 @@ function reopenRequested(sessionId, { requestId, targetKey, targetName, fromName
 /** The session's relay connection is gone: the broker asks again when it registers anew. */
 function dropReopenCards(sessionId) {
   for (const [id, card] of reopenCards) if (card.sessionId === sessionId) reopenCards.delete(id);
+  keeper.replan(sessionId); // an open card kept the keeper from acting (a closed session has no keeper state left)
 }
 
 // reachable only from the window, like delegation:answer. `reason` "missing": the target no longer exists.
@@ -1076,9 +1079,11 @@ handle("reopen:answer", async (sessionId, requestId, approved, reason) => {
   } catch (e) {
     if (e.status !== 404) throw e; // not answered: the card stays answerable
     reopenCards.delete(requestId);
+    keeper.replan(sessionId); // the card no longer keeps the keeper from acting
     return false;
   }
   reopenCards.delete(requestId);
+  keeper.replan(sessionId);
   return true;
 });
 
@@ -1093,6 +1098,7 @@ function linkRequested(sessionId, req) {
 /** The session's relay connection is gone: the broker asks again when it registers anew. */
 function dropLinkCards(sessionId) {
   for (const [id, card] of linkCards) if (card.sessionId === sessionId) linkCards.delete(id);
+  keeper.replan(sessionId);
 }
 
 // reachable only from the window, like reopen:answer. Resolves { result, text } (linked, released, rejected, refused).
@@ -1106,9 +1112,11 @@ handle("link:answer", async (sessionId, requestId, approved) => {
   } catch (e) {
     if (e.status !== 404) throw e; // not answered: the card stays answerable
     linkCards.delete(requestId);
+    keeper.replan(sessionId); // the card no longer keeps the keeper from acting
     return false;
   }
   linkCards.delete(requestId);
+  keeper.replan(sessionId);
   return answer;
 });
 
@@ -1210,6 +1218,7 @@ handle("delegation:answer", async (requestId, approved, own, command, fields) =>
   // taken while it is answered, so a second click cannot start a second child
   const req = pendingRequests.take(requestId);
   if (!req) return false;
+  keeper.replan(req.parentSessionId); // the parent's card is answered: it no longer keeps the keeper from acting
   if (approved !== true) {
     tellParent(req, "rejected", `The user rejected the request to create session "${req.name}".`);
     return { outcome: "rejected" };
@@ -1934,6 +1943,7 @@ async function confirmedReload(reload) {
     windowReloads++;
     await Promise.all(children.map((id) => closeEntry(id).catch(() => {})));
     pendingRequests.clear();
+    keeper.replan(); // the parents' cards are gone
   } else windowReloads++;
   if (!parent.isDestroyed()) reload(parent.webContents);
 }
