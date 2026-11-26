@@ -3,7 +3,7 @@
 Extends the usage figures of `electron/usage.mjs` (session credits, context meter, premium quota line). Where the
 documents disagree, this one wins.
 
-Implementation starts from `main` (v0.28.0 plus the Windows path test fix, 9b5d513); this feature ships as v0.29.0.
+Implementation starts from `main` v0.30.1; this feature ships as v0.31.0.
 
 ## Intent
 
