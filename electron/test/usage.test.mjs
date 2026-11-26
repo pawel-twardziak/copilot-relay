@@ -289,12 +289,11 @@ describe("createQuotaService", () => {
 });
 
 describe("readLiveQuota", () => {
-  test("times out", async (t) => {
-    t.mock.timers.enable({ apis: ["setTimeout"] });
-    const runtime = { withClient: () => new Promise(() => {}) };
-    const p = readLiveQuota({ runtime, command: "copilot" });
-    t.mock.timers.tick(10_000);
-    await assert.rejects(p, /did not answer in 10 s/);
+  test("passes its deadline to the runtime (10 s by default)", async () => {
+    let got;
+    const runtime = { withClient: async (opts) => { got = opts; throw new Error("Copilot did not answer in 10 s"); } };
+    await assert.rejects(readLiveQuota({ runtime, command: "copilot" }), /did not answer in 10 s/);
+    assert.deepEqual(got, { command: "copilot", deadlineMs: 10_000 });
   });
   test("picks from quotaSnapshots", async () => {
     const client = { rpc: { account: { getQuota: async () => ({ quotaSnapshots: { chat: snap({ entitlementRequests: 200 }) } }) } } };

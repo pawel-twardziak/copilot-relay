@@ -182,7 +182,9 @@ export function createCopilotRuntime({
     }, idleMs);
   }
 
-  async function withClient({ command }, fn) {
+  // `deadlineMs` (optional) bounds the whole call: past it the call rejects and the entry is stopped, so the next
+  // call starts a fresh CLI. The SDK's rpc has no per-request timeout of its own.
+  async function withClient({ command, deadlineMs }, fn) {
     if (stopping > 0) throw new Error("Copilot is stopping");
     let entry = entries.get(command);
     if (entry?.failedAt != null) {
@@ -195,8 +197,21 @@ export function createCopilotRuntime({
     clearTimer(entry.idleTimer);
     entry.idleTimer = null;
     try {
-      const client = await entry.starting;
-      return await fn(client);
+      const run = (async () => fn(await entry.starting))();
+      if (deadlineMs == null) return await run;
+      run.catch(() => {}); // a late settle of a stuck call is not unhandled and touches no entry
+      let deadlineTimer;
+      const deadline = new Promise((_, reject) => {
+        deadlineTimer = timer(() => {
+          stop(entry).catch(() => {});
+          reject(new Error(`Copilot did not answer in ${deadlineMs / 1000} s`));
+        }, deadlineMs);
+      });
+      try {
+        return await Promise.race([run, deadline]);
+      } finally {
+        clearTimer(deadlineTimer);
+      }
     } finally {
       entry.inFlight--;
       if (entry.inFlight === 0 && entry.started && !entry.exited && entries.get(command) === entry) armIdle(entry);

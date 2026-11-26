@@ -245,20 +245,11 @@ export function quotaLine(pick, { at = null, timeZone } = {}) {
 
 /** Live quota from the Copilot SDK (account.getQuota), picked with pickPool; throws on a start/query error or after `deadlineMs`. */
 export async function readLiveQuota({ runtime, command, deadlineMs = 10_000 }) {
-  let timer;
-  const deadline = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`Copilot did not answer in ${deadlineMs / 1000} s`)), deadlineMs);
+  // The runtime owns the deadline: past it the call rejects and the stuck CLI is replaced.
+  return runtime.withClient({ command, deadlineMs }, async (client) => {
+    const answer = await client.rpc.account.getQuota({});
+    return pickPool(answer?.quotaSnapshots);
   });
-  try {
-    const query = runtime.withClient({ command }, async (client) => {
-      const answer = await client.rpc.account.getQuota({});
-      return pickPool(answer?.quotaSnapshots);
-    });
-    query.catch(() => {}); // a late failure after the deadline is not unhandled
-    return await Promise.race([query, deadline]);
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 /**

@@ -201,6 +201,25 @@ test("stops after 5 min idle, not during a call", async () => {
   assert.equal(h.rt.size(), 0);
 });
 
+test("a call past its deadline stops the CLI and the next call spawns a new one", async () => {
+  const h = harness();
+  const p = h.rt.withClient({ command: "copilot", deadlineMs: 10_000 }, () => new Promise(() => {})).catch((e) => e);
+  await tick();
+  await h.port(h.children[0]);
+  assert.equal(h.rt.size(), 1);
+  await h.advance(10_000);
+  const err = await p;
+  assert.match(err.message, /did not answer in 10 s/);
+  assert.ok(h.kills.some((k) => k.child === h.children[0]));
+  await h.advance(1);
+  assert.equal(h.rt.size(), 0);
+  const q = h.rt.withClient({ command: "copilot" }, async () => 7);
+  await tick();
+  assert.equal(h.spawns.length, 2);
+  await h.port(h.children[1]);
+  assert.equal(await q, 7);
+});
+
 test("POSIX: SIGKILL after the grace", async () => {
   const h = harness({ killExits: false });
   const p = h.rt.withClient({ command: "copilot" }, async () => {});
