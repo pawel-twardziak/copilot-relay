@@ -29,6 +29,7 @@ export class Delegation {
   #listeners = [];
   /** Link requests waiting for the user's answer, in memory only: requestId -> { requestId, kind, parentKey, childKey }. */
   #linkRequests = new Map();
+  #logWarned = new Set();
 
   /**
    * `nameOf`: last known name of a session that has no stored link name (e.g. a root parent), or undefined.
@@ -87,9 +88,31 @@ export class Delegation {
     return ok;
   }
 
+  /**
+   * Run a communication-log call; a failing write (disk full, no permission) must never break message delivery, so
+   * it is reported on stderr once per error code and the call returns undefined.
+   */
+  #guarded(fn) {
+    try {
+      return fn();
+    } catch (e) {
+      const code = e?.code ?? e?.message ?? "error";
+      if (!this.#logWarned.has(code)) {
+        this.#logWarned.add(code);
+        console.warn(`communication log: write failed (${e?.message}); messages are delivered but not logged`);
+      }
+      return undefined;
+    }
+  }
+
   /** Write an event to the communication log (no-op without one); `to` is the recipient's current name. */
   #log({ to, ...fields }) {
-    return this.comms?.append({ ...fields, to: to ?? this.#nameOf(fields.toKey) });
+    if (this.comms) this.#guarded(() => this.comms.append({ ...fields, to: to ?? this.#nameOf(fields.toKey) }));
+  }
+
+  /** Record a status change of a logged message (no-op without a log). */
+  #status(ref, status) {
+    if (this.comms) this.#guarded(() => this.comms.status(ref, status));
   }
 
   /** Log an outbox item: `kind`, and `status` ("delivered"/"queued" from a push result `true`/`false`); notices come from relay. */
@@ -108,7 +131,7 @@ export class Delegation {
 
   /** Log that the dropped outbox items were never delivered. */
   #logDropped(items) {
-    for (const item of items) this.comms?.status(item.id, "dropped");
+    for (const item of items) this.#status(item.id, "dropped");
   }
 
   /** The session is gone for good: drop everything stored about it. */
@@ -126,7 +149,7 @@ export class Delegation {
     this.#dropLinkRequests((r) => r.parentKey === key || r.childKey === key);
     const { reopens, items } = this.store.forget(key);
     this.#logDropped(items);
-    this.comms?.purge(key);
+    if (this.comms) this.#guarded(() => this.comms.purge(key));
     for (const r of reopens) this.#notDelivered(r.fromKey, name);
   }
 
@@ -374,7 +397,7 @@ export class Delegation {
     if (approved && reason !== "missing") {
       const items = this.store.awaitingFor(requestId);
       this.store.release(requestId);
-      for (const item of items) if (this.#deliver(item)) this.comms?.status(item.id, "delivered");
+      for (const item of items) if (this.#deliver(item)) this.#status(item.id, "delivered");
     } else {
       this.#logDropped(this.store.dropAwaiting(requestId));
       this.store.removeReopen(requestId); // before a forget, which tells the other senders of the same target
@@ -567,7 +590,7 @@ export class Delegation {
     const parent = this.store.parentOf(key);
     if (peer && parent && !peer.parentKey) peer.parentKey = parent;
     if (peer && parent && peer.name !== this.store.nameOf(key)) this.store.link(key, parent, peer.name);
-    for (const item of this.store.pending(key)) if (this.#deliver(item, { redelivered: true })) this.comms?.status(item.id, "delivered");
+    for (const item of this.store.pending(key)) if (this.#deliver(item, { redelivered: true })) this.#status(item.id, "delivered");
     for (const reopen of this.store.reopensFrom(key)) this.#askReopen(reopen);
     for (const request of this.#linkRequests.values()) if (request.parentKey === key) this.#askLink(request);
     this.#changed();
@@ -579,7 +602,7 @@ export class Delegation {
     const item = this.store.pending(key).find((i) => i.id === id);
     const held = this.store.heldItems().includes(item);
     const removed = this.store.remove(id);
-    if (removed) this.comms?.status(id, outcome);
+    if (removed) this.#status(id, outcome);
     if (held) this.#changed();
     return removed;
   }

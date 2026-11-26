@@ -225,3 +225,55 @@ test("without comms nothing changes (no throw)", () => {
   s.d.forget("cli:child");
   assert.ok(s.pushes["cli:parent"].length >= 2);
 });
+
+test("a failing log write never breaks delivery", () => {
+  const s = setup();
+  const boom = () => {
+    throw Object.assign(new Error("no space left"), { code: "ENOSPC" });
+  };
+  const bad = { append: boom, status: boom, purge: boom, eventsOf: () => [] };
+  s.d.comms = bad;
+  s.registry.comms = bad;
+  const warn = console.warn;
+  const warned = [];
+  console.warn = (m) => warned.push(m);
+  try {
+    // Registry.send: app recipient (via appMessage) and non-app recipient
+    assert.match(s.registry.send("cli:child", s.nm("cli:parent"), "to app"), /delivered/);
+    s.add("cli:x", "plain", { app: false });
+    assert.match(s.registry.send("cli:parent", s.nm("cli:x"), "to plain"), /delivered/);
+    assert.equal(s.registry.sendFromUser(s.nm("cli:x"), "hi"), true);
+    assert.equal(s.d.setTask("cli:child", "t"), true);
+    // report: the child still gets its "reported" control event
+    assert.match(s.d.report("cli:child", "done"), /delivered/);
+    assert.ok(s.controls["cli:child"].some((c) => c[0] === "reported"));
+    // attached redelivers both pending items
+    const parent = s.registry.get("cli:parent");
+    const push = parent.push;
+    parent.push = () => false;
+    s.d.appMessage("cli:child", "cli:parent", "one");
+    s.d.appMessage("cli:child", "cli:parent", "two");
+    parent.push = push;
+    const before = s.pushes["cli:parent"].length;
+    s.d.attached("cli:parent");
+    // every unacknowledged item is redelivered (the earlier ones too), the two new ones included
+    const again = s.pushes["cli:parent"].slice(before).map((m) => [m.text, m.redelivered]);
+    assert.deepEqual(again.slice(-2), [["one", true], ["two", true]]);
+    assert.equal(again.length, 4);
+    // ack still removes the item and returns true
+    const id = s.store.pending("cli:parent")[0].id;
+    assert.equal(s.d.ack("cli:parent", id), true);
+    // release: the awaiting item is dropped and the link ends
+    close(s, "cli:child");
+    s.d.messageClosed("cli:parent", s.nm("cli:child"), "held");
+    parent.linkCards = true;
+    s.d.requestLink("cli:parent", "release", s.nm("cli:child"));
+    const link = s.controls["cli:parent"].filter((c) => c[0] === "link_request").pop()[1];
+    assert.equal(s.d.answerLink("cli:parent", link.requestId, true).result, "released");
+    assert.equal(s.store.parentOf("cli:child"), null);
+    s.d.forget("cli:child");
+  } finally {
+    console.warn = warn;
+  }
+  assert.equal(warned.length, 2); // once per process-side owner (Delegation, Registry), not per write
+});
