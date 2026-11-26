@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // A scripted ACP agent for the UI checks (scripts/ui-check). SCRIPTED_SCENARIO is the path of a module whose default
-// export is { prompts: Step[][] }: the n-th session/prompt of a session plays prompts[n] (or prompts(text, n) when
-// prompts is a function of the prompt's text and its index). Steps:
+// export is { prompts: Step[][] }: the n-th session/prompt of a session plays prompts[n]. prompts may instead be a
+// function (text, n) => Step[]: each prompt plays what it returns for the prompt's text and its index n (from 0). Steps:
 //   { u: update }        a session/update
 //   { perm: toolCall }   a session/request_permission; the next step waits for its answer
 //   { wait: ms }         a pause

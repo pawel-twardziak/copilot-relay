@@ -275,3 +275,20 @@ test("a checkpoint step writes a usage checkpoint", async (t) => {
   assert.ok(expires >= before + 9000 && expires <= after + 9000, `expires ${expires - before} ms after the prompt`);
   assert.ok(Math.abs(Date.parse(first.timestamp) + 9000 - expires) < 5, "about 9 s after the step ran");
 });
+
+test("prompts as a function plays the steps it returns for each prompt's text and index", async (t) => {
+  const cwd = freshCwd();
+  const byText = path.join(tmp, "by-text.mjs");
+  writeFileSync(
+    byText,
+    `export default { prompts: (text, n) => [{ u: { sessionUpdate: "agent_message_chunk", messageId: "f" + n, content: { type: "text", text: n + ":" + text } } }, { end: "end_turn" }] };\n`,
+  );
+  const a = start(t, cwd, byText);
+  await a.request("initialize", { protocolVersion: 1 });
+  const sessionId = a.seen[await a.request("session/new", { cwd, mcpServers: [] })].result.sessionId;
+  const from = a.seen.length;
+  await a.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "first" }] });
+  await a.request("session/prompt", { sessionId, prompt: [{ type: "text", text: "second" }] });
+  a.stop();
+  assert.deepEqual(a.updates(from).map((p) => p.update), [text("f0", "0:first"), text("f1", "1:second")]);
+});

@@ -575,20 +575,25 @@ const KEEPER_COMPACT = "/compact Quote verbatim the last user message and your l
 const KEEPER_NOTICE = "Compacted automatically before the prompt cache expired (−4 messages)";
 const KV = `views.get(${JSON.stringify(HISTORY_ID)})`;
 const keeperChip = (app) => app.ev(`${KV}.keeperChip.hidden ? null : ${KV}.keeperText.textContent`);
+/** What the scripted agent recorded: every prompt (user_message_chunk) and update it sent, in order. */
+const agentUpdates = (app) => JSON.parse(readFileSync(path.join(app.dir, "work", ".scripted-agent.json"), "utf8")).updates;
 /** The prompts the scripted agent received, in order. */
-const agentPrompts = (app) =>
-  JSON.parse(readFileSync(path.join(app.dir, "work", ".scripted-agent.json"), "utf8"))
-    .updates.filter((u) => u.sessionUpdate === "user_message_chunk")
-    .map((u) => u.content.text);
+const agentPrompts = (app) => agentUpdates(app).filter((u) => u.sessionUpdate === "user_message_chunk").map((u) => u.content.text);
+/** The prompts and answer chunks the agent recorded, in order: "user <text>" (a ping as "user ping"), "agent <text>". */
+const agentTalk = (app) =>
+  agentUpdates(app).flatMap((u) => {
+    if (u.sessionUpdate === "user_message_chunk") return [`user ${u.content.text.startsWith(KEEPALIVE_MARKER) ? "ping" : u.content.text}`];
+    return u.sessionUpdate === "agent_message_chunk" ? [`agent ${u.content.text}`] : [];
+  });
 const pingSent = (app) => until(async () => agentPrompts(app).some((p) => p.startsWith(KEEPALIVE_MARKER)), "the keep-alive ping", 7000);
 const keeperSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 /** The chat's rows from your first message on (the "New session in" line before it left out): [class, text] of your
  *  messages, the answers (their text only, without the row's buttons and time), notices and errors. */
-const chatRows = (app) =>
-  app.ev(`(() => {
-    const rows = [...${KV}.log.querySelectorAll(":scope > .msg")];
-    return rows.slice(rows.findIndex((e) => e.matches(".user"))).map((e) => [e.className, (e.querySelector(":scope > .body, :scope > .md") ?? e).textContent.trim()]);
-  })()`);
+const CHAT_ROWS = `(() => {
+  const rows = [...${KV}.log.querySelectorAll(":scope > .msg")];
+  return rows.slice(rows.findIndex((e) => e.matches(".user"))).map((e) => [e.className, (e.querySelector(":scope > .body, :scope > .md") ?? e).textContent.trim()]);
+})()`;
+const chatRows = (app) => app.ev(CHAT_ROWS);
 
 /** A keeper check: the keeper on with one ping, its leads and retries short (main's test hooks). */
 const keeperCheck = (name, run, env = {}) => ({
@@ -615,14 +620,22 @@ const keeperChecks = [
     await keeperStart(app);
     await pingSent(app);
     await until(async () => (await keeperChip(app)) === "♻ Keeping the cache warm (1/1)", "the chip after the ping");
-    await until(async () => (await keeperChip(app))?.startsWith("⏳ Compacting in"), "the countdown chip");
-    await app.check(`!!document.querySelector("span.keeper-mark")`, "the ⏳ mark in the session list");
-    assert.equal(await app.ev(`${KV}.keeperNotNow.hidden`), false, "Not now is offered");
-    assert.deepEqual(await chatRows(app), [["msg user", "hello"], ["msg agent", "Answer to hello."]], "the ping left no row in the chat");
-    await app.ev(`${KV}.el.querySelector("button.keeper-not-now").click()`);
+    // the countdown lasts 2 s: Not now is clicked in the same evaluation that sees it, what it shows captured there
+    const seen = await app.check(
+      `(() => {
+        const v = ${KV};
+        if (v.keeperChip.hidden || !v.keeperText.textContent.startsWith("⏳ Compacting in") || !document.querySelector("span.keeper-mark")) return null;
+        const seen = { notNowHidden: v.keeperNotNow.hidden, rows: ${CHAT_ROWS} };
+        v.el.querySelector("button.keeper-not-now").click();
+        return seen;
+      })()`,
+      "the countdown chip and the ⏳ mark in the session list",
+    );
+    assert.equal(seen.notNowHidden, false, "Not now must be offered in the countdown");
+    assert.deepEqual(seen.rows, [["msg user", "hello"], ["msg agent", "Answer to hello."]], "the ping must leave no row in the chat");
     await until(async () => (await keeperChip(app)) === null, "Not now to hide the chip");
     await keeperSleep(6000);
-    assert.equal(agentPrompts(app).filter((p) => p.startsWith("/compact")).length, 0, "no compaction after Not now");
+    assert.equal(agentPrompts(app).filter((p) => p.startsWith("/compact")).length, 0, "there must be no compaction after Not now");
     assert.equal(await keeperChip(app), null);
   }),
   // without Not now the keeper compacts: its notice is in the chat, Copilot's own reply line is not
@@ -634,7 +647,7 @@ const keeperChecks = [
     await until(async () => (await keeperChip(app)) === null, "the chip to go after the compaction");
     const rows = await chatRows(app);
     assert.deepEqual(rows, [["msg user", "hello"], ["msg agent", "Answer to hello."], ["msg system", KEEPER_NOTICE]]);
-    assert.ok(!(await app.ev(`${KV}.log.textContent.includes("Compacted conversation history")`)), "Copilot's reply line is in the chat");
+    assert.ok(!(await app.ev(`${KV}.log.textContent.includes("Compacted conversation history")`)), "Copilot's reply line must not be in the chat");
     assert.equal(agentPrompts(app).filter((p) => p.startsWith("/compact")).length, 1);
   }),
   // a message sent while a ping runs waits for it, then goes out once and is answered
@@ -643,16 +656,19 @@ const keeperChecks = [
     async (app) => {
       await keeperStart(app);
       await pingSent(app);
-      assert.ok(agentPrompts(app).at(-1).startsWith(KEEPALIVE_MARKER), "the ping is the last prompt");
       await app.send("second"); // the ping waits 1.5 s before its answer
+      assert.ok(!agentTalk(app).includes("agent ."), "second must be sent while the ping runs (before its answer)");
+      // main holds second back until the ping's turn ended: the agent got it after the ping's answer
+      await until(async () => agentPrompts(app).includes("second"), "second to reach the agent");
+      assert.deepEqual(agentTalk(app).slice(0, 5), ["user hello", "agent Answer to hello.", "user ping", "agent .", "user second"], "second must reach the agent after the ping's answer");
       await app.check(`[...${KV}.log.querySelectorAll(":scope > .msg.agent")].some((e) => e.textContent.includes("Answer to second."))`, "the answer to second");
       await app.idle();
-      const prompts = agentPrompts(app);
-      assert.equal(prompts.filter((p) => p === "second").length, 1, "second reached the agent once");
-      assert.ok(prompts.findIndex((p) => p.startsWith(KEEPALIVE_MARKER)) < prompts.indexOf("second"), "second went out after the ping");
+      const talk = agentTalk(app).slice(0, 6); // a next ping may follow 3 s after second's turn
+      assert.deepEqual(talk, ["user hello", "agent Answer to hello.", "user ping", "agent .", "user second", "agent Answer to second."], "second must be answered once, after the ping");
+      assert.equal(agentPrompts(app).filter((p) => p === "second").length, 1, "second must reach the agent once");
       const rows = await chatRows(app);
       assert.deepEqual(rows.filter(([c]) => c === "msg user"), [["msg user", "hello"], ["msg user", "second"]]);
-      assert.deepEqual(rows.filter(([c]) => c === "msg error" || c === "msg system"), [], "no notice or error");
+      assert.deepEqual(rows.filter(([c]) => c === "msg error" || c === "msg system"), [], "there must be no notice or error");
     },
     { SCRIPTED_KEEPER_PING_WAIT_MS: "1500" },
   ),
@@ -665,7 +681,7 @@ const keeperChecks = [
     await app.send("hello");
     await app.idle();
     await keeperSleep(8000);
-    assert.deepEqual(agentPrompts(app), ["hello"], "nothing was sent after hello");
+    assert.deepEqual(agentPrompts(app), ["hello"], "nothing must be sent after hello");
     assert.equal(await keeperChip(app), null);
   }),
 ];
