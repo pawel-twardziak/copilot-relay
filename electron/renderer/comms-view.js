@@ -9,15 +9,7 @@
 const NS = "http://www.w3.org/2000/svg";
 const OLD_BROKER = "The relay broker is older than the app and keeps no message history; restart it to get one.";
 const LOG_MAX = 1000; // rows drawn at most (the newest); the summary still counts all
-const KEEPER_ON = new Set(["pinging", "countdown", "compacting"]);
-const TIMED = new Set(["in-progress", "waiting-report", "waiting-reply", "awaiting-reopen"]);
-const STATE_WORDS = { working: "working", idle: "idle", "waiting-task": "waiting for a task", closed: "closed", proposed: "proposed" };
-const LIVE_WORDS = {
-  "in-progress": "task in progress", "waiting-report": "parent waits for the report", "waiting-reply": "waiting for a reply",
-  "ended-no-report": "ended without report", "awaiting-reopen": "awaiting reopen",
-};
-const HELD_WORDS = { child: "from sub-sessions", parent: "from the parent", other: "from other sessions" };
-const CARD_WORDS = { permission: "a permission question", link: "a link request", reopen: "a reopen request", create: "a new session proposal" };
+const { clock, hms, chars, plural, keeperOf, statusOf, hasTimer, cornerOf, nodeWidths, nodeTitle, edgeTitle } = CommsText;
 let seq = 0; // marker ids unique per panel (url(#id) takes the first match in the document)
 
 const svg = (tag, attrs = {}) => {
@@ -25,96 +17,14 @@ const svg = (tag, attrs = {}) => {
   for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
   return el;
 };
-const pad2 = (n) => String(n).padStart(2, "0");
-/** m:ss, or h:mm:ss from an hour, of a duration in ms (never negative). */
-function clock(ms) {
-  const t = Math.max(0, Math.floor(ms / 1000));
-  const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60;
-  return h ? `${h}:${pad2(m)}:${pad2(s)}` : `${m}:${pad2(s)}`;
-}
-const hms = (ts) => {
-  const d = new Date(ts);
-  return Number.isNaN(d.getTime()) ? "" : `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
-};
-/** A size in characters, short: 850, 4.3k, 12k, 1.2M. */
-function chars(n) {
-  const v = Number(n) || 0;
-  if (v < 1000) return String(v);
-  if (v < 1e6) return `${(v / 1000).toFixed(v < 10000 ? 1 : 0)}k`;
-  return `${(v / 1e6).toFixed(1)}M`;
-}
-const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
-const sum = (o) => Object.values(o ?? {}).reduce((a, b) => a + (Number(b) || 0), 0);
-const keeperOf = (n) => (KEEPER_ON.has(n.keeper?.phase) ? n.keeper : null);
-
-/** The keeper's part of a status line: "⏳ 1:45" to compaction, "Compacting…", "♻ 2/5" while pinging; null when off. */
-function keeperText(k, now) {
-  if (!k) return null;
-  if (k.phase === "countdown") return `⏳ ${clock((k.compactAt ?? now) - now)}`;
-  if (k.phase === "compacting") return "Compacting…";
-  return `♻ ${k.pingsSent ?? 0}/${k.pings ?? 0}`;
-}
-
-/** The text of an edge's live state with its timer ("parent waits for the report · 5:40"), or null. */
-function liveText(edge, now) {
-  if (!edge.live) return null;
-  const timer = TIMED.has(edge.live) && edge.since != null ? ` · ${clock(now - edge.since)}` : "";
-  return LIVE_WORDS[edge.live] + timer;
-}
-
-/** A node's status line: the keeper first when it runs, then what the edges say about it, else its state. */
-function statusOf(node, edges, now) {
-  const into = (live) => edges.find((e) => e.to === node.id && e.live === live);
-  const out = (live) => edges.find((e) => e.from === node.id && e.live === live);
-  const since = (e) => (e.since != null ? ` · ${clock(now - e.since)}` : "");
-  let s = STATE_WORDS[node.state] ?? node.state;
-  let e;
-  if (out("ended-no-report")) s = "ended without report";
-  else if ((e = into("in-progress"))) s = `working${since(e)}`;
-  else if ((e = out("waiting-report"))) s = `${node.state === "closed" ? "closed · " : ""}parent waits${since(e)}`;
-  else if ((e = into("awaiting-reopen"))) s = `awaiting reopen${since(e)}`;
-  else if ((e = into("waiting-reply"))) s = `reply awaited${since(e)}`;
-  const k = keeperText(keeperOf(node), now);
-  return k ? `${k} · ${s}` : s;
-}
-
-/** True while some node or edge shows a running timer (the caller re-renders every second). */
-function hasTimer(model) {
-  return (model?.edges ?? []).some((e) => TIMED.has(e.live) && e.since != null) || (model?.nodes ?? []).some((n) => keeperOf(n));
-}
-
-/** The node's tooltip: who it is, its state, counts, context, keeper, held messages and open cards. */
-function nodeTitle(n, status) {
-  const lines = [n.name, status];
-  if (!n.inTree) lines.push(n.released ? "Released from the tree" : "Outside the tree");
-  if (n.state !== "proposed") {
-    lines.push(`Between sessions: ${n.sent} sent · ${n.received} received`);
-    if (n.badges.relay || n.badges.user) lines.push(`Received from relay: ${n.badges.relay} · from you: ${n.badges.user}`);
-  }
-  if (n.ctx) lines.push(n.ctx.label + (n.ctx.level !== "ok" ? " (automatic compaction is near)" : ""));
-  const held = Object.entries(n.held).filter(([, c]) => c > 0).map(([k, c]) => `${c} ${HELD_WORDS[k] ?? k}`);
-  if (held.length) lines.push(`Waiting for your approval: ${held.join(", ")}`);
-  const cards = n.cards.filter((c) => c.kind !== "create").map((c) => CARD_WORDS[c.kind] ?? c.kind);
-  if (cards.length) lines.push(`Waits for your answer: ${cards.join(", ")}`);
-  if (n.state !== "proposed") lines.push("Click: filter the log · double click: open");
-  return lines.filter(Boolean).join("\n");
-}
-
-function edgeTitle(e, names, now) {
-  const lines = [`${names(e.from)} → ${names(e.to)}`, `${plural(e.count, "message")} · ${plural(e.size, "character")}`];
-  if (e.last) lines.push(`Last: ${hms(e.last)}`);
-  const live = liveText(e, now);
-  if (live) lines.push(live);
-  if (e.held) lines.push(`${e.held} waiting for your approval`);
-  lines.push("Click: filter the log");
-  return lines.join("\n");
-}
+const MIN_NODE = 140, MAX_NODE = 320, PADS = 1.26; // the layout's box width limits; a box plus its two margins
 
 /**
  * The panel in `el` (the view's comms-body).
  *   h: the app's element helper; on = { openSession(id), fetchText(id) -> Promise<string>, filter(f | null),
  *   split(ratio, done) }  (split: the graph's share while dragging, done on pointer up)
- * -> { render(model, opts), destroy() }; opts = { split (0..1), filter, note (a log line instead of the rows:
+ * -> { render(model, opts), destroy() }; opts = { split (0..1), autoSplit (the bar was never dragged: the graph
+ *    gets the height it needs, up to the largest share the log allows), filter, note (a log line instead of the rows:
  *    loading, an error) }
  */
 function create({ h, el, on }) {
@@ -138,24 +48,35 @@ function create({ h, el, on }) {
   const log = h("div", { class: "comms-log" });
   el.replaceChildren(graph, bar, summary, log);
 
-  let model = null, opts = {}, laid = null, layoutKey = "", ratio = 0.5, dragging = false;
+  let model = null, opts = {}, laid = null, ratio = 0.5, dragging = false, manual = false;
+  const layouts = new Map(); // layout key -> CommsLayout.layout's result (sizes and box widths tried)
   const nodeEls = new Map(), edgeEls = new Map(), rowEls = new Map();
   const names = (nid) => model?.nodes.find((n) => n.id === nid)?.name ?? nid;
 
-  // the split: the graph's share of the height left by the bar and the summary
-  const applySplit = () => {
-    const total = el.clientHeight - bar.offsetHeight - summary.offsetHeight;
-    if (total <= 0) return;
-    graph.style.height = `${Math.round(UiState.clampSplit(ratio, total) * total)}px`;
+  // text widths at the UI font (the box width the names and status lines need)
+  const widths = new Map();
+  let ctx2d = null;
+  const measure = (font, family) => (text, bold) => {
+    const k = `${bold ? 1 : 0}${font}\0${text}`;
+    if (!widths.has(k)) {
+      ctx2d ??= document.createElement("canvas").getContext("2d");
+      ctx2d.font = `${bold ? "600 " : ""}${font}px ${family}`;
+      if (widths.size > 2000) widths.clear();
+      widths.set(k, ctx2d.measureText(text).width);
+    }
+    return widths.get(k);
   };
+  // the split: the graph's share of the height left by the bar and the summary
+  const graphTotal = () => el.clientHeight - bar.offsetHeight - summary.offsetHeight;
   bar.addEventListener("pointerdown", (e) => {
     if (e.button !== 0) return;
     e.preventDefault();
     const top = graph.getBoundingClientRect().top;
-    const total = el.clientHeight - bar.offsetHeight - summary.offsetHeight;
+    const total = graphTotal();
+    manual = true; // the stored share from now on, not the height the graph needs
     const move = (m) => {
       ratio = UiState.clampSplit((m.clientY - top) / total, total);
-      applySplit();
+      graph.style.height = `${Math.round(ratio * total)}px`;
       on.split?.(ratio, false);
     };
     const end = () => {
@@ -208,20 +129,58 @@ function create({ h, el, on }) {
 
   function drawGraph() {
     if (!model) return;
-    const width = graph.clientWidth, height = graph.clientHeight;
-    if (!width || !height) return; // not shown: drawn when it shows (the ResizeObserver)
-    const px = (n) => parseFloat(getComputedStyle(n).fontSize) || 0;
-    const font = Math.max(px(graph), px(document.documentElement), 10);
-    const key = JSON.stringify([width, height, font, model.nodes.map((n) => [n.id, n.parent, n.inTree]), model.edges.map((e) => [e.from, e.to])]);
-    if (key !== layoutKey) {
-      laid = CommsLayout.layout(model.nodes, model.edges, { width, height, font });
-      layoutKey = key;
+    const width = graph.clientWidth, total = graphTotal();
+    if (!width || total <= 0) return; // not shown: drawn when it shows (the ResizeObserver)
+    const style = getComputedStyle(graph);
+    const font = Math.max(parseFloat(style.fontSize) || 0, parseFloat(getComputedStyle(document.documentElement).fontSize) || 0, 10);
+    const now = Date.now();
+    // boxes as wide as the longest name needs (a clock counts as zeros) when that needs no scroll, else narrower
+    // down to what the status lines need (a long name may be cut, a clock never); within the layout's limits and
+    // never wider than one box fits the area
+    const need = nodeWidths({ nodes: model.nodes, edges: model.edges, now, font, measure: measure(font, style.fontFamily) });
+    const clampW = (v) => Math.max(MIN_NODE, Math.min(v, MAX_NODE, Math.floor((width - 2) / PADS)));
+    const hi = clampW(Math.max(need.name, need.status)), lo = clampW(need.status);
+    const shape = JSON.stringify([model.nodes.map((n) => [n.id, n.parent, n.inTree]), model.edges.map((e) => [e.from, e.to])]);
+    const layAt = (height, minNode) => {
+      const key = JSON.stringify([width, height, font, minNode, shape]);
+      if (!layouts.has(key)) {
+        if (layouts.size > 60) layouts.clear();
+        layouts.set(key, CommsLayout.layout(model.nodes, model.edges, { width, height, font, minNode }));
+      }
+      return (laid = layouts.get(key));
+    };
+    const boxWidth = (height) => {
+      const fits = (m) => !layAt(height, m).scrollX && !layAt(height, m).scrollY;
+      if (hi === lo || fits(hi)) return hi;
+      if (!fits(lo)) return lo; // scrolls anyway: the narrowest boxes
+      let a = lo, b = hi; // a fits, b does not
+      while (b - a > 6) {
+        const m = Math.round((a + b) / 2);
+        if (fits(m)) a = m;
+        else b = m;
+      }
+      return a;
+    };
+    // the graph's height: the stored share once the bar was dragged, else what the graph needs at this width, up to
+    // the largest share (the log keeps its minimum)
+    let height;
+    if (opts.autoSplit && !manual) {
+      const max = Math.round(UiState.clampSplit(1, total) * total);
+      const m = boxWidth(max);
+      const full = layAt(max, m);
+      const top = Math.min(...full.nodes.map((n) => n.y)), bottom = Math.max(...full.nodes.map((n) => n.y + n.h));
+      const used = full.scrollY || !full.nodes.length ? max : Math.ceil(bottom + top) + 2;
+      height = Math.max(Math.min(120, max), Math.min(max, used));
+      layAt(height, m);
+    } else {
+      height = Math.round(UiState.clampSplit(ratio, total) * total);
+      layAt(height, boxWidth(height));
     }
+    graph.style.height = `${height}px`;
     canvas.style.width = `${laid.width}px`;
     canvas.style.height = `${laid.height}px`;
     svgEl.setAttribute("width", laid.width);
     svgEl.setAttribute("height", laid.height);
-    const now = Date.now();
     const f = opts.filter ?? null;
     const byId = new Map(model.nodes.map((n) => [n.id, n]));
     const closedEnd = (e) => byId.get(e.from)?.state === "closed" || byId.get(e.to)?.state === "closed";
@@ -299,15 +258,9 @@ function create({ h, el, on }) {
       it.el.title = nodeTitle(n, status);
       it.name.textContent = n.name;
       it.status.textContent = status;
-      const held = sum(n.held);
-      const asks = n.cards.filter((c) => c.kind !== "create");
-      const heldTip = Object.entries(n.held).filter(([, c]) => c > 0).map(([k, c]) => `${c} ${HELD_WORDS[k] ?? k}`).join(", ");
       it.tag.hidden = !n.released;
       // what waits for you sits on the box's top right corner; the name line keeps clear of it
-      it.corner.replaceChildren(...[
-        held && h("span", { class: "cn-pill held", title: `${plural(held, "message")} waiting for your approval: ${heldTip}` }, String(held)),
-        asks.length && h("span", { class: "cn-pill asks", title: `Waits for your answer: ${asks.map((c) => CARD_WORDS[c.kind] ?? c.kind).join(", ")}` }, asks.length > 1 ? `?${asks.length}` : "?"),
-      ].filter(Boolean));
+      it.corner.replaceChildren(...cornerOf(n).map((p) => h("span", { class: `cn-pill ${p.kind}`, title: p.title }, p.text)));
       it.first.style.paddingRight = it.corner.firstChild ? `${Math.max(0, it.corner.offsetWidth - 0.9 * nf)}px` : "";
       it.badges.replaceChildren(
         ...[n.badges.relay && h("span", { class: "cn-pill" }, `relay ${n.badges.relay}`), n.badges.user && h("span", { class: "cn-pill" }, `user ${n.badges.user}`)].filter(Boolean),
@@ -412,7 +365,6 @@ function create({ h, el, on }) {
     if (dragging || frame) return;
     frame = requestAnimationFrame(() => {
       frame = 0;
-      applySplit();
       drawGraph();
       toBottom();
     });
@@ -426,7 +378,6 @@ function create({ h, el, on }) {
       model = next;
       opts = nextOpts;
       if (!dragging && Number.isFinite(opts.split)) ratio = opts.split;
-      applySplit();
       drawGraph();
       drawSummary();
       drawLog();
@@ -443,6 +394,6 @@ function create({ h, el, on }) {
   };
 }
 
-const CommsView = { create, hasTimer, statusOf, clock, OLD_BROKER };
+const CommsView = { create, hasTimer, OLD_BROKER };
 globalThis.CommsView = CommsView;
 })();

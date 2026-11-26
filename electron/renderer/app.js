@@ -3574,6 +3574,7 @@ function loadUi() {
     panelCollapsed: raw.panelCollapsed === true, // applies to the wide layout only
     rightPanel: raw.rightPanel === "comms" ? "comms" : "activity", // which panel holds the right-hand slot
     commsSplit: Number.isFinite(raw.commsSplit) && raw.commsSplit >= 0 && raw.commsSplit <= 1 ? raw.commsSplit : 0.5, // the graph's share of the Communication panel
+    commsSplitSet: raw.commsSplitSet === true, // you dragged the split: until then the graph gets the height it needs
   };
 }
 const ui = loadUi();
@@ -3724,8 +3725,8 @@ const viewer = (() => {
 })();
 function saveUi() {
   try {
-    const { pinned, collapsed, chatScale, panelWidth, panelCollapsed, rightPanel, commsSplit } = ui;
-    localStorage.setItem(UI_KEY, JSON.stringify({ pinned: [...pinned], collapsed: [...collapsed], chatScale, panelWidth, panelCollapsed, rightPanel, commsSplit }));
+    const { pinned, collapsed, chatScale, panelWidth, panelCollapsed, rightPanel, commsSplit, commsSplitSet } = ui;
+    localStorage.setItem(UI_KEY, JSON.stringify({ pinned: [...pinned], collapsed: [...collapsed], chatScale, panelWidth, panelCollapsed, rightPanel, commsSplit, commsSplitSet }));
   } catch {}
 }
 /** The activity panel's stored width or collapsed state changed: every view lays its panel out again. */
@@ -3775,7 +3776,9 @@ function drawComms() {
     if (v.panelKind !== "comms") continue;
     const rootKey = `cli:${commsRootOf(v.sessionId)}`;
     if (v.commsRoot !== rootKey) Object.assign(v, { commsRoot: rootKey, commsFilter: null }); // another tree: no filter
-    if (!commsByRoot.has(rootKey)) fetchComms(rootKey);
+    const cached = commsByRoot.get(rootKey);
+    // not fetched yet, or a failed / older broker's answer of more than 5 s ago (the broker may be back or restarted)
+    if (!cached || ((cached.error || cached.unsupported) && Date.now() - cached.at > 5000)) fetchComms(rootKey);
     const entry = commsByRoot.get(rootKey);
     const comms = entry?.events ? { root: rootKey, keys: [...entry.keys], events: entry.events, peers: entry.peers } : null;
     const model = CommsModel.build({ comms, links, heldByKind: heldByKindKey, current: v.sessionId, live, now: Date.now(), filter: v.commsFilter });
@@ -3789,12 +3792,16 @@ function drawComms() {
         },
         split: (ratio, done) => {
           ui.commsSplit = ratio;
-          if (done) (saveUi(), commsRefresh()); // every view's panel takes the new split
+          if (done) {
+            ui.commsSplitSet = true; // your share from now on, not the graph's needed height
+            saveUi();
+            commsRefresh(); // every view's panel takes the new split
+          }
         },
       },
     });
     const note = entry?.loading ? "Loading the message history…" : entry?.error ? `Could not load the message history: ${entry.error}` : null;
-    v.commsView.render(model, { split: ui.commsSplit, filter: v.commsFilter, note });
+    v.commsView.render(model, { split: ui.commsSplit, autoSplit: !ui.commsSplitSet, filter: v.commsFilter, note });
     if (v.el.classList.contains("active") && CommsView.hasTimer(model)) tick = true;
   }
   if (tick) commsTicker = setTimeout(commsRefresh, 1000);
@@ -3811,7 +3818,10 @@ function fetchComms(rootKey) {
     const at = Date.now();
     if (r?.unsupported) commsByRoot.set(rootKey, { unsupported: true, at });
     else if (!Array.isArray(r?.events)) {
-      if (!commsByRoot.get(rootKey)?.events) commsByRoot.set(rootKey, { error: r?.error ?? "no answer", at });
+      const prev = commsByRoot.get(rootKey);
+      if (!prev?.events) commsByRoot.set(rootKey, { error: r?.error ?? "no answer", at });
+      // a first failure is tried once more in 5 s (later ones when a panel shows it, see drawComms)
+      if (!prev?.error) setTimeout(() => commsByRoot.get(rootKey)?.error && fetchComms(rootKey), 5000);
     } else {
       const ids = new Set(r.events.map((e) => e.id));
       const events = [...r.events, ...pushed.filter((e) => !ids.has(e.id))]; // what came while the broker answered

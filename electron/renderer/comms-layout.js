@@ -404,9 +404,9 @@ function layout(nodes = [], edges = [], opts = {}) {
     g.bus = Math.min(g.gy - o1 - 2, Math.max(g.gy * BUS, lh0 + o1 + 3));
     return g;
   };
-  // the arrangement at the minimum size for gaps g: { g, unit: id -> top left, trunkOf: child -> trunk point,
-  // placement, W1, H1 }
-  const arrange = (g) => {
+  // the arrangement at the minimum size for gaps g and the outside nodes' placement ("right" | "below"):
+  // { g, unit: id -> top left, trunkOf: child -> trunk point, placement, W1, H1 }
+  const arrange = (g, where) => {
     const unit = new Map(); // id -> { x, y } top left at the minimum size
     const trunkOf = new Map(); // child id -> trunk point of its wrapped group
     const placeTree = (avail) => {
@@ -424,15 +424,11 @@ function layout(nodes = [], edges = [], opts = {}) {
       }
       return { w, h };
     };
-    // outside nodes (and any in-tree node the tree did not reach): a column on the right when it fits the width, else
-    // rows below the tree; ordered by the topmost tree node each exchanged messages with
+    // outside nodes (and any in-tree node the tree did not reach): a column on the right of the tree, or rows below
+    // it; ordered by the topmost tree node each exchanged messages with
     const others = nodes.filter((n) => !n.inTree).length;
-    let tree = placeTree(Math.max(g.w, area.w - 2 * g.pad - (others ? g.out + g.w : 0)));
-    let placement = "right";
-    if (others && tree.w && 2 * g.pad + tree.w + g.out + g.w > area.w) {
-      placement = "below";
-      tree = placeTree(Math.max(g.w, area.w - 2 * g.pad));
-    }
+    const placement = others ? where : "right";
+    const tree = placeTree(Math.max(g.w, area.w - 2 * g.pad - (placement === "right" && others ? g.out + g.w : 0)));
     const anchor = new Map();
     for (const e of edges) {
       for (const [out, peer] of [[e.from, e.to], [e.to, e.from]]) {
@@ -478,15 +474,26 @@ function layout(nodes = [], edges = [], opts = {}) {
   // does not fit, the gaps give way toward their floors (the least squeeze that fits) when that avoids the scroll; a
   // graph that scrolls anyway keeps the normal gaps.
   const fitOf = (a) => Math.min((area.w - 1) / a.W1, (area.h - 1) / a.H1);
-  let chosen = arrange(gapsAt(0));
-  if (fitOf(chosen) < 1 && fitOf(arrange(gapsAt(1))) >= 1) {
-    let lo = 0, hi = 1;
-    for (let i = 0; i < 10; i++) {
-      const mid = (lo + hi) / 2;
-      if (fitOf(arrange(gapsAt(mid))) >= 1) hi = mid;
-      else lo = mid;
+  const fitted = (where) => {
+    let c = arrange(gapsAt(0), where);
+    if (fitOf(c) < 1 && fitOf(arrange(gapsAt(1), where)) >= 1) {
+      let lo = 0, hi = 1;
+      for (let i = 0; i < 10; i++) {
+        const mid = (lo + hi) / 2;
+        if (fitOf(arrange(gapsAt(mid), where)) >= 1) hi = mid;
+        else lo = mid;
+      }
+      c = arrange(gapsAt(hi), where);
     }
-    chosen = arrange(gapsAt(hi));
+    return c;
+  };
+  // outside nodes on the right while that needs no scroll, else below when that needs none; when both scroll, the
+  // one without a horizontal scroll, then the larger scale (ties: right)
+  const rank = (c) => (fitOf(c) >= 1 ? 2 : (area.w - 1) / c.W1 >= 1 ? 1 : 0);
+  let chosen = fitted("right");
+  if (nodes.some((n) => !n.inTree) && fitOf(chosen) < 1) {
+    const below = fitted("below");
+    if (rank(below) > rank(chosen) || (rank(below) === rank(chosen) && fitOf(below) > fitOf(chosen))) chosen = below;
   }
   const { g, unit, trunkOf, placement, W1, H1 } = chosen;
   // fit: the largest scale that fits (1 px spare for rounding), clamped to [1, the width cap]

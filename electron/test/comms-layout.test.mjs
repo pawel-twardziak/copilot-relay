@@ -335,6 +335,23 @@ test("outside nodes move into rows below a tree the right-hand column would make
   assert.equal(run(nodes, edges, 600, 400).outsidePlacement, "right");
 });
 
+test("outside nodes go where the graph fits without scrolling: root, 2 children and 1 outside at 420 x 300", () => {
+  const nodes = [node("root"), ...children(2), outside("x")];
+  const edges = [edge("root", "c0", true), edge("c0", "root", true), edge("root", "c1", true), edge("c1", "root", true), edge("x", "root"), edge("root", "x")];
+  const out = run(nodes, edges, 420, 300, 14);
+  assert.equal(out.scrollX, false);
+  assert.equal(out.scrollY, false);
+  assertMinimum(out, 14);
+  assertNoOverlap(out.nodes);
+  assertInside(out);
+  assertEdgesClear(out);
+  // wider boxes (long names) that fit neither way: the placement without a horizontal scroll
+  const wide = CommsLayout.layout(nodes, edges, { width: 420, height: 300, font: 14, minNode: 190 });
+  assert.equal(wide.scrollX, false, `${wide.outsidePlacement} ${wide.width}x${wide.height}`);
+  assertNoOverlap(wide.nodes);
+  assertInside(wide);
+});
+
 test("a pair in both directions gets two offset edges with distinct label points", () => {
   const dist = (a, b) => Math.hypot(a.labelX - b.labelX, a.labelY - b.labelY);
   const check = (out, a, b) => {
