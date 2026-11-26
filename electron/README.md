@@ -315,7 +315,12 @@ an ordinary session: it appears in the list, you can open it, read what it did, 
 Every session's Copilot gets a system prompt made of up to three parts, joined by a blank line (empty parts are
 left out):
 
-- **Default part** (Settings): for every session.
+- **Default part** (Settings): for every session. Its built-in text encourages the session to delegate specialised,
+  self-contained work (research, spec & plan, implementation, tests, review, Tilt / build) to child sessions with
+  `create_session`, with a self-contained task, and to do small things itself. Only sessions with copilot-relay on get
+  the built-in text (it names relay tools); a text of your own applies always. Emptying it in Settings means no
+  default part; "Restore default" goes back to the built-in text. A "" saved by a version before the built-in text is
+  dropped once at start, as those versions saved the empty field on every Settings save.
 - **Child part** (Settings): only for child sessions, delegated or adopted. Its built-in text tells the child to
   finish with `report_result`, exactly once, and to use `send_message` only to ask its parent something. Emptying it
   in Settings means no child part; "Restore default" goes back to the built-in text.

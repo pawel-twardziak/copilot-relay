@@ -4,6 +4,22 @@
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
+export const DEFAULT_PART = [
+  "You can delegate work to child sessions. `create_session` starts a child that works on one task in its own context and reports back to you; its result arrives later as a `[from <name>]` message. Don't wait for it, keep working.",
+  "",
+  "Delegate specialised, self-contained work, for example:",
+  "- research (code, docs, web): a short summary with sources",
+  "- spec & plan: a design and a step-by-step plan",
+  "- implementation of one planned task",
+  "- tests: write or run them, report failures with output",
+  "- review of a change",
+  "- Tilt / build / environment: logs, restarts, broken resources",
+  "",
+  'A child sees nothing of this chat. Give it a short name and a self-contained task: the goal, what you already know, the relevant files, what "done" means and what to report. Set folder, model or agent only when they should differ from yours. Independent tasks can run in parallel.',
+  "",
+  "Do small things (a few tool calls, a quick lookup) yourself: each child costs a session and the user's approval. You stay responsible for the result, so check what a child reports before you rely on it.",
+].join("\n");
+
 export const CHILD_PART =
   "This session is the child of another session, its parent: it either started you with a task (the `[from …]` line of your first message) or the user linked you to it (`list_sessions` shows your parent). The parent cannot see this chat and waits for your report. When your work is done (the task you were given, or the work you were doing when you were linked), always finish with the `report_result` tool, exactly once: the result, or at least a short summary of what you did, or a note that the work is finished. If you could not finish, report that too, with what is missing. Use `send_message` only if you must ask the parent something before you can finish.";
 
@@ -16,6 +32,22 @@ export function composePrompt({ defaultPart, childPart, own, isChild } = {}) {
     .map((p) => (typeof p === "string" ? p.trim() : ""))
     .filter(Boolean)
     .join("\n\n");
+}
+
+/** Absent (not a string) means the built-in text, which only a session with the relay gets (it names relay
+ *  tools); "" means no default part. */
+export function effectiveDefaultPart(promptDefault, { relay = true } = {}) {
+  if (typeof promptDefault === "string") return promptDefault;
+  return relay ? DEFAULT_PART : "";
+}
+
+/** Versions before the built-in default part stored promptDefault "" on every Settings save, the form's empty field:
+ *  such a "" (no promptDefaultExplicit) becomes absent, so the built-in text reaches it. Since then a save marks the
+ *  key as explicit, so a "" the user saves stays. Returns the settings to save, or null when nothing changes. */
+export function migratePromptDefault(settings) {
+  if (!settings || settings.promptDefault !== "" || settings.promptDefaultExplicit === true) return null;
+  const { promptDefault, ...rest } = settings;
+  return rest;
 }
 
 /** Absent (not a string) means the built-in text; "" means no child part. */
@@ -36,11 +68,14 @@ export function normalizeTemplates(value) {
   return out;
 }
 
-/** The prompt keys of a settings:set payload, put into next (the settings about to be saved): promptDefault only as
- *  text; promptChild as text, or null to go back to the built-in text (the key is removed); promptTemplates only as
- *  an array (normalized). A key that is absent or of any other type keeps what is stored. Returns next. */
+/** The prompt keys of a settings:set payload, put into next (the settings about to be saved): promptDefault and
+ *  promptChild as text, or null to go back to the built-in text (the key is removed); promptTemplates only as an
+ *  array (normalized). A key that is absent or of any other type keeps what is stored. A saved promptDefault marks it
+ *  as explicit (see migratePromptDefault). Returns next. */
 export function applyPromptSettings(next, payload) {
-  if (typeof payload.promptDefault === "string") next.promptDefault = payload.promptDefault;
+  if (payload.promptDefault === null) delete next.promptDefault;
+  else if (typeof payload.promptDefault === "string") next.promptDefault = payload.promptDefault;
+  if (payload.promptDefault === null || typeof payload.promptDefault === "string") next.promptDefaultExplicit = true;
   if (payload.promptChild === null) delete next.promptChild;
   else if (typeof payload.promptChild === "string") next.promptChild = payload.promptChild;
   if (Array.isArray(payload.promptTemplates)) next.promptTemplates = normalizeTemplates(payload.promptTemplates);
