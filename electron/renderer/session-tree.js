@@ -1,4 +1,4 @@
-// Pure sub-session tree model (no DOM): parent/child index, cascade order, sidebar nesting, pruning.
+// Pure sub-session tree model (no DOM): parent/child index, cascade order, pruning.
 // Loaded as a classic <script> (sets globalThis.SessionTree) and via require() in tests.
 "use strict";
 
@@ -61,25 +61,6 @@ function closeOrder(idx, id, isOpen) {
   return out;
 }
 
-/** Orders a group's sessions as a tree: roots keep group order, children sit under an in-group parent. */
-function nest(sessions, idx) {
-  const inGroup = new Map(sessions.map((s) => [s.sessionId, s]));
-  const done = new Set();
-  const out = [];
-  const emit = (id, depth) => {
-    done.add(id);
-    out.push({ s: inGroup.get(id), depth });
-    for (const c of idx.childrenOf.get(id) ?? []) if (inGroup.has(c) && !done.has(c)) emit(c, depth + 1);
-  };
-  const isRoot = (id) => {
-    const p = idx.parentOf.get(id) ?? null;
-    return p === null || p === id || !inGroup.has(p);
-  };
-  for (const s of sessions) if (!done.has(s.sessionId) && isRoot(s.sessionId)) emit(s.sessionId, 0);
-  for (const s of sessions) if (!done.has(s.sessionId)) emit(s.sessionId, 0); // cycle members
-  return out;
-}
-
 function relation(idx, id) {
   return {
     parent: idx.parentOf.get(id) ?? null,
@@ -112,6 +93,6 @@ function pruneCandidates(links, sessions, { listOk, exclude = new Set() } = {}) 
   return out.size * 2 > known.size ? [] : [...out];
 }
 
-const SessionTree = { index, descendants, closeOrder, nest, relation, pruneCandidates };
+const SessionTree = { index, descendants, closeOrder, relation, pruneCandidates };
 globalThis.SessionTree = SessionTree;
 if (typeof module !== "undefined") module.exports = SessionTree;

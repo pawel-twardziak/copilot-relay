@@ -3247,8 +3247,8 @@ function openRelative(id) {
   openSession(s);
 }
 
-/** showProject: the session is listed outside its project (pinned), so its folder goes into the meta line.
- *  depth: its level under a parent shown in the same group (0 = top level, with "child of X" when it has a parent). */
+/** showProject: its folder goes into the meta line (in Pinned, or its folder differs from its tree's root's).
+ *  depth: its level under its parent in the tree (0 = a root, with "child of X" when it has a parent not listed). */
 function item(s, v, { showProject = false, depth = 0 } = {}) {
   const heldCount = HeldReplies.sidebarCount({ view: v, brokerHeld: heldByKey, brokerByKind: heldByKindKey, sessionId: s.sessionId });
   const pinned = ui.pinned.has(s.sessionId);
@@ -3677,7 +3677,7 @@ function toggleGroup(cwd, header, items) {
 }
 
 function groupBlock(g) {
-  const items = h("div", { class: "group-items" + (g.collapsed ? " collapsed" : "") }, h("div", {}, ...nestedItems(g.sessions)));
+  const items = h("div", { class: "group-items" + (g.collapsed ? " collapsed" : "") }, h("div", {}, ...rowItems(g.rows)));
   items.inert = g.collapsed;
   const header = h(
     "div",
@@ -3713,9 +3713,9 @@ function groupBlock(g) {
   return [header, items];
 }
 
-/** A group's rows, children indented under a parent listed in the same group. */
-function nestedItems(list, opts = {}) {
-  return SessionTree.nest(list, tree).map(({ s, depth }) => item(s, views.get(s.sessionId), { ...opts, depth }));
+/** The model's rows (UiState.listModel) as sidebar items. */
+function rowItems(rows) {
+  return rows.map(({ s, depth, showProject }) => item(s, views.get(s.sessionId), { depth, showProject }));
 }
 
 /** Also redraws every view's relation bar: its dots and the Close all sub-sessions button follow the open views. */
@@ -3725,16 +3725,12 @@ function renderList() {
 
   for (const v of views.values()) v.renderRelations();
 
-  const openOnes = [...views.values()].map((v) => sessions.find((s) => s.sessionId === v.sessionId) ?? { sessionId: v.sessionId, cwd: v.cwd, title: v.title });
-  if (openOnes.length) {
-    out.push(h("div", { class: "group-title" }, h("span", {}, "Open in app")));
-    out.push(...nestedItems(openOnes));
-  }
-
-  const model = UiState.listModel(sessions, { pinned: ui.pinned, collapsed: ui.collapsed, query: q });
-  if (model.pinned.length) {
-    out.unshift(h("div", { class: "group-title" }, h("span", {}, "📌 Pinned")), ...nestedItems(model.pinned, { showProject: true }));
-  }
+  // the listed sessions plus the open views Copilot does not list (a child just created, say)
+  const listed = new Set(sessions.map((s) => s.sessionId));
+  const unlisted = [...views.values()].filter((v) => !listed.has(v.sessionId)).map((v) => ({ sessionId: v.sessionId, cwd: v.cwd, title: v.title }));
+  const model = UiState.listModel([...sessions, ...unlisted], { pinned: ui.pinned, open: new Set(views.keys()), collapsed: ui.collapsed, query: q, tree });
+  if (model.pinned.length) out.push(h("div", { class: "group-title" }, h("span", {}, "📌 Pinned")), ...rowItems(model.pinned));
+  if (model.open.length) out.push(h("div", { class: "group-title" }, h("span", {}, "Open in app")), ...rowItems(model.open));
   for (const g of model.groups) out.push(...groupBlock(g));
   if (!out.length) out.push(h("div", { class: "group-title" }, h("span", {}, q ? "No matches" : "No sessions yet")));
   $("#session-list").replaceChildren(...out);
