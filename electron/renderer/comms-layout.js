@@ -27,7 +27,8 @@ const overlap = (a, b) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h 
 
 /**
  * The block of a subtree at the minimum size: { w, h, items: [{ id, x, y }], trunks: [{ child, x, y }] }, coordinates
- * relative to the block. The children of a node go in one row centred under it when the row fits `avail`; else (two
+ * relative to the block (a trunk = the point where a child's edge leaves the parent's line for the bus above the
+ * child's row). The children of a node go in one row centred under it when the row fits `avail`; else (two
  * or more children) they wrap into rows under it, indented by one horizontal gap, with a trunk down the indent (x)
  * and a bus above each row (y). A child's subtree stays inside its row, so a row is as tall as its tallest subtree
  * and no edge crosses a box. ctx = { g, kids, memo, up: ancestors (a cycle guard) }.
@@ -61,14 +62,23 @@ function place(id, avail, g, subs, wrap) {
   if (!wrap) {
     const rowW = rowOf(subs, g.gx);
     const w = Math.max(g.w, rowW);
-    items[0].x = (w - g.w) / 2;
+    const px = (items[0].x = (w - g.w) / 2);
     let x = (w - rowW) / 2;
     let rowH = 0;
+    const centres = [];
     for (const b of subs) {
       move(b, x, top);
+      centres.push(x + b.items[0].x + g.w / 2);
       x += b.w + g.gx;
       rowH = Math.max(rowH, b.h);
     }
+    // straight lines fan out from the parent's bottom border (slot k at (k + 1) / (n + 1)) when every line's pair
+    // offset along that border (o * length / height, for parallel lines o apart) stays in its slot, clear of the
+    // neighbours'; else (long flat lines) the row hangs from a bus like a wrapped one
+    const slot = g.w / (subs.length + 1);
+    const slide = centres.map((cx, k) => (g.w * PAIR * Math.hypot(cx - px - slot * (k + 1), g.gy)) / g.gy);
+    const straight = slide.every((sl, k) => sl <= slot - 2 && (k === 0 || sl + slide[k - 1] <= slot - 2));
+    if (!straight) subs.forEach((b) => trunks.push({ child: b.items[0].id, x: px + g.w / 2, y: top - g.bus }));
     return { w, h: top + rowH, items, trunks };
   }
   let x = g.gx, y = top, rowH = 0, w = g.w;
@@ -187,8 +197,9 @@ function router(boxes, lane, clear, bend, bounds, o) {
     const [lo, hi] = flat ? [Math.min(p[0], q[0]), Math.max(p[0], q[0])] : [Math.min(p[1], q[1]), Math.max(p[1], q[1])];
     for (let i = 0; i < nx; i++) {
       for (let j = 0; j < ny; j++) {
-        if (flat && i + 1 < nx && Math.abs(ys[j] - p[1]) < dist && xs[i + 1] > lo && xs[i] < hi) extra[0][i * ny + j] += cost;
-        if (!flat && j + 1 < ny && Math.abs(xs[i] - p[0]) < dist && ys[j + 1] > lo && ys[j] < hi) extra[1][i * ny + j] += cost;
+        const at = i * ny + j;
+        if (flat && i + 1 < nx && Math.abs(ys[j] - p[1]) < dist && xs[i + 1] > lo && xs[i] < hi) extra[0][at] += cost;
+        if (!flat && j + 1 < ny && Math.abs(xs[i] - p[0]) < dist && ys[j + 1] > lo && ys[j] < hi) extra[1][at] += cost;
       }
     }
   }
@@ -247,6 +258,29 @@ function router(boxes, lane, clear, bend, bounds, o) {
   return { route, avoid, parallel };
 }
 
+/**
+ * An axis-aligned polyline moved d px to one side of its travel (each segment along its normal (dy, -dx)), so a twin
+ * at -d runs parallel at 2|d| everywhere, corners included; the ends move along the box borders they leave.
+ * -> { pts, offs: each segment's shift }
+ */
+function offsetLine(pts, d) {
+  const same = (p, q) => p[0] === q[0] && p[1] === q[1];
+  const dedup = pts.filter((q, i) => !i || !same(q, pts[i - 1]));
+  const line = dedup.filter((q, i) => {
+    const a = dedup[i - 1], b = dedup[i + 1];
+    return !a || !b || !((a[0] === q[0] && q[0] === b[0]) || (a[1] === q[1] && q[1] === b[1]));
+  });
+  const offs = line.slice(1).map((q, i) => {
+    const a = line[i], len = Math.hypot(q[0] - a[0], q[1] - a[1]) || 1;
+    return [((q[1] - a[1]) / len) * d, (-(q[0] - a[0]) / len) * d];
+  });
+  const out = line.map((q, i) => {
+    const a = offs[i - 1] ?? [0, 0], b = offs[i] ?? [0, 0];
+    return [q[0] + a[0] + b[0], q[1] + a[1] + b[1]];
+  });
+  return { pts: out, offs };
+}
+
 /** Whether the segment p -> q meets the open rectangle r (Liang-Barsky). */
 function meets(p, q, r) {
   const dx = q[0] - p[0], dy = q[1] - p[1];
@@ -264,25 +298,27 @@ function meets(p, q, r) {
 }
 
 /**
- * A label point for item (its pts, a pair's sideways shift, the preferred place `at`: a share of the length or "drop" =
- * the middle of the last segment): the first place along the line, from the preferred one outward, on the line or just
- * beside it (a pair's label only on the side away from its twin), where an lw x lh pill touches no box, no other line
- * and no placed label; else the least crowded place. -> { p, c: its crowding (0 = clear) }
+ * A label point for item (its pts, a pair's sideways shift per segment `offs`, the preferred place `at`: a share of
+ * the length, "drop" = the middle of the last segment, "rise" = of the first): the first place along the line, from
+ * the preferred one outward, on the line or just beside it (a pair's label only on the side away from its twin),
+ * where an lw x lh pill touches no box, no other line and no placed label; else the least crowded place.
+ * -> { p, c: its crowding (0 = clear) }
  */
 function labelPlace(item, lines, placed, boxes, lw, lh, bounds) {
   const segs = [];
   for (let n = 1; n < item.pts.length; n++) segs.push([item.pts[n - 1], item.pts[n]]);
   const lens = segs.map(([p, q]) => Math.hypot(q[0] - p[0], q[1] - p[1]));
   const total = lens.reduce((x, y) => x + y, 0);
-  const pref = item.at === "drop" ? total - lens[lens.length - 1] / 2 : total * item.at;
-  const pairSide = (m) => (item.both ? Math.sign(item.shift[0] * m[0] + item.shift[1] * m[1]) || 1 : null);
+  const pref =
+    item.at === "drop" ? total - lens[lens.length - 1] / 2 : item.at === "rise" ? lens[0] / 2 : total * item.at;
+  const pairSide = (n, m) => (item.both ? Math.sign(item.offs[n][0] * m[0] + item.offs[n][1] * m[1]) || 1 : null);
   const pointAt = (dist, side) => {
     let n = 0;
     while (n < segs.length - 1 && dist > lens[n]) dist -= lens[n++];
     const [p, q] = segs[n];
     const t = lens[n] ? Math.min(1, Math.max(0, dist / lens[n])) : 0;
     const m = lens[n] ? [-(q[1] - p[1]) / lens[n], (q[0] - p[0]) / lens[n]] : [0, 0]; // a unit normal of the segment
-    const by = (pairSide(m) ?? side) * ((Math.abs(m[0]) * lw) / 2 + (Math.abs(m[1]) * lh) / 2 + 1);
+    const by = (pairSide(n, m) ?? side) * ((Math.abs(m[0]) * lw) / 2 + (Math.abs(m[1]) * lh) / 2 + 1);
     return [half(p[0] + (q[0] - p[0]) * t + m[0] * by), half(p[1] + (q[1] - p[1]) * t + m[1] * by)];
   };
   const crowd = (p) => crowdAt(item, p, lines, placed, boxes, lw, lh, bounds);
@@ -356,8 +392,8 @@ function layout(nodes = [], edges = [], opts = {}) {
     kids.get(p).push(n.id);
   }
   // the gaps at the minimum size, from the normal proportions (t = 0) to the floors (t = 1): gy still holds a label
-  // under a pair's lower bus above a wrapped row (bus = the bus's height above the row), the routing lane stays clear of
-  // the boxes, the margin may shrink to 4 px (the router then drops lanes that would leave the SVG)
+  // under a pair's lower bus above a wrapped row (bus = the bus's height above the row), the routing lane stays clear
+  // of the boxes, the margin may shrink to 4 px (the router then drops lanes that would leave the SVG)
   const o1 = minNode * PAIR;
   const lh0 = half(font * LABEL_H);
   const gapsAt = (t) => {
@@ -479,7 +515,7 @@ function layout(nodes = [], edges = [], opts = {}) {
   const boxes = [...box.values()];
   const bounds = { w: width, h: height };
   const has = new Set(edges.map((e) => `${e.from}\0${e.to}`));
-  const items = []; // { e, a, b, both, pts, shift, at, label }
+  const items = []; // { e, a, b, both, pts, offs, at, label }
   for (const e of edges) {
     const a = box.get(e.from), b = box.get(e.to);
     if (a && b && a !== b) items.push({ e, a, b, both: has.has(`${e.to}\0${e.from}`) });
@@ -498,12 +534,15 @@ function layout(nodes = [], edges = [], opts = {}) {
     const parent = child === b ? a : b;
     const side = both ? (parent === a ? -1 : 1) : 0;
     const trunk = trunkOf.get(child.id);
-    let pts;
+    let pts, offs;
     if (trunk) {
-      const tx = offX + trunk.x * s, by = trunk.y * s, d = side * o;
-      pts = [[tx + d, parent.y + h], [tx + d, by + d], [child.cx + d, by + d], [child.cx + d, child.y]];
-      item.shift = [d, d];
-      item.at = "drop";
+      // down the parent's line (a wrapped group's trunk, or the middle of a bus row), along the bus, down to the child
+      let tx = half(offX + trunk.x * s);
+      if (Math.abs(tx - parent.cx) < 1) tx = parent.cx;
+      if (Math.abs(tx - child.cx) < 1) tx = child.cx;
+      const by = half(trunk.y * s);
+      ({ pts, offs } = offsetLine([[tx, parent.y + h], [tx, by], [child.cx, by], [child.cx, child.y]], side * o));
+      item.at = parent === a ? "drop" : "rise"; // on the child's own drop either way
     } else {
       // the lines of a row fan out from the parent's bottom border in the children's order, so they never cross
       const row = kids.get(parent.id) ?? [child.id];
@@ -511,13 +550,17 @@ function layout(nodes = [], edges = [], opts = {}) {
       const sx = parent.x + gap * (row.indexOf(child.id) + 1), sy = parent.y + h, ex = child.cx, ey = child.y;
       const dx = ex - sx, dy = ey - sy, len = Math.hypot(dx, dy);
       const nx = dy / len, ny = -dx / len; // the normal of parent -> child
-      const lim = Math.min(w / 2 - 2, gap / 2 - 1);
+      const lim = w / 2 - 2; // never reached: place() keeps a row straight only when every slide fits its slot
       const slide = Math.max(-lim, Math.min(lim, side * o * (nx - (dx * ny) / dy)));
       pts = [[sx + slide, sy], [ex + slide, ey]];
-      item.shift = [side * o * nx, side * o * ny];
+      offs = [[side * o * nx, side * o * ny]];
       item.at = 0.5;
     }
-    if (parent !== a) pts.reverse();
+    if (parent !== a) {
+      pts.reverse();
+      offs.reverse();
+    }
+    item.offs = offs;
     item.tree = true;
     draw(item, pts);
   }
@@ -545,19 +588,17 @@ function layout(nodes = [], edges = [], opts = {}) {
     if (!pairs.has(key)) pairs.set(key, { first, second, items: [] });
     pairs.get(key).items.push(item);
   }
-  // a pair's route, its lines (every corner moved (d, d), the ends sliding along their box border) and its labels;
+  // a pair's route, its lines (offset to either side, see offsetLine) and its labels;
   // -> { base, c: how crowded its labels are }
   const lay = (first, second, twins) => {
     const base = grid.route(first, second);
     for (const item of twins) {
-      const d = item.both ? (first === item.a ? -o : o) : 0;
-      const pts = base.map(([x, y], n) => {
-        if (n > 0 && n < base.length - 1) return [x + d, y + d];
-        const nb = base[n ? n - 1 : 1];
-        return nb[0] === x ? [x + d, y] : [x, y + d];
-      });
-      if (first !== item.a) pts.reverse();
-      Object.assign(item, { shift: [d, d], at: 0.5 });
+      const { pts, offs } = offsetLine(base, item.both ? (first === item.a ? -o : o) : 0);
+      if (first !== item.a) {
+        pts.reverse();
+        offs.reverse();
+      }
+      Object.assign(item, { offs, at: 0.5 });
       draw(item, pts);
     }
     let c = 0;
