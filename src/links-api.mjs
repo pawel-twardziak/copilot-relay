@@ -3,7 +3,7 @@ const bad = (error) => ({ status: 400, json: { error } });
 const done = { status: 204 };
 const isKey = (k) => typeof k === "string" && k !== "";
 
-export function linksRoutes({ delegation, log = console.log }) {
+export function linksRoutes({ delegation, comms, registry, log = console.log }) {
   const forgetKeys = (what) => ({ keys } = {}) => {
     if (!Array.isArray(keys) || !keys.every((k) => typeof k === "string")) return bad("keys must be an array of strings");
     const cli = keys.filter((k) => k.startsWith("cli:"));
@@ -12,10 +12,45 @@ export function linksRoutes({ delegation, log = console.log }) {
     if (what && cli.length) log(`links: forgot ${cli.length} ${what} session(s): ${cli.join(", ")}`);
     return done;
   };
+  // The tree's top: follow the parents up; stop on a cycle, a missing parent or a deleted one (an orphan is its own root).
+  const rootOf = (key) => {
+    const seen = new Set([key]);
+    let k = key;
+    for (let link = delegation.store.linkOf(k); link?.parent && !link.parentDeleted && !seen.has(link.parent); link = delegation.store.linkOf(k)) {
+      k = link.parent;
+      seen.add(k);
+    }
+    return k;
+  };
+  const peerInfo = (key) => {
+    const p = registry?.get(key);
+    return { name: p?.name || delegation.store.nameOf(key) || delegation.nameOf(key) || "", online: !!p?.online, busy: p?.busy === true, kind: p?.kind ?? "cli" };
+  };
   const withKey = (fn) => (body = {}) => (isKey(body.key) ? fn(body) : bad("key required"));
 
   return {
     "GET /api/links": () => ({ status: 200, json: { links: delegation.snapshot(), held: delegation.heldCounts(), heldByKind: delegation.heldByKind() } }),
+    "GET /api/comms": ({ key } = {}) => {
+      if (!isKey(key)) return bad("key required");
+      if (!comms) return { status: 404, json: { error: "no communication log" } };
+      const root = rootOf(key);
+      const linked = [root, ...delegation.store.descendantsOf(root)];
+      const keys = linked.includes(key) ? linked : [key]; // an unknown key is a tree of its own
+      const events = comms.eventsOf(keys);
+      const peers = {};
+      for (const k of new Set([...keys, ...events.flatMap((e) => [e.fromKey, e.toKey])]))
+        if (isKey(k) && (k !== key || events.length || delegation.store.linkOf(k) || registry?.get(k))) peers[k] = peerInfo(k);
+      return { status: 200, json: { root: keys.includes(root) ? root : key, keys, events, peers } };
+    },
+    "GET /api/comms/text": ({ id } = {}) => {
+      let text = null;
+      try {
+        text = isKey(id) ? comms?.text(id) ?? null : null;
+      } catch {
+        /* a missing file or a stale offset reads as an unknown id */
+      }
+      return text === null ? { status: 404, json: { error: "unknown event" } } : { status: 200, json: { text } };
+    },
     "POST /api/links/forget": forgetKeys(null),
     "POST /api/links/missing": forgetKeys("missing"),
     "POST /api/peer/task": withKey(({ key, task }) =>
