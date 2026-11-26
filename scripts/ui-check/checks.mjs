@@ -1535,6 +1535,13 @@ export const checks = [
       await app.pressEscape();
       await app.check(`!document.querySelector("#schedules").open`, "Escape to close Schedules");
       assert.equal(await app.ev(`document.querySelector("#settings").open`), true, "Settings stays open");
+      await app.ev(`document.querySelector("#settings").close()`);
+      // a notification click while the image viewer is open: the viewer closes (it would sit under the modal page)
+      await app.ev(`viewer.open([{ src: "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==", name: "a" }], 0, null)`);
+      await app.check(`viewer.isOpen`, "the image viewer");
+      await app.ev(`openJobRun({ jobId: "nope", runId: "nope" })`);
+      await app.check(`document.querySelector("#schedules").open`, "Schedules from the notification");
+      assert.equal(await app.ev(`viewer.isOpen`), false, "the viewer closed");
     },
   },
   {
