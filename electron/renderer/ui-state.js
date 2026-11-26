@@ -6,33 +6,63 @@
  *  which also moves when the session is only opened or closed. */
 const activityAt = (s) => s.lastActivityAt ?? s.updatedAt;
 const time = (s) => new Date(activityAt(s) ?? 0).getTime();
-const newestFirst = (a, b) => time(b) - time(a);
+
+const NO_TREE = { parentOf: new Map(), childrenOf: new Map() };
 
 /**
- * The sidebar's structure: pinned sessions on top, then one group per project folder (newest first).
- * query: lower-cased filter text; while filtering every group is shown expanded (the stored state is untouched).
+ * The sidebar's structure, built from session trees (a root and all its descendants by the links): a tree with a
+ * pinned member goes to `pinned`, else one with an open member to `open`, else to the group of its root's folder.
+ * Every row is listed once. Trees (and groups) are ordered by their newest member.
+ * rows: the listed sessions plus open views Copilot does not list (unique ids). tree: a SessionTree.index result.
+ * query: lower-cased filter text; a tree stays whole when any member matches, and while filtering every group is
+ * shown expanded (the stored state is untouched).
+ * Returns { pinned: Row[], open: Row[], groups: { cwd, rows, count, collapsed }[] }, Row = { s, depth, showProject }
+ * (showProject: its folder is shown, in Pinned always, elsewhere when it differs from its root's).
  */
-function listModel(sessions, { pinned = new Set(), collapsed = new Set(), query = "" } = {}) {
-  const match = (s) => !query || `${s.title ?? ""} ${s.cwd ?? ""} ${s.sessionId}`.toLowerCase().includes(query);
+function listModel(rows, { pinned = new Set(), open = new Set(), collapsed = new Set(), query = "", tree = NO_TREE } = {}) {
+  const match = (s) => `${s.title ?? ""} ${s.cwd ?? ""} ${s.sessionId}`.toLowerCase().includes(query);
+  const byId = new Map(rows.map((s) => [s.sessionId, s]));
+  const done = new Set();
+  const trees = [];
+  const build = (rootId) => {
+    const members = [];
+    const emit = (id, depth) => {
+      done.add(id);
+      members.push({ s: byId.get(id), depth });
+      for (const c of tree.childrenOf.get(id) ?? []) if (byId.has(c) && !done.has(c)) emit(c, depth + 1);
+    };
+    emit(rootId, 0);
+    trees.push({ root: byId.get(rootId), members, latest: Math.max(...members.map(({ s }) => time(s))) });
+  };
+  const isRoot = (id) => {
+    const p = tree.parentOf.get(id) ?? null;
+    return p === null || p === id || !byId.has(p);
+  };
+  for (const s of rows) if (!done.has(s.sessionId) && isRoot(s.sessionId)) build(s.sessionId);
+  for (const s of rows) if (!done.has(s.sessionId)) build(s.sessionId); // cycle members
+
   const top = [];
+  const opened = [];
   const groups = new Map();
-  for (const s of sessions) {
-    if (!match(s)) continue;
-    if (pinned.has(s.sessionId)) {
-      top.push(s); // shown in the pinned section instead of its project
-      continue;
+  for (const t of trees) {
+    if (query && !t.members.some(({ s }) => match(s))) continue;
+    const has = (set) => t.members.some(({ s }) => set.has(s.sessionId));
+    if (has(pinned)) top.push(t);
+    else if (has(open)) opened.push(t);
+    else {
+      if (!groups.has(t.root.cwd)) groups.set(t.root.cwd, []);
+      groups.get(t.root.cwd).push(t);
     }
-    if (!groups.has(s.cwd)) groups.set(s.cwd, []);
-    groups.get(s.cwd).push(s);
   }
-  const out = [...groups.entries()].map(([cwd, list]) => ({
-    cwd,
-    sessions: list.sort(newestFirst),
-    count: list.length,
-    collapsed: collapsed.has(cwd) && !query,
-  }));
-  out.sort((a, b) => time(b.sessions[0]) - time(a.sessions[0]));
-  return { pinned: top.sort(newestFirst), groups: out };
+  const byLatest = (a, b) => b.latest - a.latest;
+  const flatten = (list, inPinned = false) =>
+    [...list].sort(byLatest).flatMap((t) => t.members.map(({ s, depth }) => ({ s, depth, showProject: inPinned || s.cwd !== t.root.cwd })));
+  const out = [...groups.entries()].map(([cwd, list]) => {
+    const groupRows = flatten(list);
+    return { cwd, rows: groupRows, count: groupRows.length, collapsed: collapsed.has(cwd) && !query, latest: Math.max(...list.map((t) => t.latest)) };
+  });
+  out.sort((a, b) => b.latest - a.latest);
+  return { pinned: flatten(top, true), open: flatten(opened), groups: out.map(({ latest, ...g }) => g) };
 }
 
 // Chat text scale: Left Ctrl + wheel / + / - / 0
