@@ -139,3 +139,35 @@ If it fails:
   in, wrong `--cli`, proxy). Run `copilot --version` and `copilot` once by hand to check.
 - `unknown model <id>`: copy the id exactly as `--live` lists it.
 - `Could not remove …`: the test session stayed in `session-state`; delete that folder by hand or from the app.
+
+## Context meter on load (`context-on-load.mjs`)
+
+Why the header meter of a reopened session can show much more than the next turn really sends (for example 120k on
+open, 40k after one short message). It is free: it only reads the session history, sends nothing, and needs no
+`npm install`.
+
+For an agent asked to run it, from the root of this repository:
+
+```
+git pull origin main
+cd scripts/sdk-probe
+node context-on-load.mjs
+node context-on-load.mjs <session-id>
+```
+
+- The first command scans the newest 100 sessions in `COPILOT_HOME` (`--sessions <n>` changes it). The second
+  shows every run of one session; the owner gives the id (the app shows it in the session header and menu). Several
+  ids can be given at once.
+- For every reopen it runs the app's own `readLastContext` (`electron/usage.mjs`) on `events.jsonl` as it stood
+  before that reopen, and compares it with the `inputTokens` of the first model call after it. A difference above
+  ±20% (`--threshold <pct>`) is marked **MISMATCH**.
+- Under each reopen, the "between" lines list what changed the context in between: a compaction or truncation left
+  after the last call of the closed run, and a model change, compaction, truncation or cleared context before the
+  first call of the reopened one.
+- Show the owner the whole output. It is also saved to `results/context-on-load-<time>.md`, which git ignores. It
+  holds event types, model names, times and token counts only: no prompts, answers, summaries or file names.
+- Set `COPILOT_HOME` first if the app runs with another one (PowerShell: `$env:COPILOT_HOME = "D:\copilot-home"`).
+
+What to read in it: `compaction_start` / `compaction_summarized` with no `compaction_complete` before the shutdown,
+or a `truncation` before the first call, means the history changed size at the reopen and the shutdown figure is
+stale. A **SIZE DIFFERS** mark means the window size changed (model or tier switch).

@@ -42,7 +42,7 @@ test("tree nodes from links, outside counterparts from events, a released child 
   assert.equal(node(m, "a").current, true);
   assert.equal(node(m, "r").current, false);
   assert.equal(m.unsupported, false);
-  assert.deepEqual(edge(m, "ext:term", "a"), { from: "ext:term", to: "a", tree: false, count: 1, size: 10, last: 40, live: "waiting-reply", since: 40, held: 0 });
+  assert.deepEqual(edge(m, "ext:term", "a"), { from: "ext:term", to: "a", tree: false, count: 1, size: 10, last: 40, live: null, held: 0 }, "delivered to an idle recipient: processed");
 });
 
 test("a renamed session stays one node; rows keep the name at the time", () => {
@@ -99,24 +99,71 @@ test("idle after report: waiting-task", () => {
   assert.equal(edge(m, "b", "r").live, "waiting-report");
 });
 
-test("waiting-reply only after a message with no answer back", () => {
-  const links = [link("a", "r", { reported: true }), link("b", "r", { reported: true }), link("c", "r"), link("d", "r", { reported: true })];
+test("a message waits only until its recipient processed it: queued, then reading while the recipient is busy", () => {
+  const links = [
+    link("a", "r", { reported: true, online: false }), link("b", "r", { reported: true, busy: true }), link("c", "r"),
+    link("d", "r", { reported: true, busy: true }), link("e", "r", { reported: true, busy: true }),
+  ];
   const events = [
-    ev("task", "r", "a", 10), ev("report", "a", "r", 20), ev("message", "r", "a", 30),
-    ev("message", "r", "b", 40), ev("message", "b", "r", 50),
-    ev("message", "r", "c", 60),
-    ev("task", "r", "d", 70), ev("report", "d", "r", 80),
+    ev("message", "r", "a", 10, { id: "ma", status: "queued" }),
+    ev("message", "r", "b", 20, { id: "mb", status: "queued" }), st("mb", "delivered", 25),
+    ev("message", "r", "c", 30),
+    ev("task", "r", "d", 40), ev("report", "d", "r", 50), ev("message", "r", "d", 60, { id: "md", status: "queued" }), st("md", "taken", 65),
+    ev("message", "r", "e", 70), ev("message", "e", "r", 80), // r is idle: e's message is processed
   ];
   const m = build({ comms: comms("r", events, rootPeer), links });
-  assert.equal(edge(m, "r", "a").live, "waiting-reply");
-  assert.equal(edge(m, "r", "a").since, 30);
-  assert.equal(edge(m, "a", "r").live, null);
-  assert.equal(edge(m, "r", "b").live, null, "b answered");
-  assert.equal(edge(m, "b", "r").live, "waiting-reply", "the last message, b's, has no answer");
+  assert.deepEqual([edge(m, "r", "a").live, edge(m, "r", "a").since], ["queued", 10], "not delivered yet: since sent");
+  assert.deepEqual([edge(m, "r", "b").live, edge(m, "r", "b").since], ["reading", 25], "busy recipient: since delivery");
   assert.equal(edge(m, "r", "c").live, null, "c->r waiting-report outranks it on the pair");
   assert.equal(edge(m, "c", "r").live, "waiting-report");
-  assert.equal(edge(m, "r", "d").live, null, "a task is not a message");
-  assert.equal(edge(m, "d", "r").live, null, "a report is not a message");
+  assert.deepEqual([edge(m, "r", "d").live, edge(m, "r", "d").since], ["reading", 65], "taken by the app counts as delivered");
+  assert.equal(edge(m, "d", "r").live, null, "r->d came later");
+  assert.equal(edge(m, "r", "e").live, null, "answered and processed: no clock");
+  assert.equal(edge(m, "e", "r").live, null, "delivered to an idle recipient: no clock");
+});
+
+test("queued only for a closed app session: other peers drain or flush without a status", () => {
+  const peers = { ...rootPeer, "mcp:vs": { name: "VS", online: true, busy: false, kind: "mcp" }, "mcp:off": { name: "Off", online: false, busy: false, kind: "mcp" } };
+  const events = [ev("message", "r", "mcp:vs", 10, { status: "queued" }), ev("message", "r", "mcp:off", 20, { status: "queued" })];
+  const m = build({ comms: comms("r", events, peers) });
+  assert.equal(edge(m, "r", "mcp:vs").live, null);
+  assert.equal(edge(m, "r", "mcp:off").live, null, "an inbox drain writes no status: a gone peer is not queued");
+  const out = build({ comms: comms("r", [ev("message", "r", "x", 30, { status: "queued" })], rootPeer), live: { x: { online: false } } });
+  assert.deepEqual([edge(out, "r", "x").live, edge(out, "r", "x").since], ["queued", 30], "a closed app session outside the tree");
+});
+
+test("reading only in the turn that read it: an old message is not read again by a later turn", () => {
+  const links = [link("a", "r", { reported: true })];
+  const events = [ev("task", "r", "a", 1000), ev("report", "a", "r", 20_000)];
+  const at = (busySince) => edge(build({ comms: comms("r", events, rootPeer), links, live: { r: { online: true, busy: true, busySince } } }), "a", "r");
+  assert.deepEqual([at(19_000).live, at(19_000).since], ["reading", 20_000], "the report started this turn");
+  assert.equal(at(24_000).live, "reading", "within the 5 s slack (taken as the turn starts)");
+  assert.equal(at(60_000).live, null, "a later turn: the report was processed before");
+});
+
+test("after delivery: discarded/dropped get no clock; delivered after reopen to a busy recipient reads; a task in progress outranks reading", () => {
+  const links = [link("a", "r", { reported: true, busy: true }), link("b", "r", { reported: true, busy: true }), link("c", "r", { busy: true }), link("d", "r", { reported: true, busy: true })];
+  const events = [
+    ev("message", "r", "a", 10, { id: "m1" }), st("m1", "discarded", 15),
+    ev("message", "r", "b", 20, { id: "m2" }), st("m2", "dropped", 25),
+    ev("task", "r", "c", 30),
+    ev("message", "r", "d", 40, { id: "m4", status: "awaiting-reopen" }), st("m4", "delivered", 45),
+  ];
+  const m = build({ comms: comms("r", events, rootPeer), links });
+  assert.equal(edge(m, "r", "a").live, null);
+  assert.equal(edge(m, "r", "b").live, null);
+  assert.equal(edge(m, "r", "c").live, "in-progress");
+  assert.deepEqual([edge(m, "r", "d").live, edge(m, "r", "d").since], ["reading", 45]);
+});
+
+test("a report to a busy parent is being read; once the parent is idle the clock stops", () => {
+  const links = [link("a", "r", { reported: true })];
+  const events = [ev("task", "r", "a", 10), ev("report", "a", "r", 20)];
+  const busy = build({ comms: comms("r", events, { "cli:r": { ...rootPeer["cli:r"], busy: true } }), links });
+  assert.deepEqual([edge(busy, "a", "r").live, edge(busy, "a", "r").since], ["reading", 20]);
+  const idle = build({ comms: comms("r", events, rootPeer), links });
+  assert.equal(edge(idle, "a", "r").live, null);
+  assert.equal(idle.edges.some((e) => e.live), false);
 });
 
 test("held badge from heldByKind; relay/user badges on the recipient, not nodes", () => {
@@ -165,7 +212,7 @@ test("closed session and awaiting-reopen edge", () => {
   assert.equal(node(m, "a").state, "closed");
   assert.equal(edge(m, "r", "a").live, "awaiting-reopen");
   assert.equal(edge(m, "r", "a").since, 10);
-  assert.equal(edge(m, "r", "b").live, "waiting-reply", "delivered after reopen");
+  assert.equal(edge(m, "r", "b").live, null, "delivered after reopen to an idle recipient");
   assert.equal(node(m, "r").state, "idle");
 });
 

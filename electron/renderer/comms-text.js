@@ -5,12 +5,13 @@
 (function () {
 
 const KEEPER_ON = new Set(["pinging", "countdown", "compacting"]);
-const TIMED = new Set(["in-progress", "waiting-report", "waiting-reply", "awaiting-reopen"]);
+const TIMED = new Set(["in-progress", "waiting-report", "queued", "reading", "awaiting-reopen"]);
 // the status line's state words (short: the box is narrow) and the tooltip's
 const STATE_WORDS = { working: "working", idle: "idle", "waiting-task": "idle", closed: "closed", proposed: "proposed" };
 const STATE_LONG = { working: "working", idle: "idle", "waiting-task": "waiting for a task", closed: "closed", proposed: "proposed (waits for your approval)" };
 const LIVE_WORDS = {
-  "in-progress": "task in progress", "waiting-report": "parent waits for the report", "waiting-reply": "waiting for a reply",
+  "in-progress": "task in progress", "waiting-report": "parent waits for the report", queued: "queued, not delivered yet",
+  reading: "recipient is processing it",
   "ended-no-report": "ended without report", "awaiting-reopen": "awaiting reopen",
 };
 const HELD_WORDS = { child: "from sub-sessions", parent: "from the parent", other: "from other sessions" };
@@ -48,9 +49,10 @@ function liveText(edge, now) {
 
 /** A node's status line, its clock first so a narrow box cuts the word, never the time: the keeper while it runs
  *  ("⏳1:43 idle", "⏳ compacting", "♻2/5 idle"), else what the edges say ("3:12 working", "5:40 report due",
- *  "ended, no report", "awaiting reopen", "1:05 awaits reply"), else the state word. */
+ *  "ended, no report", "awaiting reopen", "0:40 queued", "1:05 reading"), else the state word. */
 function statusOf(node, edges, now) {
-  const into = (live) => edges.find((e) => e.to === node.id && e.live === live);
+  // the newest of several (two reports read in one turn: the clock of the latest)
+  const into = (live) => edges.filter((e) => e.to === node.id && e.live === live).sort((a, b) => (b.since ?? 0) - (a.since ?? 0))[0];
   const out = (live) => edges.find((e) => e.from === node.id && e.live === live);
   const at = (e) => (e.since != null ? `${clock(now - e.since)} ` : "");
   let s = STATE_WORDS[node.state] ?? node.state;
@@ -59,7 +61,8 @@ function statusOf(node, edges, now) {
   else if ((e = into("in-progress"))) s = `${at(e)}working`;
   else if ((e = out("waiting-report"))) s = `${at(e)}report due`;
   else if (into("awaiting-reopen")) s = "awaiting reopen";
-  else if ((e = into("waiting-reply"))) s = `${at(e)}awaits reply`;
+  else if ((e = into("queued"))) s = `${at(e)}queued`;
+  else if ((e = into("reading"))) s = `${at(e)}reading`;
   const k = keeperOf(node);
   if (!k) return s;
   if (k.phase === "compacting") return "⏳ compacting";

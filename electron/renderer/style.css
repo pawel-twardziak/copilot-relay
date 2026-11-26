@@ -640,13 +640,13 @@ body.schedules-open #session-list .item.active { background: none; border-color:
 .comms-split:hover::after, body.comms-resizing .comms-split::after { background: var(--accent); box-shadow: 0 2px 0 var(--accent); opacity: 1; }
 body.comms-resizing { cursor: row-resize; user-select: none; }
 
-/* edges: grey; blue moving dashes = a task in progress, amber dashes = someone waits, red = ended without report */
+/* edges: grey; blue moving dashes = a task in progress or a message being processed, amber dashes = someone waits, red = ended without report */
 .ce .ce-hit { fill: none; stroke: transparent; stroke-width: 12px; cursor: pointer; pointer-events: stroke; }
 .ce .ce-line { fill: none; stroke: var(--edge); stroke-width: 1.5px; pointer-events: none; transition: stroke-width .12s; }
 .ce:hover .ce-line, .ce.selected .ce-line { stroke-width: 2.5px; }
 .ce.selected .ce-line { stroke: var(--text); }
-.ce.live-in-progress .ce-line { stroke: var(--accent); stroke-dasharray: 7 5; animation: ce-flow 0.9s linear infinite; }
-.ce.live-waiting-report .ce-line, .ce.live-waiting-reply .ce-line, .ce.live-awaiting-reopen .ce-line { stroke: var(--warn); stroke-dasharray: 5 4; }
+.ce.live-in-progress .ce-line, .ce.live-reading .ce-line { stroke: var(--accent); stroke-dasharray: 7 5; animation: ce-flow 0.9s linear infinite; }
+.ce.live-waiting-report .ce-line, .ce.live-queued .ce-line, .ce.live-awaiting-reopen .ce-line { stroke: var(--warn); stroke-dasharray: 5 4; }
 .ce.live-ended-no-report .ce-line { stroke: var(--err); stroke-width: 2px; }
 .ce.muted, .ce-label.muted { opacity: .45; }
 .ce.dim, .ce-label.dim { opacity: .3; }
@@ -660,8 +660,8 @@ body.comms-resizing { cursor: row-resize; user-select: none; }
 .ce-label rect { fill: var(--panel-2); stroke: var(--edge); stroke-width: 1px; }
 .ce-label text { fill: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
 .ce-label:hover rect, .ce-label.selected rect { stroke: var(--text); }
-.ce-label.live-in-progress rect { stroke: var(--accent); }
-.ce-label.live-waiting-report rect, .ce-label.live-waiting-reply rect, .ce-label.live-awaiting-reopen rect { stroke: var(--warn); }
+.ce-label.live-in-progress rect, .ce-label.live-reading rect { stroke: var(--accent); }
+.ce-label.live-waiting-report rect, .ce-label.live-queued rect, .ce-label.live-awaiting-reopen rect { stroke: var(--warn); }
 .ce-label.live-ended-no-report rect { stroke: var(--err); }
 .ce-label.live-ended-no-report text { fill: var(--err); }
 

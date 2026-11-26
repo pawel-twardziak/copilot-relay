@@ -10,10 +10,15 @@ const NOW = 1_000_000;
 const edge = (from, to, live, ago = null) => ({ from, to, live, since: ago == null ? undefined : NOW - ago * 1000, count: 1, size: 1 });
 
 test("the status line puts the clock first, in short words", () => {
-  const edges = [edge("p", "c", "in-progress", 192), edge("c", "p", "waiting-report", 192), edge("x", "p", "waiting-reply", 65)];
+  const edges = [edge("p", "c", "in-progress", 192), edge("c", "p", "waiting-report", 192), edge("x", "p", "reading", 65)];
   assert.equal(T.statusOf(node("c", "working"), edges, NOW), "3:12 working");
   assert.equal(T.statusOf(node("c", "idle"), [edges[1]], NOW), "3:12 report due");
-  assert.equal(T.statusOf(node("p"), edges, NOW), "1:05 awaits reply");
+  assert.equal(T.statusOf(node("p", "working"), edges, NOW), "1:05 reading");
+  assert.equal(T.statusOf(node("c", "closed"), [edge("p", "c", "queued", 40)], NOW), "0:40 queued");
+  assert.equal(T.statusOf(node("p", "working"), [edge("a", "p", "reading", 300), edge("b", "p", "reading", 12)], NOW), "0:12 reading", "the newest");
+  assert.equal(T.liveText(edge("a", "p", "reading", 12), NOW), "recipient is processing it · 0:12");
+  assert.equal(T.liveText(edge("a", "p", "queued", 40), NOW), "queued, not delivered yet · 0:40");
+  assert.equal(T.hasTimer({ edges: [edge("a", "p", "reading", 12)], nodes: [] }), true);
   assert.equal(T.statusOf(node("c"), [edge("c", "p", "ended-no-report")], NOW), "ended, no report");
   assert.equal(T.statusOf(node("c", "closed"), [edge("p", "c", "awaiting-reopen", 30)], NOW), "awaiting reopen");
   assert.equal(T.statusOf(node("c", "waiting-task"), [], NOW), "idle");
