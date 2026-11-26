@@ -3247,7 +3247,7 @@ function openRelative(id) {
   openSession(s);
 }
 
-/** showProject: its folder goes into the meta line (in Pinned, or its folder differs from its tree's root's).
+/** showProject: its folder goes into the meta line (in Pinned and Open in app, or its folder differs from its root's).
  *  depth: its level under its parent in the tree (0 = a root, with "child of X" when it has a parent not listed). */
 function item(s, v, { showProject = false, depth = 0 } = {}) {
   const heldCount = HeldReplies.sidebarCount({ view: v, brokerHeld: heldByKey, brokerByKind: heldByKindKey, sessionId: s.sessionId });

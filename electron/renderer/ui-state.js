@@ -5,7 +5,8 @@
 /** When a session was last used: its last message or tool call (main: last-activity.mjs), else Copilot's updatedAt,
  *  which also moves when the session is only opened or closed. */
 const activityAt = (s) => s.lastActivityAt ?? s.updatedAt;
-const time = (s) => new Date(activityAt(s) ?? 0).getTime();
+/** Sort key: an open view Copilot does not list yet (no dates: just created) counts as the newest. */
+const time = (s) => (activityAt(s) == null ? Infinity : new Date(activityAt(s)).getTime() || 0);
 
 const NO_TREE = { parentOf: new Map(), childrenOf: new Map() };
 
@@ -17,7 +18,7 @@ const NO_TREE = { parentOf: new Map(), childrenOf: new Map() };
  * query: lower-cased filter text; a tree stays whole when any member matches, and while filtering every group is
  * shown expanded (the stored state is untouched).
  * Returns { pinned: Row[], open: Row[], groups: { cwd, rows, count, collapsed }[] }, Row = { s, depth, showProject }
- * (showProject: its folder is shown, in Pinned always, elsewhere when it differs from its root's).
+ * (showProject: its folder is shown, in Pinned and Open in app always, in a group when it differs from its root's).
  */
 function listModel(rows, { pinned = new Set(), open = new Set(), collapsed = new Set(), query = "", tree = NO_TREE } = {}) {
   const match = (s) => `${s.title ?? ""} ${s.cwd ?? ""} ${s.sessionId}`.toLowerCase().includes(query);
@@ -54,15 +55,15 @@ function listModel(rows, { pinned = new Set(), open = new Set(), collapsed = new
       groups.get(t.root.cwd).push(t);
     }
   }
-  const byLatest = (a, b) => b.latest - a.latest;
-  const flatten = (list, inPinned = false) =>
-    [...list].sort(byLatest).flatMap((t) => t.members.map(({ s, depth }) => ({ s, depth, showProject: inPinned || s.cwd !== t.root.cwd })));
+  const byLatest = (a, b) => (b.latest > a.latest) - (b.latest < a.latest); // stable for equal (and both Infinity)
+  const flatten = (list, allFolders = false) =>
+    [...list].sort(byLatest).flatMap((t) => t.members.map(({ s, depth }) => ({ s, depth, showProject: allFolders || s.cwd !== t.root.cwd })));
   const out = [...groups.entries()].map(([cwd, list]) => {
     const groupRows = flatten(list);
     return { cwd, rows: groupRows, count: groupRows.length, collapsed: collapsed.has(cwd) && !query, latest: Math.max(...list.map((t) => t.latest)) };
   });
-  out.sort((a, b) => b.latest - a.latest);
-  return { pinned: flatten(top, true), open: flatten(opened), groups: out.map(({ latest, ...g }) => g) };
+  out.sort(byLatest);
+  return { pinned: flatten(top, true), open: flatten(opened, true), groups: out.map(({ latest, ...g }) => g) };
 }
 
 // Chat text scale: Left Ctrl + wheel / + / - / 0

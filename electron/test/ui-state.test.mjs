@@ -108,7 +108,14 @@ test("a pinned child pulls its tree into Pinned", () => {
 test("an open child pulls its tree into Open in app", () => {
   const m = listModel(treeRows, { tree: pc, open: new Set(["c"]) });
   assert.deepEqual(flat(m.open), ["p:0", "c:1"]);
+  assert.ok(m.open.every((r) => r.showProject === true), "Open in app shows every row's folder");
   assert.deepEqual(m.groups.flatMap((g) => ids(g.rows)), ["x"]);
+});
+
+test("an open session Copilot does not list yet sorts as the newest", () => {
+  const rows = [S("q", "/a", "2026-11-05T10:00:00Z"), { sessionId: "new", cwd: "/a", title: "new" }, { sessionId: "new2", cwd: "/b", title: "new2" }];
+  const m = listModel(rows, { open: new Set(["q", "new", "new2"]) });
+  assert.deepEqual(ids(m.open), ["new", "new2", "q"]);
 });
 
 test("Pinned wins over Open in app", () => {
