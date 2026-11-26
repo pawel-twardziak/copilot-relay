@@ -51,8 +51,11 @@ function messagesOf(events) {
 }
 
 /**
- * input = { comms: {root, keys, events, peers} | null, links, heldByKind, current, live, now, filter }
+ * input = { comms: {root, keys, events, peers} | null, links, heldByKind, current, live, now, filter };
+ *   live[id] = { online?, busy?, ctx?, keeper?, cards? } (online/busy from a view open in this app override links/peers)
  * -> { nodes, edges, rows, stats, unsupported }  (see the Communication panel design, section 6)
+ *   node.held = { child, parent, other }: the node's unacknowledged held messages by kind (heldByKind is per
+ *   recipient, not per sender); edge.held = the target's `parent` count on a parent->child edge, else 0.
  */
 function build(input = {}) {
   const comms = input.comms ?? null;
@@ -106,20 +109,29 @@ function build(input = {}) {
     } else if (m.e.kind === "report") lastReport.set(m.src, ms(m.e.ts));
   }
 
-  // online/busy: links for children, peers for the root and outside nodes; neither -> closed
+  // online/busy: an open view's live facts first, then links for children, peers for the root and outside nodes;
+  // none -> closed
   const facts = (id) => {
     const l = tree.link.get(id);
     const p = comms?.peers?.[keyOf.get(id)];
-    return (treeParent(id) != null ? l ?? p : p ?? l) ?? {};
+    const known = (treeParent(id) != null ? l ?? p : p ?? l) ?? {};
+    const own = live[id] ?? {};
+    return {
+      online: typeof own.online === "boolean" ? own.online : known.online,
+      busy: typeof own.busy === "boolean" ? own.busy : known.busy,
+    };
   };
+  const hasTask = (id) => tasked.has(id) || !!tree.link.get(id)?.task;
+  // waiting-task only for a child (a root or outside node that is online and not busy is idle)
   const stateOf = (id) => {
     const f = facts(id);
-    const l = tree.link.get(id);
     if (f.online !== true) return "closed";
     if (f.busy === true) return "working";
-    if (l?.reported === true || (!tasked.has(id) && !l?.task)) return "waiting-task";
+    if (treeParent(id) != null && (tree.link.get(id)?.reported === true || !hasTask(id))) return "waiting-task";
     return "idle";
   };
+  const heldOf = (id, kind) => Number(heldByKind[keyOf.get(id)]?.[kind]) || 0;
+  const heldOfNode = (id) => Object.fromEntries(HELD_KINDS.map((kind) => [kind, heldOf(id, kind)]));
   const depth = new Map();
   const makeNode = (id, inTreeNode) => {
     const parent = inTreeNode ? treeParent(id) ?? null : null;
@@ -134,7 +146,7 @@ function build(input = {}) {
     if (live[id]?.keeper) node.keeper = live[id].keeper;
     Object.assign(node, {
       cards: [...(live[id]?.cards ?? [])], badges: { relay: c.relay, user: c.user }, sent: c.sent, received: c.received,
-      current: id === input.current,
+      held: heldOfNode(id), current: id === input.current,
     });
     return node;
   };
@@ -145,7 +157,8 @@ function build(input = {}) {
       if (card?.kind !== "create") continue;
       ghosts.push({
         id: `proposed:${card.id}`, name: card.name, inTree: true, released: false, parent: id, depth: depth.get(id) + 1,
-        state: "proposed", cards: [], badges: { relay: 0, user: 0 }, sent: 0, received: 0, current: false,
+        state: "proposed", cards: [], badges: { relay: 0, user: 0 }, sent: 0, received: 0,
+        held: { child: 0, parent: 0, other: 0 }, current: false,
       });
     }
   }
@@ -187,7 +200,7 @@ function build(input = {}) {
     const l = tree.link.get(id) ?? {};
     const since = firstTask.get(pairKey(parent, id)) ?? ms(l.createdAt);
     if (l.endedNotice === true) setLive(ensure(id, parent), "ended-no-report");
-    else if (l.reported !== true) setLive(ensure(id, parent), "waiting-report", since);
+    else if (l.reported !== true && hasTask(id)) setLive(ensure(id, parent), "waiting-report", since);
     if (stateById.get(id) === "working" && l.reported !== true) setLive(ensure(parent, id), "in-progress", since);
   }
   for (const [k, edge] of edges) {
@@ -203,10 +216,8 @@ function build(input = {}) {
     if (!answer || answer.seq < event.seq) setLive(edge, "waiting-reply", ms(event.e.ts));
   }
 
-  // held messages into the edge's target, by kind
-  const heldOf = (id, kind) => Number(heldByKind[keyOf.get(id)]?.[kind]) || 0;
-  const kindOf = (edge) => (treeParent(edge.from) === edge.to ? "child" : treeParent(edge.to) === edge.from ? "parent" : "other");
-  for (const edge of edges.values()) edge.held = heldOf(edge.to, kindOf(edge));
+  // held on an edge: exact only parent->child (a child has one parent); the other counts are on the target node
+  for (const edge of edges.values()) edge.held = treeParent(edge.to) === edge.from ? heldOf(edge.to, "parent") : 0;
 
   // rows and statistics, narrowed by the filter (the graph is not)
   const match = !filter
@@ -227,7 +238,7 @@ function build(input = {}) {
   }
   const heldTotal = (id) => HELD_KINDS.reduce((sum, kind) => sum + heldOf(id, kind), 0);
   const heldNow = !filter
-    ? nodes.filter((n) => n.state !== "proposed").reduce((sum, n) => sum + heldTotal(n.id), 0)
+    ? treeIds.reduce((sum, id) => sum + heldTotal(id), 0) // outside nodes' held belong to other trees
     : filter.node != null
       ? (keyOf.has(filter.node) ? heldTotal(filter.node) : 0)
       : edges.get(pairKey(filter.from, filter.to))?.held ?? 0;

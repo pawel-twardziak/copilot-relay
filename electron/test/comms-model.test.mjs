@@ -37,6 +37,8 @@ test("tree nodes from links, outside counterparts from events, a released child 
   assert.equal(node(m, "x").name, "X");
   assert.equal(node(m, "x").state, "closed");
   assert.equal(node(m, "ext:term").name, "Term");
+  assert.equal(node(m, "ext:term").state, "idle", "waiting-task is only for a child");
+  assert.equal(node(m, "r").state, "idle", "waiting-task is only for a child");
   assert.equal(node(m, "a").current, true);
   assert.equal(node(m, "r").current, false);
   assert.equal(m.unsupported, false);
@@ -93,6 +95,8 @@ test("idle after report: waiting-task", () => {
   assert.equal(node(m, "b").state, "idle");
   assert.equal(node(m, "b").waitingSince, undefined);
   assert.equal(node(m, "c").state, "waiting-task", "no task event and no link task");
+  assert.equal(edge(m, "c", "r"), undefined, "a task-less child owes no report");
+  assert.equal(edge(m, "b", "r").live, "waiting-report");
 });
 
 test("waiting-reply only after a message with no answer back", () => {
@@ -124,9 +128,12 @@ test("held badge from heldByKind; relay/user badges on the recipient, not nodes"
   const heldByKind = { "cli:r": { child: 2, parent: 0, other: 1 }, "cli:a": { parent: 3, other: 4 } };
   const m = build({ comms: comms("r", events, rootPeer), links, heldByKind });
   assert.deepEqual(m.nodes.map((n) => n.id), ["r", "a", "b"]);
-  assert.equal(edge(m, "a", "r").held, 2);
+  assert.equal(edge(m, "a", "r").held, 0);
   assert.equal(edge(m, "r", "a").held, 3);
-  assert.equal(edge(m, "b", "a").held, 4);
+  assert.equal(edge(m, "b", "a").held, 0);
+  assert.deepEqual(node(m, "r").held, { child: 2, parent: 0, other: 1 });
+  assert.deepEqual(node(m, "a").held, { child: 0, parent: 3, other: 4 });
+  assert.deepEqual(node(m, "b").held, { child: 0, parent: 0, other: 0 });
   assert.equal(edge(m, "b", "a").tree, false);
   assert.equal(m.edges.length, 3);
   assert.deepEqual(node(m, "a").badges, { relay: 1, user: 1 });
@@ -159,7 +166,7 @@ test("closed session and awaiting-reopen edge", () => {
   assert.equal(edge(m, "r", "a").live, "awaiting-reopen");
   assert.equal(edge(m, "r", "a").since, 10);
   assert.equal(edge(m, "r", "b").live, "waiting-reply", "delivered after reopen");
-  assert.equal(node(m, "r").state, "waiting-task");
+  assert.equal(node(m, "r").state, "idle");
 });
 
 test("ctx and keeper copied onto the node", () => {
@@ -227,7 +234,7 @@ test("filter by node and by edge narrows rows and stats", () => {
   assert.deepEqual(byEdge.stats, { messages: 1, size: 10, avgTaskToReport: null, heldNow: 2, discarded: 0, dropped: 0, blocked: 0 });
   const reverse = build({ ...base, filter: { from: "a", to: "r" } });
   assert.deepEqual(reverse.rows.map((r) => r.id), ["r1"]);
-  assert.equal(reverse.stats.heldNow, 1);
+  assert.equal(reverse.stats.heldNow, 0, "child->parent held is on the parent node, not the edge");
   // the graph does not follow the filter
   assert.equal(byEdge.nodes.length, 3);
   assert.equal(byEdge.edges.length, all.edges.length);
@@ -242,10 +249,39 @@ test("comms null (old broker): nodes and live state from links, rows empty, unsu
   assert.deepEqual(m.edges.map((e) => [e.from, e.to, e.live, e.since, e.count]), [
     ["a", "r", "waiting-report", 1200, 0], ["r", "a", "in-progress", 1200, 0], ["b", "r", "waiting-report", 1300, 0],
   ]);
-  assert.equal(edge(m, "a", "r").held, 2);
+  assert.equal(edge(m, "a", "r").held, 0);
+  assert.deepEqual(node(m, "r").held, { child: 2, parent: 0, other: 0 });
   assert.deepEqual(m.rows, []);
   assert.deepEqual(m.stats, { messages: 0, size: 0, avgTaskToReport: null, heldNow: 2, discarded: 0, dropped: 0, blocked: 0 });
   assert.deepEqual(build({}).nodes, [], "no current session, no tree");
+});
+
+test("held on the target node: one held child message at the parent is not repeated on each child edge", () => {
+  const links = [link("a", "r", { reported: true }), link("b", "r", { reported: true })];
+  const events = [ev("report", "a", "r", 10), ev("report", "b", "r", 20), ev("message", "r", "a", 30), ev("message", "o", "r", 40)];
+  const heldByKind = { "cli:r": { child: 1 }, "cli:a": { parent: 2 }, "cli:o": { other: 5 } };
+  const base = { comms: comms("r", events, rootPeer), links, heldByKind };
+  const m = build(base);
+  assert.deepEqual(node(m, "r").held, { child: 1, parent: 0, other: 0 });
+  assert.deepEqual([edge(m, "a", "r").held, edge(m, "b", "r").held, edge(m, "o", "r").held], [0, 0, 0]);
+  assert.equal(edge(m, "r", "a").held, 2);
+  assert.deepEqual(node(m, "o").held, { child: 0, parent: 0, other: 5 });
+  assert.equal(m.stats.heldNow, 3, "outside nodes' held belong to other trees");
+  assert.equal(build({ ...base, filter: { node: "o" } }).stats.heldNow, 5);
+  assert.equal(build({ ...base, filter: { node: "r" } }).stats.heldNow, 1);
+  assert.equal(build({ ...base, filter: { from: "r", to: "a" } }).stats.heldNow, 2);
+  assert.equal(build({ ...base, filter: { from: "a", to: "r" } }).stats.heldNow, 0);
+  assert.equal(build({ ...base, filter: { from: "o", to: "r" } }).stats.heldNow, 0);
+});
+
+test("live online/busy from an open view override links and peers", () => {
+  const links = [link("a", "r"), link("b", "r")];
+  const live = { r: { online: true }, a: { busy: true }, b: { online: false } };
+  const m = build({ links, current: "r", live });
+  assert.deepEqual(m.nodes.map((n) => [n.id, n.state]), [["r", "idle"], ["a", "working"], ["b", "closed"]]);
+  assert.equal(edge(m, "r", "a").live, "in-progress");
+  const peers = { "cli:r": { name: "Root", online: false, busy: false, kind: "cli" } };
+  assert.equal(node(build({ comms: comms("r", [], peers), links, live: { r: { online: true, busy: true } } }), "r").state, "working");
 });
 
 test("inTree: a session with a parent or children", () => {
