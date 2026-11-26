@@ -113,6 +113,52 @@ export async function readSessionUsage(sessionId, { copilotHome } = {}) {
 }
 
 /**
+ * Context figures for a session that is not running yet (the agent sends usage_update only after a turn, never on
+ * session/load): currentTokens of the last session.shutdown whose run had a turn, with the maxPromptTokens of that
+ * run's last session.usage_record as the size. A run without a turn is skipped, its currentTokens leaves out what a
+ * turn adds (tool definitions). Null if the id is invalid, the file is missing, or the last run with a turn never
+ * shut down (a crash: its figure would be stale).
+ */
+export async function readLastContext(sessionId, { copilotHome } = {}) {
+  if (!isSessionId(sessionId)) return null;
+  const file = path.join(copilotHome ?? copilotHomeDefault(), "session-state", sessionId, "events.jsonl");
+  const tail = await readLines(file, false);
+  if (!tail) return null;
+  const found = lastRunContext(tail.lines);
+  if (found !== undefined || !tail.truncated) return found ?? null;
+  const all = await readLines(file, true);
+  return all ? (lastRunContext(all.lines) ?? null) : null;
+}
+
+/** Backward walk over the runs (start/resume … shutdown); undefined when the lines end before an answer. */
+function lastRunContext(lines) {
+  let shut = false; // the run being walked back through ended with a shutdown
+  let used = null; // that shutdown's currentTokens
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (!line.includes('"session.')) continue;
+    let e;
+    try {
+      e = JSON.parse(line);
+    } catch {
+      continue; // half-written or foreign line
+    }
+    if (e?.type === "session.usage_record") {
+      // the newest run with a turn: its last call's prompt limit is the size, unless it never shut down
+      const size = num(e.data?.usage?.maxPromptTokens);
+      return shut && used !== null && used >= 0 && size > 0 ? { used, size } : null;
+    } else if (e?.type === "session.shutdown") {
+      shut = true;
+      used = num(e.data?.currentTokens);
+    } else if (e?.type === "session.start" || e?.type === "session.resume") {
+      shut = false; // a run without a turn: keep looking further back
+      used = null;
+    }
+  }
+  return undefined;
+}
+
+/**
  * Prompt-cache expiry from the session's last usage checkpoint that has a non-empty modelCacheState.
  * With a modelId only that model's entry counts; with none (or "auto") the entry that expires last wins.
  * Null for an invalid id, a missing file, no such checkpoint, no matching entry or an unparsable date.
@@ -253,11 +299,12 @@ export function createUsagePusher({
   send,
   readSession = readSessionUsage,
   readQuota: readQuotaFn = readQuota,
+  readContext = readLastContext,
   debounceMs = 300,
   quotaTtlMs = 60_000,
   now = Date.now,
 }) {
-  const states = new Map(); // sessionId -> { context, timer }
+  const states = new Map(); // sessionId -> { context, fileContext, fileRead, timer }
   let quotaCache = null; // { at, value }
 
   async function quota() {
@@ -267,18 +314,26 @@ export function createUsagePusher({
     return value;
   }
 
+  // until the first usage_update (a turn), the figures the session's last run left in its file; read once
+  async function fileContext(sessionId, state) {
+    if (state.context || state.fileRead) return;
+    state.fileRead = true;
+    state.fileContext = await Promise.resolve().then(() => readContext(sessionId)).catch(() => null);
+  }
+
   async function push(sessionId, state) {
     const [session, q] = await Promise.all([
       Promise.resolve().then(() => readSession(sessionId)).catch(() => null),
       quota(),
+      fileContext(sessionId, state),
     ]);
     if (states.get(sessionId) !== state) return; // forgotten while reading
-    send(sessionId, summarize({ context: state.context, session, quota: q }));
+    send(sessionId, summarize({ context: state.context ?? state.fileContext, session, quota: q }));
   }
 
   function schedule(sessionId) {
     let state = states.get(sessionId);
-    if (!state) states.set(sessionId, (state = { context: null, timer: null }));
+    if (!state) states.set(sessionId, (state = { context: null, fileContext: null, fileRead: false, timer: null }));
     clearTimeout(state.timer);
     const s = state;
     s.timer = setTimeout(() => {

@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { createUsagePusher, formatTokens, readCacheExpiry, readQuota, readSessionUsage, summarize } from "../usage.mjs";
+import { createUsagePusher, formatTokens, readCacheExpiry, readLastContext, readQuota, readSessionUsage, summarize } from "../usage.mjs";
 
 const FIX = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "usage");
 let root;
@@ -108,6 +108,63 @@ describe("readSessionUsage", () => {
   });
 });
 
+describe("readLastContext", () => {
+  const ev = (type, data = {}) => JSON.stringify({ type, data, timestamp: "2026-11-26T10:00:00.000Z" });
+  const start = ev("session.start");
+  const resume = ev("session.resume");
+  const record = (max) => ev("session.usage_record", { usage: { inputTokens: 100, maxPromptTokens: max } });
+  const shutdown = (current) => ev("session.shutdown", { currentTokens: current });
+  const lines = (...l) => l.join("\n") + "\n";
+
+  test("takes the last shutdown's currentTokens and its run's last maxPromptTokens", async () => {
+    const id = put(lines(start, record(128000), record(200000), shutdown(35443)));
+    assert.deepEqual(await readLastContext(id, { copilotHome: home }), { used: 35443, size: 200000 });
+  });
+
+  test("skips a run without a turn (its currentTokens has no tools in it)", async () => {
+    const id = put(lines(start, record(200000), shutdown(35443), resume, shutdown(13806)));
+    assert.deepEqual(await readLastContext(id, { copilotHome: home }), { used: 35443, size: 200000 });
+  });
+
+  test("a later run with a turn wins over an earlier one", async () => {
+    const id = put(lines(start, record(200000), shutdown(1000), resume, record(1000000), shutdown(2000)));
+    assert.deepEqual(await readLastContext(id, { copilotHome: home }), { used: 2000, size: 1000000 });
+  });
+
+  test("null when the last run with a turn never shut down (the figure would be stale)", async () => {
+    const id = put(lines(start, record(200000), shutdown(1000), resume, record(200000)));
+    assert.equal(await readLastContext(id, { copilotHome: home }), null);
+  });
+
+  test("null without a shutdown, without currentTokens, or without maxPromptTokens", async () => {
+    for (const content of [
+      lines(start, record(200000)),
+      lines(start, record(200000), ev("session.shutdown", {})),
+      lines(start, ev("session.usage_record", { usage: {} }), shutdown(1000)),
+    ]) {
+      assert.equal(await readLastContext(put(content), { copilotHome: home }), null);
+    }
+  });
+
+  test("a run without a turn is skipped even when its shutdown has no currentTokens", async () => {
+    const id = put(lines(start, record(200000), shutdown(500), resume, ev("session.shutdown", {})));
+    assert.deepEqual(await readLastContext(id, { copilotHome: home }), { used: 500, size: 200000 });
+  });
+
+  test("reads the whole file when the 2 MiB tail ends inside a run without a turn", async () => {
+    const filler = JSON.stringify({ type: "assistant.message", data: { content: "x".repeat(1000) } });
+    const id = put(lines(start, record(200000), shutdown(700), resume, ...Array(2200).fill(filler), shutdown(1)));
+    assert.deepEqual(await readLastContext(id, { copilotHome: home }), { used: 700, size: 200000 });
+  });
+
+  test("ignores garbage lines and rejects a non-UUID id or a missing file", async () => {
+    const id = put(lines(start, "{not json", record(200000), "garbage", shutdown(500)));
+    assert.deepEqual(await readLastContext(id, { copilotHome: home }), { used: 500, size: 200000 });
+    assert.equal(await readLastContext("../x", { copilotHome: home }), null);
+    assert.equal(await readLastContext(randomUUID(), { copilotHome: home }), null);
+  });
+});
+
 describe("readQuota", () => {
   test("returns the newest premium snapshot", async () => {
     put(fixture("events-quota.jsonl"));
@@ -204,11 +261,12 @@ describe("createUsagePusher", () => {
   function make(t, over = {}) {
     t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
     const sent = [];
-    const calls = { session: 0, quota: 0 };
+    const calls = { session: 0, quota: 0, context: 0 };
     const pusher = createUsagePusher({
       send: (id, view) => sent.push({ id, view }),
       readSession: async () => (calls.session++, null),
       readQuota: async () => (calls.quota++, null),
+      readContext: async () => (calls.context++, null),
       ...over,
     });
     // timers fire synchronously on tick; let the async readers settle afterwards
@@ -271,6 +329,47 @@ describe("createUsagePusher", () => {
     release(null);
     await tick(10);
     assert.equal(sent.length, 0);
+  });
+
+  test("without live numbers the view starts with the context from the file, read once", async (t) => {
+    const { sent, calls, pusher, tick } = make(t, {
+      readContext: async () => (calls.context++, { used: 22899, size: 200000 }),
+    });
+    pusher.refresh("s1");
+    await tick(300);
+    assert.equal(sent[0].view.context.pct, 11);
+    pusher.refresh("s1");
+    await tick(300);
+    assert.equal(sent[1].view.context.pct, 11);
+    assert.equal(calls.context, 1);
+  });
+
+  test("live numbers win over the file and stop it being read", async (t) => {
+    const { sent, calls, pusher, tick } = make(t, {
+      readContext: async () => (calls.context++, { used: 22899, size: 200000 }),
+    });
+    pusher.refresh("s1");
+    await tick(300);
+    pusher.context("s1", { used: 100000, size: 200000 });
+    await tick(300);
+    assert.equal(sent[1].view.context.pct, 50);
+    pusher.context("s2", { used: 100000, size: 200000 });
+    await tick(300);
+    assert.equal(sent[2].view.context.pct, 50);
+    assert.equal(calls.context, 1);
+  });
+
+  test("live numbers that arrive while the file is read are kept", async (t) => {
+    let release;
+    const { sent, pusher, tick } = make(t, { readContext: () => new Promise((r) => (release = r)) });
+    pusher.refresh("s1");
+    await tick(300);
+    pusher.context("s1", { used: 100000, size: 200000 });
+    release({ used: 22899, size: 200000 });
+    await tick(10);
+    await tick(300);
+    assert.ok(sent.every((s) => s.view.context?.pct !== 11));
+    assert.equal(sent.at(-1).view.context.pct, 50);
   });
 
   test("a failing reader yields a view, not an exception", async (t) => {
