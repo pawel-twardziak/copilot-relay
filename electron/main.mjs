@@ -26,7 +26,7 @@ import { beginPrompt, endPrompt } from "./prompt-count.mjs";
 import { normalizePanelMode } from "./activity-panel.mjs";
 import { createTierStore, effectiveTier, normalizeTier, switchTier, tierArgs, withContextOption } from "./context-tier.mjs";
 import { saveSetup } from "./session-setup.mjs";
-import { CHILD_PART, applyPromptSettings, clearPromptDirs, composePrompt, createPromptStore, effectiveChildPart, instructionsEnv, normalizeTemplates, writePromptDir } from "./session-prompts.mjs";
+import { CHILD_PART, DEFAULT_PART, applyPromptSettings, clearPromptDirs, composePrompt, createPromptStore, effectiveChildPart, effectiveDefaultPart, instructionsEnv, migratePromptDefault, normalizeTemplates, writePromptDir } from "./session-prompts.mjs";
 import { createRestarter, realEffects, reconnectClients } from "./broker-restart.mjs";
 import { runProgram } from "./run-program.mjs";
 import { createGit } from "./repo-git.mjs";
@@ -299,10 +299,13 @@ function childLinkOf(sessionId) {
   return link ? { parent: link.parent, adopted: link.adopted === true } : null;
 }
 
+/** The default part a session starts with: the Settings text, else the built-in one when the relay is on. */
+const defaultPartOf = (s) => effectiveDefaultPart(s.promptDefault, { relay: relayConfig().enabled });
+
 /** The prompt a Copilot process of the session starts with: own defaults to the stored part, isChild to its link. */
 function promptFor(sessionId, { own = prompts.get(sessionId), isChild = childLinkOf(sessionId) !== null } = {}) {
   const s = loadSettings();
-  return composePrompt({ defaultPart: s.promptDefault, childPart: effectiveChildPart(s.promptChild), own, isChild });
+  return composePrompt({ defaultPart: defaultPartOf(s), childPart: effectiveChildPart(s.promptChild), own, isChild });
 }
 
 // the cached snapshot at once; the fresh one follows as links:update
@@ -1455,7 +1458,7 @@ function restartGuards(sessionId) {
 handle("sessions:getPrompt", async (sessionId) => {
   if (!isSessionId(sessionId)) throw new Error(`Invalid session id: ${sessionId}`);
   const s = loadSettings();
-  return { own: prompts.get(sessionId), command: commands.get(sessionId), settingsCommand: settingsCommand().command, defaultPart: typeof s.promptDefault === "string" ? s.promptDefault : "", childPart: effectiveChildPart(s.promptChild), isChild: childLinkOf(sessionId) !== null };
+  return { own: prompts.get(sessionId), command: commands.get(sessionId), settingsCommand: settingsCommand().command, defaultPart: defaultPartOf(s), childPart: effectiveChildPart(s.promptChild), isChild: childLinkOf(sessionId) !== null };
 });
 
 // a new own part or command takes a new Copilot process, as a new context window does (the renderer reopens the
@@ -1498,9 +1501,11 @@ handle("settings:get", async () => ({
   activityPanel: normalizePanelMode(loadSettings().activityPanel),
   brokerRepo: loadSettings().brokerRepo ?? "",
   brokerRepoDefault: defaultBrokerRepo(),
-  promptDefault: typeof loadSettings().promptDefault === "string" ? loadSettings().promptDefault : "",
+  promptDefault: typeof loadSettings().promptDefault === "string" ? loadSettings().promptDefault : null,
   promptChild: typeof loadSettings().promptChild === "string" ? loadSettings().promptChild : null,
   promptTemplates: normalizeTemplates(loadSettings().promptTemplates),
+  defaultPartDefault: DEFAULT_PART,
+  defaultPart: defaultPartOf(loadSettings()), // the one a session starts with now (for the prompt editors)
   childPartDefault: CHILD_PART,
   cacheKeeper: normalizeKeeperSettings(loadSettings().cacheKeeper),
 }));
@@ -1511,7 +1516,7 @@ handle("settings:set", async (s) => {
   const next = { ...loadSettings(), ...(typed.refused ? {} : { copilotCommand: typed.command }), relay: s.relay !== false, contextTier: normalizeTier(s.contextTier) ?? "default", queueMidTurn: s.queueMidTurn === true, activityPanel: normalizePanelMode(s.activityPanel), brokerRepo: String(s.brokerRepo ?? "").trim() };
   // the keeper's settings only when sent, as the prompt parts
   if (s.cacheKeeper !== undefined) next.cacheKeeper = normalizeKeeperSettings(s.cacheKeeper);
-  // the prompt parts only when sent (a form without them keeps them); promptChild null: back to the built-in text
+  // the prompt parts only when sent (a form without them keeps them); null: back to the built-in text
   saveSettings(applyPromptSettings(next, s));
   keeper.replan();
   lister?.kill();
@@ -1975,6 +1980,12 @@ if (!app.requestSingleInstanceLock()) {
     win.focus();
   });
   fixPath();
+  try {
+    const migrated = migratePromptDefault(loadSettings());
+    if (migrated) saveSettings(migrated);
+  } catch (e) {
+    console.warn(`[session-prompts] could not migrate the default part: ${e.message}`);
+  }
   try {
     clearPromptDirs(promptRoot); // the folders of processes an earlier run did not see exit (before any connect)
   } catch (e) {

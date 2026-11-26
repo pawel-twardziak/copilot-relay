@@ -6,12 +6,15 @@ import path from "node:path";
 import { test } from "node:test";
 import {
   CHILD_PART,
+  DEFAULT_PART,
   applyPromptSettings,
   clearPromptDirs,
   composePrompt,
   createPromptStore,
   effectiveChildPart,
+  effectiveDefaultPart,
   instructionsEnv,
+  migratePromptDefault,
   normalizeTemplates,
   writePromptDir,
 } from "../session-prompts.mjs";
@@ -36,6 +39,31 @@ test('effectiveChildPart: absent means the built-in text, "" means none', () => 
   assert.equal(effectiveChildPart("X"), "X");
   assert.match(CHILD_PART, /^This session is the child of another session/);
   assert.match(CHILD_PART, /before you can finish\.$/);
+});
+
+test('effectiveDefaultPart: absent means the built-in text, "" means none', () => {
+  assert.equal(effectiveDefaultPart(undefined), DEFAULT_PART);
+  assert.equal(effectiveDefaultPart(null), DEFAULT_PART);
+  assert.equal(effectiveDefaultPart(""), "");
+  assert.equal(effectiveDefaultPart("X"), "X");
+  // without the relay: no built-in text (it names relay tools), a text of the user's own still applies
+  assert.equal(effectiveDefaultPart(undefined, { relay: false }), "");
+  assert.equal(effectiveDefaultPart("X", { relay: false }), "X");
+  assert.equal(effectiveDefaultPart(undefined, { relay: true }), DEFAULT_PART);
+  assert.match(DEFAULT_PART, /^You can delegate work to child sessions\. `create_session` starts a child/);
+  assert.match(DEFAULT_PART, /check what a child reports before you rely on it\.$/);
+  // it names only tools a session with the relay has and tells it not to wait for the outcome, as create_session does
+  assert.doesNotMatch(DEFAULT_PART, /adopt_session|release_session|wait_for_message/);
+  assert.match(DEFAULT_PART, /Don't wait for it/);
+});
+
+test("migratePromptDefault drops an old empty default part once", () => {
+  assert.deepEqual(migratePromptDefault({ relay: true, promptDefault: "" }), { relay: true });
+  assert.equal(migratePromptDefault({ promptDefault: "", promptDefaultExplicit: true }), null, "saved by this version");
+  assert.equal(migratePromptDefault({ promptDefault: "D" }), null);
+  assert.equal(migratePromptDefault({ relay: true }), null);
+  assert.equal(migratePromptDefault({}), null);
+  assert.equal(migratePromptDefault(null), null);
 });
 
 test("normalizeTemplates keeps well-formed entries only", () => {
@@ -66,12 +94,19 @@ test("applyPromptSettings stores only well-typed prompt keys", () => {
   assert.deepEqual(applyPromptSettings(stored(), { promptDefault: undefined, promptChild: undefined, promptTemplates: undefined }), stored());
   assert.deepEqual(applyPromptSettings(stored(), { promptDefault: 5, promptChild: { x: 1 }, promptTemplates: "x" }), stored());
   // text is stored as it is, "" included
-  assert.deepEqual(applyPromptSettings(stored(), { promptDefault: "", promptChild: "" }), { ...stored(), promptDefault: "", promptChild: "" });
-  assert.deepEqual(applyPromptSettings(stored(), { promptDefault: "D2", promptChild: "C2" }), { ...stored(), promptDefault: "D2", promptChild: "C2" });
+  assert.deepEqual(applyPromptSettings(stored(), { promptDefault: "", promptChild: "" }), { ...stored(), promptDefault: "", promptDefaultExplicit: true, promptChild: "" });
+  assert.deepEqual(applyPromptSettings(stored(), { promptDefault: "D2", promptChild: "C2" }), { ...stored(), promptDefault: "D2", promptDefaultExplicit: true, promptChild: "C2" });
+  // the explicit mark keeps a saved "" from the migration
+  assert.equal(migratePromptDefault(applyPromptSettings(stored(), { promptDefault: "" })), null);
   // null: the child part goes back to the built-in text (no key)
   const back = applyPromptSettings(stored(), { promptChild: null });
   assert.equal("promptChild" in back, false);
   assert.equal(effectiveChildPart(back.promptChild), CHILD_PART);
+  // null: the default part too
+  const backDefault = applyPromptSettings(stored(), { promptDefault: null });
+  assert.equal("promptDefault" in backDefault, false);
+  assert.equal(backDefault.promptDefaultExplicit, true);
+  assert.equal(effectiveDefaultPart(backDefault.promptDefault), DEFAULT_PART);
   // templates: normalized, [] empties the list
   assert.deepEqual(applyPromptSettings(stored(), { promptTemplates: [{ id: "b", name: "B" }, { name: "no id" }] }).promptTemplates, [{ id: "b", name: "B", text: "" }]);
   assert.deepEqual(applyPromptSettings(stored(), { promptTemplates: [] }).promptTemplates, []);

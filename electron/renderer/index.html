@@ -75,9 +75,10 @@
         <h3>Prompts</h3>
         <label>
           Default part
-          <textarea id="set-prompt-default" rows="4" spellcheck="false" placeholder="Instructions for every session (optional)"></textarea>
+          <textarea id="set-prompt-default" rows="8" spellcheck="false" placeholder="Instructions for every session (optional)"></textarea>
         </label>
-        <p class="hint">Every session starts with it, before its own part.</p>
+        <div class="store-actions"><button id="set-prompt-default-restore" type="button">Restore default</button></div>
+        <p class="hint">Every session starts with it, before its own part. The built-in text (delegating to sub-sessions) applies only with copilot-relay on. Empty: none.</p>
         <label>
           Working with the parent
           <textarea id="set-prompt-child" rows="5" spellcheck="false"></textarea>

@@ -2322,7 +2322,7 @@ class SessionView {
       .getSettings()
       .then((s) => {
         editor = PromptEditor.createPromptEditor({
-          defaultPart: s.promptDefault ?? "",
+          defaultPart: s.defaultPart ?? "",
           childPart: s.promptChild ?? s.childPartDefault ?? "",
           templates: s.promptTemplates ?? [],
           own: start.own ?? "",
@@ -3044,7 +3044,7 @@ async function newSession(cwd) {
     cwd ??= await api.pickDir();
     if (!cwd) return;
     const s = await api.getSettings();
-    const editor = PromptEditor.createPromptEditor({ defaultPart: s.promptDefault ?? "", childPart: null, templates: s.promptTemplates ?? [], own: "", command: { value: "", settings: s.effective, platform: s.platform }, h });
+    const editor = PromptEditor.createPromptEditor({ defaultPart: s.defaultPart ?? "", childPart: null, templates: s.promptTemplates ?? [], own: "", command: { value: "", settings: s.effective, platform: s.platform }, h });
     const row = FolderRow.createFolderRow({ value: cwd, pick: (cur) => api.pickDir("Folder for the new session", cur), h });
     let res = null;
     const onOk = async (own, command) => {
@@ -3768,16 +3768,24 @@ async function openSettings() {
   renderBroker(await api.brokerStatus().catch(() => null));
   $("#settings").showModal();
 }
-// "Prompts" section: the default part, the child part (childDefault: it shows the built-in text and is saved as
-// none, so a later version's text reaches it), and one row per template (the id stays with its row)
+// "Prompts" section: the default part and the child part (defaultDefault / childDefault: it shows the built-in text
+// and is saved as none, so a later version's text reaches it), and one row per template (the id stays with its row)
+let defaultPartDefault = "";
+let defaultDefault = true;
 let childPartDefault = "";
 let childDefault = true;
 function renderPromptSettings(s) {
+  defaultPartDefault = s.defaultPartDefault ?? "";
   childPartDefault = s.childPartDefault ?? "";
-  $("#set-prompt-default").value = s.promptDefault ?? "";
+  setDefaultPart(s.promptDefault ?? defaultPartDefault, s.promptDefault == null);
   setChildPart(s.promptChild ?? childPartDefault, s.promptChild == null);
   $("#set-templates").replaceChildren(...(s.promptTemplates ?? []).map(templateRow));
   $("#set-prompt-note").textContent = SETTINGS_NOTE;
+}
+function setDefaultPart(text, isDefault) {
+  $("#set-prompt-default").value = text;
+  defaultDefault = isDefault;
+  $("#set-prompt-default-restore").disabled = isDefault;
 }
 function setChildPart(text, isDefault) {
   $("#set-prompt-child").value = text;
@@ -3805,6 +3813,8 @@ function templateRow({ id, name, text }) {
   return row;
 }
 const promptTemplatesOfForm = () => [...$("#set-templates").querySelectorAll(".tpl-row")].map((r) => ({ id: r._id, name: r.querySelector(".tpl-name").value, text: r.querySelector(".tpl-text").value }));
+$("#set-prompt-default").addEventListener("input", () => setDefaultPart($("#set-prompt-default").value, false));
+$("#set-prompt-default-restore").addEventListener("click", () => setDefaultPart(defaultPartDefault, true));
 $("#set-prompt-child").addEventListener("input", () => setChildPart($("#set-prompt-child").value, false));
 $("#set-prompt-child-restore").addEventListener("click", () => setChildPart(childPartDefault, true));
 $("#set-template-add").addEventListener("click", () => {
@@ -3879,7 +3889,7 @@ $("#settings").addEventListener("close", async () => {
     cacheKeeper: CacheKeeper.settingsOfForm({ enabled: $("#set-keeper").checked, pings: $("#set-keeper-pings").value, minContextK: $("#set-keeper-min").value }),
     activityPanel: $("#set-activity").value,
     brokerRepo: $("#set-broker-repo").value.trim() === brokerRepoDefault ? "" : $("#set-broker-repo").value,
-    promptDefault: $("#set-prompt-default").value,
+    promptDefault: defaultDefault ? null : $("#set-prompt-default").value, // null: back to the built-in text
     promptChild: childDefault ? null : $("#set-prompt-child").value, // null: back to the built-in text
     promptTemplates: promptTemplatesOfForm(),
   });
