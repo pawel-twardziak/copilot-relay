@@ -1,6 +1,6 @@
-// The UI checks run by scripts/ui-check/run.mjs: { name, scenario?, modes?, settings?, sessionId?, broker?, run(app) },
-// each throwing on failure. app is a driver (driver.mjs) launched with the check's scenario (default
-// panel-scenario.mjs), settings, sessionId and broker, its mode already set.
+// The UI checks run by scripts/ui-check/run.mjs: { name, scenario?, modes?, settings?, sessionId?, broker?, env?,
+// run(app) }, each throwing on failure. app is a driver (driver.mjs) launched with the check's scenario (default
+// panel-scenario.mjs), settings, sessionId, broker and env, its mode already set.
 import assert from "node:assert/strict";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -11,6 +11,7 @@ import { PARTS } from "../../electron/test/fixtures/acp/panel-scroll-scenario.mj
 import { RUNNING_TITLE } from "../../electron/test/fixtures/acp/tool-split-scenario.mjs";
 import { CHILD_PART } from "../../electron/session-prompts.mjs";
 import { REMINDER } from "../../electron/delegation.mjs";
+import { KEEPALIVE_MARKER } from "../../electron/cache-keeper.mjs";
 import { gitIn } from "../../electron/test/git-helper.mjs";
 import { launch, until } from "./driver.mjs";
 
@@ -564,6 +565,110 @@ const heldTypedDeleteCheck = {
     assert.equal(res.text.includes("1 queued message(s) waiting for it were discarded"), true, res.text);
   },
 };
+
+// ---------- cache keeper ----------
+// The keeper's UI checks run against keeper-scenario.mjs: every turn reports 160000 tokens of context and writes a
+// checkpoint whose cache expires 9 s later. With the leads below the keeper pings 3 s after a turn, counts down 4 s
+// after the ping and compacts 2 s later.
+const KEEPER_SCENARIO = path.join(FIXTURES, "keeper-scenario.mjs");
+const KEEPER_COMPACT = "/compact Quote verbatim the last user message and your last answer.";
+const KEEPER_NOTICE = "Compacted automatically before the prompt cache expired (−4 messages)";
+const KV = `views.get(${JSON.stringify(HISTORY_ID)})`;
+const keeperChip = (app) => app.ev(`${KV}.keeperChip.hidden ? null : ${KV}.keeperText.textContent`);
+/** The prompts the scripted agent received, in order. */
+const agentPrompts = (app) =>
+  JSON.parse(readFileSync(path.join(app.dir, "work", ".scripted-agent.json"), "utf8"))
+    .updates.filter((u) => u.sessionUpdate === "user_message_chunk")
+    .map((u) => u.content.text);
+const pingSent = (app) => until(async () => agentPrompts(app).some((p) => p.startsWith(KEEPALIVE_MARKER)), "the keep-alive ping", 7000);
+const keeperSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+/** The chat's rows from your first message on (the "New session in" line before it left out): [class, text] of your
+ *  messages, the answers (their text only, without the row's buttons and time), notices and errors. */
+const chatRows = (app) =>
+  app.ev(`(() => {
+    const rows = [...${KV}.log.querySelectorAll(":scope > .msg")];
+    return rows.slice(rows.findIndex((e) => e.matches(".user"))).map((e) => [e.className, (e.querySelector(":scope > .body, :scope > .md") ?? e).textContent.trim()]);
+  })()`);
+
+/** A keeper check: the keeper on with one ping, its leads and retries short (main's test hooks). */
+const keeperCheck = (name, run, env = {}) => ({
+  name,
+  modes: ["off"],
+  scenario: KEEPER_SCENARIO,
+  sessionId: HISTORY_ID, // main reads the cache expiry of a UUID session only
+  settings: { cacheKeeper: { enabled: true, pings: 1, minContext: 50000 } },
+  env: { COPILOT_RELAY_KEEPER_LEADS_MS: "6000,5000,3000,1000", COPILOT_RELAY_KEEPER_RETRY_MS: "200", ...env },
+  run,
+});
+
+/** "hello" answered and the session idle: the keeper's pause starts. */
+async function keeperStart(app) {
+  await app.newSession();
+  await app.send("hello");
+  await app.check(`[...${KV}.log.querySelectorAll(":scope > .msg.agent")].some((e) => e.textContent.includes("Answer to hello."))`, "the answer to hello");
+  await app.idle();
+}
+
+const keeperChecks = [
+  // the ping is sent and stays out of the chat; the countdown follows, and Not now ends it without a compaction
+  keeperCheck("keeper-ping-not-now", async (app) => {
+    await keeperStart(app);
+    await pingSent(app);
+    await until(async () => (await keeperChip(app)) === "♻ Keeping the cache warm (1/1)", "the chip after the ping");
+    await until(async () => (await keeperChip(app))?.startsWith("⏳ Compacting in"), "the countdown chip");
+    await app.check(`!!document.querySelector("span.keeper-mark")`, "the ⏳ mark in the session list");
+    assert.equal(await app.ev(`${KV}.keeperNotNow.hidden`), false, "Not now is offered");
+    assert.deepEqual(await chatRows(app), [["msg user", "hello"], ["msg agent", "Answer to hello."]], "the ping left no row in the chat");
+    await app.ev(`${KV}.el.querySelector("button.keeper-not-now").click()`);
+    await until(async () => (await keeperChip(app)) === null, "Not now to hide the chip");
+    await keeperSleep(6000);
+    assert.equal(agentPrompts(app).filter((p) => p.startsWith("/compact")).length, 0, "no compaction after Not now");
+    assert.equal(await keeperChip(app), null);
+  }),
+  // without Not now the keeper compacts: its notice is in the chat, Copilot's own reply line is not
+  keeperCheck("keeper-compact", async (app) => {
+    await keeperStart(app);
+    await pingSent(app);
+    await until(async () => agentPrompts(app).includes(KEEPER_COMPACT), "the /compact prompt");
+    await app.check(`[...${KV}.log.querySelectorAll(":scope > .msg.system")].some((e) => e.textContent === ${JSON.stringify(KEEPER_NOTICE)})`, "the compaction notice");
+    await until(async () => (await keeperChip(app)) === null, "the chip to go after the compaction");
+    const rows = await chatRows(app);
+    assert.deepEqual(rows, [["msg user", "hello"], ["msg agent", "Answer to hello."], ["msg system", KEEPER_NOTICE]]);
+    assert.ok(!(await app.ev(`${KV}.log.textContent.includes("Compacted conversation history")`)), "Copilot's reply line is in the chat");
+    assert.equal(agentPrompts(app).filter((p) => p.startsWith("/compact")).length, 1);
+  }),
+  // a message sent while a ping runs waits for it, then goes out once and is answered
+  keeperCheck(
+    "keeper-prompt-waits",
+    async (app) => {
+      await keeperStart(app);
+      await pingSent(app);
+      assert.ok(agentPrompts(app).at(-1).startsWith(KEEPALIVE_MARKER), "the ping is the last prompt");
+      await app.send("second"); // the ping waits 1.5 s before its answer
+      await app.check(`[...${KV}.log.querySelectorAll(":scope > .msg.agent")].some((e) => e.textContent.includes("Answer to second."))`, "the answer to second");
+      await app.idle();
+      const prompts = agentPrompts(app);
+      assert.equal(prompts.filter((p) => p === "second").length, 1, "second reached the agent once");
+      assert.ok(prompts.findIndex((p) => p.startsWith(KEEPALIVE_MARKER)) < prompts.indexOf("second"), "second went out after the ping");
+      const rows = await chatRows(app);
+      assert.deepEqual(rows.filter(([c]) => c === "msg user"), [["msg user", "hello"], ["msg user", "second"]]);
+      assert.deepEqual(rows.filter(([c]) => c === "msg error" || c === "msg system"), [], "no notice or error");
+    },
+    { SCRIPTED_KEEPER_PING_WAIT_MS: "1500" },
+  ),
+  // the session's switch off: nothing follows the turn
+  keeperCheck("keeper-switch-off", async (app) => {
+    await app.newSession();
+    await app.check(`${KV}.keeperSwitch.checked`, "the switch to be on");
+    await app.ev(`${KV}.el.querySelector("input.keeper-switch").click()`);
+    await app.check(`api.keeperGet(${JSON.stringify(HISTORY_ID)}).then((r) => r.optedOut === true)`, "the opt-out to be stored");
+    await app.send("hello");
+    await app.idle();
+    await keeperSleep(8000);
+    assert.deepEqual(agentPrompts(app), ["hello"], "nothing was sent after hello");
+    assert.equal(await keeperChip(app), null);
+  }),
+];
 
 export const checks = [
   {
@@ -3731,4 +3836,5 @@ export const checks = [
   heldTypedCheck(false),
   heldTypedCheck(true),
   heldTypedDeleteCheck,
+  ...keeperChecks,
 ];

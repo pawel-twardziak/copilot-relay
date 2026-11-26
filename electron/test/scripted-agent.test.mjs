@@ -245,3 +245,33 @@ test("session/load takes the session id it is asked for", async (t) => {
   const ids = new Set(b.updates(from, loaded).map((p) => p.sessionId));
   assert.deepEqual([...ids], ["forked-id"]);
 });
+
+test("a checkpoint step writes a usage checkpoint", async (t) => {
+  const cwd = freshCwd();
+  const home = path.join(tmp, `copilot-home-${dirs}`);
+  const steps = path.join(tmp, "checkpoint.mjs");
+  const play = [{ checkpoint: { ttlMs: 9000, model: "claude-opus-5.5" } }, { end: "end_turn" }];
+  writeFileSync(steps, `export default { prompts: ${JSON.stringify([play, play])} };\n`);
+  const a = start(t, cwd, steps, { COPILOT_HOME: home });
+  await a.request("initialize", { protocolVersion: 1 });
+  const sessionId = a.seen[await a.request("session/new", { cwd, mcpServers: [] })].result.sessionId;
+  const ask = (t) => a.request("session/prompt", { sessionId, prompt: [{ type: "text", text: t }] });
+  const before = Date.now();
+  await ask("first");
+  const after = Date.now();
+  await ask("second");
+  a.stop();
+  const lines = readFileSync(path.join(home, "session-state", sessionId, "events.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.deepEqual(lines.map((e) => e.type), ["session.start", "user.message", "session.usage_checkpoint", "user.message", "session.usage_checkpoint"]);
+  assert.deepEqual(lines.filter((e) => e.type === "user.message").map((e) => e.data.content), ["first", "second"]);
+  const [first, last] = lines.filter((e) => e.type === "session.usage_checkpoint");
+  assert.equal(lines.at(-1), last);
+  assert.notEqual(first.id, last.id, "every checkpoint has a fresh id");
+  const [state] = first.data.modelCacheState;
+  assert.equal(first.data.modelCacheState.length, 1);
+  assert.equal(state.modelId, "claude-opus-5.5");
+  assert.equal(state.cacheTtlSeconds, 9);
+  const expires = Date.parse(state.cacheExpiresAt);
+  assert.ok(expires >= before + 9000 && expires <= after + 9000, `expires ${expires - before} ms after the prompt`);
+  assert.ok(Math.abs(Date.parse(first.timestamp) + 9000 - expires) < 5, "about 9 s after the step ran");
+});

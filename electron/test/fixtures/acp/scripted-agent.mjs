@@ -1,10 +1,15 @@
 #!/usr/bin/env node
 // A scripted ACP agent for the UI checks (scripts/ui-check). SCRIPTED_SCENARIO is the path of a module whose default
-// export is { prompts: Step[][] }: the n-th session/prompt of a session plays prompts[n]. Steps:
+// export is { prompts: Step[][] }: the n-th session/prompt of a session plays prompts[n] (or prompts(text, n) when
+// prompts is a function of the prompt's text and its index). Steps:
 //   { u: update }        a session/update
 //   { perm: toolCall }   a session/request_permission; the next step waits for its answer
 //   { wait: ms }         a pause
 //   { end: stopReason }  the prompt's answer; the steps after it are played after the answer
+//   { checkpoint: { ttlMs, model } }  appends to Copilot's history file of the session
+//                        ($COPILOT_HOME/session-state/<session id>/events.jsonl) a session.start line if the file has
+//                        none, a user.message with the prompt's text, and a session.usage_checkpoint with a fresh id
+//                        whose cache entry for model expires ttlMs from now (for the cache keeper's checks)
 //   { relay: "prompt" }  a prompt "adopt_session <name>" or "release_session <name>" calls that tool of the MCP server
 //                        named relay (from session/new|load's mcpServers) with { name }; "send_message <to> <text…>"
 //                        calls send_message with { to, text } and "report_result <text…>" report_result with { text }.
@@ -30,7 +35,8 @@
 // folder), returned by session/new and session/load; session/set_config_option({ configId, value }) sets that
 // option's currentValue and answers { configOptions }. Without it the session has none.
 // Unknown arguments (--acp --stdio, the context tier…) are ignored.
-import { appendFileSync, existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
@@ -61,7 +67,7 @@ function startInstructions() {
 }
 const started = { instructions: startInstructions() }; // read at start: the folder may be gone at exit
 
-let session = null; // { id, file, updates, starts, mcpServers, configOptions }
+let session = null; // { id, cwd, file, updates, starts, mcpServers, configOptions }
 let nextId = 0;
 const answers = new Map(); // id of a request we sent -> resolve
 let cancelPlaying = () => {}; // session/cancel: ends the prompt being played (play)
@@ -74,7 +80,7 @@ function open(cwd, fresh, mcpServers, id = sessionIdOf(cwd)) {
   const starts = Array.isArray(kept?.starts) ? kept.starts : [];
   if (!session) starts.push(started); // once per process: its first session
   const options = typeof configOptions === "function" ? configOptions(cwd) : configOptions;
-  session = { id, file, updates, starts, mcpServers: mcpServers ?? [], configOptions: structuredClone(options ?? []) };
+  session = { id, cwd, file, updates, starts, mcpServers: mcpServers ?? [], configOptions: structuredClone(options ?? []) };
   save();
 }
 const save = () => writeFileSync(session.file, JSON.stringify({ sessionId: session.id, updates: session.updates, starts: session.starts }, null, 2));
@@ -85,6 +91,24 @@ function update(u, record = true) {
     save();
   }
   send({ method: "session/update", params: { sessionId: session.id, update: u } });
+}
+
+/** { checkpoint }: what Copilot writes to the session's history file in a turn (see the header). */
+function checkpoint({ ttlMs, model }, text) {
+  if (!process.env.COPILOT_HOME) throw new Error("scripted agent: a checkpoint step needs $COPILOT_HOME");
+  const dir = path.join(process.env.COPILOT_HOME, "session-state", session.id);
+  mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, "events.jsonl");
+  const now = Date.now();
+  const event = (type, data) => JSON.stringify({ type, id: randomUUID(), timestamp: new Date(now).toISOString(), data });
+  const lines = [];
+  if (!existsSync(file) || !readFileSync(file, "utf8").includes('"type":"session.start"')) {
+    lines.push(event("session.start", { sessionId: session.id, context: { cwd: session.cwd } }));
+  }
+  lines.push(event("user.message", { content: text }));
+  const cache = { modelId: model, cacheExpiresAt: new Date(now + ttlMs).toISOString(), cacheTtlSeconds: ttlMs / 1000 };
+  lines.push(event("session.usage_checkpoint", { modelCacheState: [cache] }));
+  appendFileSync(file, lines.join("\n") + "\n");
 }
 
 function ask(method, params) {
@@ -166,6 +190,7 @@ async function play(rpcId, steps, text) {
       const reply = await Promise.race([relayTool(text), cancelled]);
       if (reply && !stopped) update({ sessionUpdate: "agent_message_chunk", messageId: `relay-${session.updates.length}`, content: { type: "text", text: reply } });
     } else if ("wait" in step) await Promise.race([sleep(step.wait), cancelled]);
+    else if ("checkpoint" in step) checkpoint(step.checkpoint, text);
     else if ("end" in step) answer(step.end);
   }
   answer("end_turn"); // a script without an end step
@@ -209,7 +234,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     const n = session.updates.filter((u) => u.sessionUpdate === "user_message_chunk").length;
     session.updates.push({ sessionUpdate: "user_message_chunk", content: { type: "text", text } });
     save();
-    play(msg.id, prompts[n] ?? [], text);
+    play(msg.id, (typeof prompts === "function" ? prompts(text, n) : prompts[n]) ?? [], text);
   } else if (msg.method === "session/cancel") cancelPlaying();
   else if (msg.id != null) {
     Promise.resolve()
