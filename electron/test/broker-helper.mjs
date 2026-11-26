@@ -45,6 +45,7 @@ export async function startBroker(t, { script = SERVER, port: wanted, env } = {}
       COPILOT_RELAY_PORT: String(port),
       COPILOT_RELAY_NAMES_FILE: path.join(tmp, "names.json"),
       COPILOT_RELAY_DELEGATIONS_FILE: path.join(tmp, "delegations.json"),
+      COPILOT_RELAY_COMMS_FILE: path.join(tmp, "communications.jsonl"),
     },
     stdio: ["ignore", "pipe", "inherit"],
   });
@@ -63,14 +64,14 @@ export async function startBroker(t, { script = SERVER, port: wanted, env } = {}
   const url = `http://127.0.0.1:${port}`;
 
   /** A session's stream: resolves once registered; got holds every message it was pushed, in order. */
-  const connect = (key, { name, parentKey, alias, caps } = {}) =>
+  const connect = (key, { name, parentKey, alias, caps, onComms } = {}) =>
     new Promise((resolve) => {
       const got = [];
       const linkRequests = [];
       const parentChanges = [];
       const peer = { client: null, got, key, linkRequests, parentChanges, registered: null };
       const client = new RelayClient({
-        url, key, cwd: tmp, name, parentKey, alias, caps,
+        url, key, cwd: tmp, name, parentKey, alias, caps, onComms,
         onMessage: (m) => got.push(m),
         onLinkRequest: (p) => linkRequests.push(p),
         onParentChanged: (p) => parentChanges.push(p),
