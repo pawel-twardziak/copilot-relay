@@ -130,6 +130,8 @@ contextBridge.exposeInMainWorld("api", {
   onPermission: on("acp:permission"),
   onExit: on("acp:exit"),
   onUsage: on("usage:update"),
+  onQuota: on("quota:update"),
+  quotaGet: (opts) => call("quota:get", opts),
   onNotice: on("acp:notice"),
   onRelayMessage: on("relay:message"),
   onRelayStatus: on("relay:status"),

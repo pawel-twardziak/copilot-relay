@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { LATE_TEXT } from "../../electron/test/fixtures/acp/late-group-scenario.mjs";
 import { PARTS } from "../../electron/test/fixtures/acp/panel-scroll-scenario.mjs";
 import { RUNNING_TITLE } from "../../electron/test/fixtures/acp/tool-split-scenario.mjs";
-import { CHILD_PART } from "../../electron/session-prompts.mjs";
+import { CHILD_PART, DEFAULT_PART } from "../../electron/session-prompts.mjs";
 import { REMINDER } from "../../electron/delegation.mjs";
 import { KEEPALIVE_MARKER } from "../../electron/cache-keeper.mjs";
 import { gitIn } from "../../electron/test/git-helper.mjs";
@@ -881,6 +881,30 @@ export const checks = [
     },
   },
   {
+    // the agent sends no usage_update on session/load: the header's context meter starts with the figures the
+    // session's last run left in events.jsonl (its shutdown's currentTokens, its last call's maxPromptTokens)
+    name: "context-on-load",
+    modes: ["off"],
+    sessionId: HISTORY_ID,
+    async run(app) {
+      const v = `views.get(${JSON.stringify(HISTORY_ID)})`;
+      await playScenario(app);
+      assert.equal(await app.ev(`${v}.usageLabel.textContent`), "context: —", "the scripted agent sends no usage_update");
+      const at = "2026-11-26T10:00:00.000Z";
+      const events = [
+        { type: "session.start", data: {}, timestamp: at },
+        { type: "session.usage_record", data: { usage: { inputTokens: 22000, maxPromptTokens: 200000 } }, timestamp: at },
+        { type: "session.shutdown", data: { currentTokens: 22899 }, timestamp: at },
+      ];
+      const dir = path.join(app.dir, "copilot-home", "session-state", HISTORY_ID);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(path.join(dir, "events.jsonl"), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
+      await app.reload();
+      await app.check(`${v}.usageLabel.textContent.startsWith("22.9k / 200k · 11%")`, "the context meter from the file");
+      assert.equal(await app.ev(`${v}.usageChip.classList.contains("ok")`), true);
+    },
+  },
+  {
     // the load replays the whole history, then fails: the dead view shows all of it, settled (the answer must not
     // end the replay before the last update); a few times, as the order of the two used to vary
     name: "failed-load-settles",
@@ -1462,9 +1486,11 @@ export const checks = [
   ...[
     ["child-prompt", {}, (own) => `D\n\n${CHILD_PART}\n\n${own}`],
     ["child-prompt-no-child-part", { promptChild: "" }, (own) => `D\n\n${own}`],
+    ["child-prompt-built-in-default", { promptDefault: undefined }, (own) => `${DEFAULT_PART}\n\n${CHILD_PART}\n\n${own}`],
   ].map(([name, extra, expected]) => ({
-    // create_session through a real broker: the approved child starts with the default part, the child part (unless
-    // the setting is empty) and the own part written on the card; its first message carries the reminder
+    // create_session through a real broker: the approved child starts with the default part (the built-in one when
+    // the setting is absent), the child part (unless the setting is empty) and the own part written on the card; its
+    // first message carries the reminder
     name,
     modes: ["off"],
     scenario: CHILD_PROMPT_SCENARIO,
@@ -3771,8 +3797,37 @@ export const checks = [
       assert.equal(await app.ev(`document.querySelector("#set-command").maxLength`), 4000);
     },
   },
+  ...[
+    // the built-in default part names relay tools: only a session with the relay gets it, a text of the user's own
+    // applies always; an empty default part saved by an older version (no explicit mark) is dropped once at start
+    // (the driver's sessions run without the relay unless a check asks for a broker: child-prompt-built-in-default)
+    ["default-part-relay-off", { relay: false }, [], undefined],
+    ["default-part-own-relay-off", { relay: false, promptDefault: "D" }, ["D"], "D"],
+    ["default-part-old-empty", { promptDefault: "" }, [], undefined],
+    ["default-part-explicit-empty", { promptDefault: "", promptDefaultExplicit: true }, [], ""],
+  ].map(([name, settings, expected, onDisk]) => ({
+    name,
+    modes: ["off"],
+    settings,
+    async run(app) {
+      const file = path.join(app.dir, "config", "copilot-relay-desktop", "settings.json");
+      assert.equal(JSON.parse(readFileSync(file, "utf8")).promptDefault, onDisk, "the stored default part after the start");
+      const work = path.join(app.dir, "work");
+      const starts = () => {
+        try {
+          return JSON.parse(readFileSync(path.join(work, ".scripted-agent.json"), "utf8")).starts ?? [];
+        } catch {
+          return [];
+        }
+      };
+      assert.equal(await app.ev(`api.getSettings().then((s) => s.defaultPart)`), expected.join(""));
+      await app.newSession();
+      await until(async () => starts().length === 1, "the session's start");
+      assert.deepEqual(starts()[0].instructions ?? [], expected);
+    },
+  })),
   {
-    // the Settings "Prompts" section: the default part, the child part with "Restore default" (the built-in text,
+    // the Settings "Prompts" section: the default part and the child part, each with "Restore default" (the built-in text,
     // stored as no key), the templates (add, rename, edit, delete); a relaunch with the same folder shows them again
     name: "settings-prompts",
     modes: ["off"],
@@ -3794,9 +3849,16 @@ export const checks = [
 
       await openSettings();
       assert.ok(await app.ev(`${S}.textContent.includes(${JSON.stringify(SETTINGS_NOTE)})`), "the note under the fields");
-      assert.equal(await app.ev(`document.querySelector("#set-prompt-default").value`), "");
+      assert.equal(await app.ev(`document.querySelector("#set-prompt-default").value`), DEFAULT_PART);
+      assert.equal(await app.ev(`api.getSettings().then((s) => s.defaultPart)`), "", "the relay is off here: sessions do not get it");
+      assert.equal(await app.ev(`document.querySelector("#set-prompt-default-restore").disabled`), true, "nothing to restore");
       assert.equal(await app.ev(`document.querySelector("#set-prompt-child").value`), CHILD_PART);
       assert.equal(await app.ev(`document.querySelector("#set-prompt-child-restore").disabled`), true, "nothing to restore");
+      await type("#set-prompt-default", "X");
+      assert.equal(await app.ev(`document.querySelector("#set-prompt-default-restore").disabled`), false);
+      await app.ev(`document.querySelector("#set-prompt-default-restore").click()`);
+      assert.equal(await app.ev(`document.querySelector("#set-prompt-default").value`), DEFAULT_PART);
+      assert.equal(await app.ev(`document.querySelector("#set-prompt-default-restore").disabled`), true);
       await type("#set-prompt-default", "DEF");
       await type("#set-prompt-child", "CH");
       assert.equal(await app.ev(`document.querySelector("#set-prompt-child-restore").disabled`), false);
@@ -3836,6 +3898,17 @@ export const checks = [
       assert.equal(await app.ev(`document.querySelector("#set-prompt-child").value`), "");
       await save();
       assert.deepEqual(await app.ev(`api.getSettings().then((s) => [s.promptDefault, s.promptChild, s.promptTemplates])`), ["DEF", "", s.promptTemplates]);
+      // Restore default on the default part stores no key, and the form shows the built-in text again
+      await openSettings();
+      await app.ev(`document.querySelector("#set-prompt-default-restore").click()`);
+      await save();
+      await until(async () => !("promptDefault" in onDisk()), "the default part to go back to the built-in text");
+      assert.equal(await app.ev(`api.getSettings().then((s) => s.promptDefault)`), null);
+      await openSettings();
+      assert.equal(await app.ev(`document.querySelector("#set-prompt-default").value`), DEFAULT_PART);
+      await type("#set-prompt-default", "DEF");
+      await save();
+      await until(async () => onDisk().promptDefault === "DEF", "the default part to be saved again");
       // a relaunch with the same folder reads them back, in the page and in the form
       await app.close({ keep: true });
       const again = await launch({ scenario: PANEL_SCENARIO, dir: app.dir });

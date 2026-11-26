@@ -13,7 +13,8 @@ import { AcpConnection } from "./acp.mjs";
 import { isNotFoundExit, normalizeCommand, resolveCommand, shellLine, startFailureText } from "./copilot-command.mjs";
 import { countUserMessages, deleteSession, describeCut, forkSession, isSessionId, messageTimes, purgeDeleted, sessionCreatedAt, sessionDir, truncateSession } from "./history.mjs";
 import { createLastActivity } from "./last-activity.mjs";
-import { createUsagePusher, readCacheExpiry } from "./usage.mjs";
+import { createCopilotRuntime } from "./copilot-runtime.mjs";
+import { createQuotaService, createUsagePusher, quotaView, readCacheExpiry, readLiveQuota } from "./usage.mjs";
 import { createReplayFilter, normalizeKeeperSettings, TURN_CONTENT } from "./cache-keeper.mjs";
 import { createKeeperOptOut, createKeeperRunner } from "./cache-keeper-runner.mjs";
 import { JobScheduler } from "./scheduler.mjs";
@@ -26,7 +27,7 @@ import { beginPrompt, endPrompt } from "./prompt-count.mjs";
 import { normalizePanelMode } from "./activity-panel.mjs";
 import { createTierStore, effectiveTier, normalizeTier, switchTier, tierArgs, withContextOption } from "./context-tier.mjs";
 import { saveSetup } from "./session-setup.mjs";
-import { CHILD_PART, applyPromptSettings, clearPromptDirs, composePrompt, createPromptStore, effectiveChildPart, instructionsEnv, normalizeTemplates, writePromptDir } from "./session-prompts.mjs";
+import { CHILD_PART, DEFAULT_PART, applyPromptSettings, clearPromptDirs, composePrompt, createPromptStore, effectiveChildPart, effectiveDefaultPart, instructionsEnv, migratePromptDefault, normalizeTemplates, writePromptDir } from "./session-prompts.mjs";
 import { createRestarter, realEffects, reconnectClients } from "./broker-restart.mjs";
 import { runProgram } from "./run-program.mjs";
 import { createGit } from "./repo-git.mjs";
@@ -299,10 +300,13 @@ function childLinkOf(sessionId) {
   return link ? { parent: link.parent, adopted: link.adopted === true } : null;
 }
 
+/** The default part a session starts with: the Settings text, else the built-in one when the relay is on. */
+const defaultPartOf = (s) => effectiveDefaultPart(s.promptDefault, { relay: relayConfig().enabled });
+
 /** The prompt a Copilot process of the session starts with: own defaults to the stored part, isChild to its link. */
 function promptFor(sessionId, { own = prompts.get(sessionId), isChild = childLinkOf(sessionId) !== null } = {}) {
   const s = loadSettings();
-  return composePrompt({ defaultPart: s.promptDefault, childPart: effectiveChildPart(s.promptChild), own, isChild });
+  return composePrompt({ defaultPart: defaultPartOf(s), childPart: effectiveChildPart(s.promptChild), own, isChild });
 }
 
 // the cached snapshot at once; the fresh one follows as links:update
@@ -400,7 +404,13 @@ async function getLister() {
 }
 
 // context/credits/quota figures for the window, debounced per session
-const usage = createUsagePusher({ send: (sessionId, view) => send("usage:update", { sessionId, view }) });
+// The live quota comes from a Copilot CLI the runtime starts on demand (one at a time, stopped on quit)
+const runtime = createCopilotRuntime();
+const quota = createQuotaService({
+  readLive: () => readLiveQuota({ runtime, command: settingsCommand().command }),
+  onChange: (state) => send("quota:update", quotaView(state)),
+});
+const usage = createUsagePusher({ send: (sessionId, view) => send("usage:update", { sessionId, view }), quota: () => quota.get() });
 
 // Session folders seen so far: together with the home folder the only places a file mention is checked without a click
 const knownFolders = new Set();
@@ -581,6 +591,8 @@ function handle(channel, fn) {
     }
   });
 }
+
+handle("quota:get", async (o) => quotaView(await quota.get({ force: o?.force === true })));
 
 let purging = Promise.resolve(); // leftovers of failed deletes are removed before the first list (briefly waited for:
 // they have no workspace.yaml/events.jsonl left, so a slow purge of a big one must not hold up the sidebar)
@@ -1455,7 +1467,7 @@ function restartGuards(sessionId) {
 handle("sessions:getPrompt", async (sessionId) => {
   if (!isSessionId(sessionId)) throw new Error(`Invalid session id: ${sessionId}`);
   const s = loadSettings();
-  return { own: prompts.get(sessionId), command: commands.get(sessionId), settingsCommand: settingsCommand().command, defaultPart: typeof s.promptDefault === "string" ? s.promptDefault : "", childPart: effectiveChildPart(s.promptChild), isChild: childLinkOf(sessionId) !== null };
+  return { own: prompts.get(sessionId), command: commands.get(sessionId), settingsCommand: settingsCommand().command, defaultPart: defaultPartOf(s), childPart: effectiveChildPart(s.promptChild), isChild: childLinkOf(sessionId) !== null };
 });
 
 // a new own part or command takes a new Copilot process, as a new context window does (the renderer reopens the
@@ -1498,9 +1510,11 @@ handle("settings:get", async () => ({
   activityPanel: normalizePanelMode(loadSettings().activityPanel),
   brokerRepo: loadSettings().brokerRepo ?? "",
   brokerRepoDefault: defaultBrokerRepo(),
-  promptDefault: typeof loadSettings().promptDefault === "string" ? loadSettings().promptDefault : "",
+  promptDefault: typeof loadSettings().promptDefault === "string" ? loadSettings().promptDefault : null,
   promptChild: typeof loadSettings().promptChild === "string" ? loadSettings().promptChild : null,
   promptTemplates: normalizeTemplates(loadSettings().promptTemplates),
+  defaultPartDefault: DEFAULT_PART,
+  defaultPart: defaultPartOf(loadSettings()), // the one a session starts with now (for the prompt editors)
   childPartDefault: CHILD_PART,
   cacheKeeper: normalizeKeeperSettings(loadSettings().cacheKeeper),
 }));
@@ -1511,7 +1525,7 @@ handle("settings:set", async (s) => {
   const next = { ...loadSettings(), ...(typed.refused ? {} : { copilotCommand: typed.command }), relay: s.relay !== false, contextTier: normalizeTier(s.contextTier) ?? "default", queueMidTurn: s.queueMidTurn === true, activityPanel: normalizePanelMode(s.activityPanel), brokerRepo: String(s.brokerRepo ?? "").trim() };
   // the keeper's settings only when sent, as the prompt parts
   if (s.cacheKeeper !== undefined) next.cacheKeeper = normalizeKeeperSettings(s.cacheKeeper);
-  // the prompt parts only when sent (a form without them keeps them); promptChild null: back to the built-in text
+  // the prompt parts only when sent (a form without them keeps them); null: back to the built-in text
   saveSettings(applyPromptSettings(next, s));
   keeper.replan();
   lister?.kill();
@@ -1879,6 +1893,7 @@ function createWindow() {
   // set once the page has loaded (and again after a reload): before that it rejects ("Render frame was disposed")
   win.webContents.on("did-finish-load", () => win.webContents.setVisualZoomLevelLimits(1, 1).catch(() => {}));
   win.webContents.on("zoom-changed", () => win.webContents.setZoomFactor(1));
+  win.on("focus", () => quota.get().catch(() => {}));
   win.webContents.setWindowOpenHandler(({ url }) => {
     openWeb(url);
     return { action: "deny" };
@@ -1954,7 +1969,17 @@ function notifyIfUnfocused(title, body) {
   new Notification({ title, body }).show();
 }
 
+// The Copilot CLI of the quota query: quitting waits for it to be gone. Every killAll() adds its stopAll() to the
+// pending one (a second call finds nothing left to stop and would settle at once), and runtimeStopPending stays set
+// until the combined promise settles (the runtime's size() is already 0 while the stop is still running).
+let runtimeStopping = Promise.resolve();
+let runtimeStopPending = false;
 function killAll() {
+  runtimeStopPending = true;
+  const stopping = (runtimeStopping = Promise.all([runtimeStopping, runtime.stopAll()]).catch(() => {}));
+  stopping.then(() => {
+    if (runtimeStopping === stopping) runtimeStopPending = false;
+  });
   for (const [sessionId, { conn, relay }] of open) {
     relay?.stop();
     conn.kill();
@@ -1975,6 +2000,12 @@ if (!app.requestSingleInstanceLock()) {
     win.focus();
   });
   fixPath();
+  try {
+    const migrated = migratePromptDefault(loadSettings());
+    if (migrated) saveSettings(migrated);
+  } catch (e) {
+    console.warn(`[session-prompts] could not migrate the default part: ${e.message}`);
+  }
   try {
     clearPromptDirs(promptRoot); // the folders of processes an earlier run did not see exit (before any connect)
   } catch (e) {
@@ -2023,10 +2054,10 @@ if (!app.requestSingleInstanceLock()) {
   let promptsAwaited = false;
   app.on("will-quit", (e) => {
     const live = [...promptProcs].filter((c) => !c.exited);
-    if (promptsAwaited || !live.length) return;
+    if (promptsAwaited || (!live.length && !runtimeStopPending)) return;
     promptsAwaited = true;
     e.preventDefault();
-    Promise.all(live.map((c) => exited(c, 3500))).then(() => app.quit());
+    Promise.all([runtimeStopping, ...live.map((c) => exited(c, 3500))]).then(() => app.quit());
   });
   app.on("before-quit", (e) => {
     if (confirmLeavingChildren()) {

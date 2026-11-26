@@ -85,7 +85,7 @@ It runs on Windows, macOS and Linux.
   Delete, don't edit a session that is also open in a terminal Copilot CLI.
 - Switch mode (Agent / Plan / Autopilot), model, reasoning effort and approval settings per session.
   The choices come from the CLI.
-- The header shows the context window use (`22.9k / 200k · 11%`) and Copilot usage (AI credits) of the session; hover for requests, tokens and changes. The latest premium quota line is shown at the bottom of the sidebar.
+- The header shows the context window use (`22.9k / 200k · 11%`) and Copilot usage (AI credits) of the session; hover for requests, tokens and changes. The quota line at the bottom of the sidebar is asked live from Copilot (the Settings command, headless). It shows the premium pool, or the chat pool when premium has no entitlement. When the live query fails it shows the last figure with "as of HH:MM" for up to an hour, and it is hidden when there is none. Refresh forces a new query.
 - Several sessions can be open at once. Each runs in its own `copilot --acp` process with the session's folder as
   working directory, so the repo's `.github` agents, skills and MCP config apply as in the terminal.
 
@@ -315,7 +315,12 @@ an ordinary session: it appears in the list, you can open it, read what it did, 
 Every session's Copilot gets a system prompt made of up to three parts, joined by a blank line (empty parts are
 left out):
 
-- **Default part** (Settings): for every session.
+- **Default part** (Settings): for every session. Its built-in text encourages the session to delegate specialised,
+  self-contained work (research, spec & plan, implementation, tests, review, Tilt / build) to child sessions with
+  `create_session`, with a self-contained task, and to do small things itself. Only sessions with copilot-relay on get
+  the built-in text (it names relay tools); a text of your own applies always. Emptying it in Settings means no
+  default part; "Restore default" goes back to the built-in text. A "" saved by a version before the built-in text is
+  dropped once at start, as those versions saved the empty field on every Settings save.
 - **Child part** (Settings): only for child sessions, delegated or adopted. Its built-in text tells the child to
   finish with `report_result`, exactly once, and to use `send_message` only to ask its parent something. Emptying it
   in Settings means no child part; "Restore default" goes back to the built-in text.

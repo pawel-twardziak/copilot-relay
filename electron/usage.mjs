@@ -113,6 +113,52 @@ export async function readSessionUsage(sessionId, { copilotHome } = {}) {
 }
 
 /**
+ * Context figures for a session that is not running yet (the agent sends usage_update only after a turn, never on
+ * session/load): currentTokens of the last session.shutdown whose run had a turn, with the maxPromptTokens of that
+ * run's last session.usage_record as the size. A run without a turn is skipped, its currentTokens leaves out what a
+ * turn adds (tool definitions). Null if the id is invalid, the file is missing, or the last run with a turn never
+ * shut down (a crash: its figure would be stale).
+ */
+export async function readLastContext(sessionId, { copilotHome } = {}) {
+  if (!isSessionId(sessionId)) return null;
+  const file = path.join(copilotHome ?? copilotHomeDefault(), "session-state", sessionId, "events.jsonl");
+  const tail = await readLines(file, false);
+  if (!tail) return null;
+  const found = lastRunContext(tail.lines);
+  if (found !== undefined || !tail.truncated) return found ?? null;
+  const all = await readLines(file, true);
+  return all ? (lastRunContext(all.lines) ?? null) : null;
+}
+
+/** Backward walk over the runs (start/resume … shutdown); undefined when the lines end before an answer. */
+function lastRunContext(lines) {
+  let shut = false; // the run being walked back through ended with a shutdown
+  let used = null; // that shutdown's currentTokens
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (!line.includes('"session.')) continue;
+    let e;
+    try {
+      e = JSON.parse(line);
+    } catch {
+      continue; // half-written or foreign line
+    }
+    if (e?.type === "session.usage_record") {
+      // the newest run with a turn: its last call's prompt limit is the size, unless it never shut down
+      const size = num(e.data?.usage?.maxPromptTokens);
+      return shut && used !== null && used >= 0 && size > 0 ? { used, size } : null;
+    } else if (e?.type === "session.shutdown") {
+      shut = true;
+      used = num(e.data?.currentTokens);
+    } else if (e?.type === "session.start" || e?.type === "session.resume") {
+      shut = false; // a run without a turn: keep looking further back
+      used = null;
+    }
+  }
+  return undefined;
+}
+
+/**
  * Prompt-cache expiry from the session's last usage checkpoint that has a non-empty modelCacheState.
  * With a modelId only that model's entry counts; with none (or "auto") the entry that expires last wins.
  * Null for an invalid id, a missing file, no such checkpoint, no matching entry or an unparsable date.
@@ -147,20 +193,37 @@ export async function readCacheExpiry(sessionId, { copilotHome, modelId } = {}) 
   return best;
 }
 
-/** A snapshot is usable if unlimited, or if every displayed field is present (never invent values). */
+const POOLS = [["premium_interactions", "premium"], ["chat", "chat"]]; // completions is never shown
+
+/** A snapshot is usable if unlimited, or if every number is present (never invent values; resetDate may be absent). */
 function validQuota(q) {
   if (!q || typeof q !== "object") return false;
   if (q.isUnlimitedEntitlement === true) return true;
-  return (
-    num(q.usedRequests) !== null &&
-    num(q.entitlementRequests) !== null &&
-    num(q.remainingPercentage) !== null &&
-    typeof q.resetDate === "string" &&
-    q.resetDate !== ""
-  );
+  return num(q.usedRequests) !== null && num(q.entitlementRequests) !== null && num(q.remainingPercentage) !== null;
 }
 
-/** Newest premium_interactions quota snapshot from the 5 most recently modified sessions; null if none. */
+/** The first pool (premium_interactions, then chat) that is valid and unlimited or has an entitlement; null if none. */
+export function pickPool(snapshots) {
+  if (!snapshots || typeof snapshots !== "object") return null;
+  for (const [key, pool] of POOLS) {
+    const q = snapshots[key];
+    if (!validQuota(q)) continue;
+    const unlimited = q.isUnlimitedEntitlement === true;
+    if (!unlimited && !(q.entitlementRequests > 0)) continue;
+    return {
+      pool,
+      used: num(q.usedRequests) ?? 0,
+      total: num(q.entitlementRequests) ?? 0,
+      remainingPct: num(q.remainingPercentage) ?? 0,
+      resetDate: typeof q.resetDate === "string" ? q.resetDate : "",
+      unlimited,
+      tokenBased: q.tokenBasedBilling === true,
+    };
+  }
+  return null;
+}
+
+/** Newest quota pick ({ quota, at }, at = event time in ms) from the 5 most recently modified sessions; null if none. */
 export async function readQuota({ copilotHome } = {}) {
   const dir = path.join(copilotHome ?? copilotHomeDefault(), "session-state");
   let names;
@@ -181,23 +244,13 @@ export async function readQuota({ copilotHome } = {}) {
   files.sort((a, b) => b.mtimeMs - a.mtimeMs);
   let best = null;
   for (const { file } of files.slice(0, QUOTA_FILES)) {
-    const found = await scan(file, '"quotaSnapshots"', (e) => {
-      const q = e?.data?.quotaSnapshots?.premium_interactions;
-      return validQuota(q) ? q : null;
-    }, { tailOnly: true });
+    const found = await scan(file, '"quotaSnapshots"', (e) => pickPool(e?.data?.quotaSnapshots), { tailOnly: true });
     if (!found) continue;
-    const ts = Date.parse(found.e.timestamp) || 0;
-    if (!best || ts > best.ts) best = { ts, q: found.hit };
+    const parsed = Date.parse(found.e.timestamp);
+    const ts = Number.isNaN(parsed) ? null : parsed; // unknown time: loses to any dated snapshot
+    if (!best || (ts ?? -Infinity) > (best.ts ?? -Infinity)) best = { ts, q: found.hit };
   }
-  if (!best) return null;
-  const q = best.q;
-  return {
-    used: num(q.usedRequests) ?? 0,
-    total: num(q.entitlementRequests) ?? 0,
-    remainingPct: num(q.remainingPercentage) ?? 0,
-    resetDate: typeof q.resetDate === "string" ? q.resetDate : "",
-    unlimited: q.isUnlimitedEntitlement === true,
-  };
+  return best ? { quota: best.q, at: best.ts } : null;
 }
 
 /** 999 -> "999", 22899 -> "22.9k", 200000 -> "200k", 1250000 -> "1.25M". */
@@ -217,14 +270,106 @@ function contextView(context) {
   };
 }
 
-function quotaLine(quota) {
-  if (!quota) return null;
-  if (quota.unlimited) return "Premium: unlimited";
-  const d = new Date(quota.resetDate);
-  const reset = Number.isNaN(d.getTime())
-    ? ""
-    : ` · resets ${d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })}`;
-  return `Premium: ${quota.used} / ${quota.total} used · ${quota.remainingPct}% left${reset}`;
+const round1 = (n) => Math.round(n * 10) / 10;
+
+/** "Premium: 533 / 1500 used · 64.5% left · resets Dec 1 · as of 18:05"; the reset only for request-billed pools, "as of" only with `at`. */
+export function quotaLine(pick, { at = null, timeZone } = {}) {
+  if (!pick) return null;
+  const label = pick.pool === "chat" ? "Chat" : "Premium";
+  const asOf =
+    at === null
+      ? ""
+      : ` · as of ${new Date(at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone })}`;
+  if (pick.unlimited) return `${label}: unlimited${asOf}`;
+  const d = new Date(pick.resetDate);
+  const reset =
+    pick.tokenBased || Number.isNaN(d.getTime())
+      ? ""
+      : ` · resets ${d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })}`;
+  return `${label}: ${round1(pick.used)} / ${round1(pick.total)} used · ${round1(pick.remainingPct)}% left${reset}${asOf}`;
+}
+
+/** Live quota from the Copilot SDK (account.getQuota), picked with pickPool; throws on a start/query error or after `deadlineMs`. */
+export async function readLiveQuota({ runtime, command, deadlineMs = 10_000 }) {
+  // The runtime owns the deadline: past it the call rejects and the stuck CLI is replaced.
+  return runtime.withClient({ command, deadlineMs }, async (client) => {
+    const answer = await client.rpc.account.getQuota({});
+    return pickPool(answer?.quotaSnapshots);
+  });
+}
+
+/**
+ * Quota with fallbacks, cached `ttlMs` (failures too): live; else the last live figure (<= maxAgeMs old); else a
+ * session-file figure (<= maxAgeMs old); else none. A live answer without a pool is a final "none".
+ * State: { quota, source: "live"|"earlier"|"file"|null, at, reason }. `onChange(state)` fires when the state differs.
+ */
+export function createQuotaService({
+  readLive,
+  readFile = readQuota,
+  now = Date.now,
+  ttlMs = 60_000,
+  maxAgeMs = 3_600_000,
+  onChange = () => {},
+}) {
+  let lastLive = null; // { quota, at }
+  let cache = null; // { at, state }
+  let inFlight = null;
+  let emitted;
+
+  async function compute() {
+    let reason;
+    try {
+      const quota = await readLive();
+      if (!quota) {
+        lastLive = null;
+        return { quota: null, source: "live", at: null, reason: null };
+      }
+      lastLive = { quota, at: now() };
+      return { quota, source: "live", at: null, reason: null };
+    } catch (e) {
+      reason = e?.message ?? String(e);
+    }
+    if (lastLive && now() - lastLive.at <= maxAgeMs) {
+      return { quota: lastLive.quota, source: "earlier", at: lastLive.at, reason };
+    }
+    const file = await Promise.resolve().then(() => readFile()).catch(() => null);
+    if (file?.quota && typeof file.at === "number" && now() - file.at <= maxAgeMs) {
+      return { quota: file.quota, source: "file", at: file.at, reason };
+    }
+    return { quota: null, source: null, at: null, reason };
+  }
+
+  async function run() {
+    const state = await compute();
+    cache = { at: now(), state };
+    const json = JSON.stringify(state);
+    if (json !== emitted) {
+      emitted = json;
+      onChange(state);
+    }
+    return state;
+  }
+
+  return {
+    async get({ force = false } = {}) {
+      if (!force && cache && now() - cache.at < ttlMs) return cache.state;
+      if (!inFlight) inFlight = run().finally(() => (inFlight = null));
+      return inFlight;
+    },
+  };
+}
+
+/** { line, tooltip } for the sidebar, or null when there is no quota. */
+export function quotaView(state, { timeZone } = {}) {
+  if (!state?.quota) return null;
+  const live = state.source === "live";
+  const line = quotaLine(state.quota, { at: live ? null : state.at, timeZone });
+  const tooltip = live
+    ? "Live from Copilot"
+    : state.source === "earlier"
+      ? `Last live figure; live query failed: ${state.reason}`
+      : `From a session file; live query failed: ${state.reason}`;
+  return { line, tooltip };
 }
 
 /** Display strings for the context meter, session credits (+ tooltip) and premium quota. */
@@ -242,7 +387,7 @@ export function summarize({ context = null, session = null, quota = null } = {})
       parts.push(`Changes: +${session.linesAdded} −${session.linesRemoved}`);
     }
   }
-  return { context: contextView(context), credits, tooltip: parts.join(" · "), quota: quotaLine(quota) };
+  return { context: contextView(context), credits, tooltip: parts.join(" · "), quota: quotaView(quota)?.line ?? null };
 }
 
 /**
@@ -252,33 +397,34 @@ export function summarize({ context = null, session = null, quota = null } = {})
 export function createUsagePusher({
   send,
   readSession = readSessionUsage,
-  readQuota: readQuotaFn = readQuota,
+  quota: readQuotaState = async () => null,
+  readContext = readLastContext,
   debounceMs = 300,
-  quotaTtlMs = 60_000,
-  now = Date.now,
 }) {
-  const states = new Map(); // sessionId -> { context, timer }
-  let quotaCache = null; // { at, value }
+  const states = new Map(); // sessionId -> { context, fileContext, fileRead, timer }
 
-  async function quota() {
-    if (quotaCache && now() - quotaCache.at < quotaTtlMs) return quotaCache.value;
-    const value = await Promise.resolve().then(() => readQuotaFn()).catch(() => null);
-    quotaCache = { at: now(), value };
-    return value;
+  const quota = () => Promise.resolve().then(() => readQuotaState()).catch(() => null);
+
+  // until the first usage_update (a turn), the figures the session's last run left in its file; read once
+  async function fileContext(sessionId, state) {
+    if (state.context || state.fileRead) return;
+    state.fileRead = true;
+    state.fileContext = await Promise.resolve().then(() => readContext(sessionId)).catch(() => null);
   }
 
   async function push(sessionId, state) {
     const [session, q] = await Promise.all([
       Promise.resolve().then(() => readSession(sessionId)).catch(() => null),
       quota(),
+      fileContext(sessionId, state),
     ]);
     if (states.get(sessionId) !== state) return; // forgotten while reading
-    send(sessionId, summarize({ context: state.context, session, quota: q }));
+    send(sessionId, summarize({ context: state.context ?? state.fileContext, session, quota: q }));
   }
 
   function schedule(sessionId) {
     let state = states.get(sessionId);
-    if (!state) states.set(sessionId, (state = { context: null, timer: null }));
+    if (!state) states.set(sessionId, (state = { context: null, fileContext: null, fileRead: false, timer: null }));
     clearTimeout(state.timer);
     const s = state;
     s.timer = setTimeout(() => {
