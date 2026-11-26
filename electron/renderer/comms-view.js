@@ -71,11 +71,12 @@ function create({ h, el, on }) {
   bar.addEventListener("pointerdown", (e) => {
     if (e.button !== 0) return;
     e.preventDefault();
-    const top = graph.getBoundingClientRect().top;
+    const { top, bottom } = graph.getBoundingClientRect();
+    const grab = e.clientY - bottom; // where on the bar it was grabbed: the bar moves with the pointer, no jump
     const total = graphTotal();
     manual = true; // the stored share from now on, not the height the graph needs
     const move = (m) => {
-      ratio = UiState.clampSplit((m.clientY - top) / total, total);
+      ratio = UiState.clampSplit((m.clientY - grab - top) / total, total);
       graph.style.height = `${Math.round(ratio * total)}px`;
       on.split?.(ratio, false);
     };
