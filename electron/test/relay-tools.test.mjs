@@ -50,6 +50,22 @@ test("baseline fallback", () => {
   assert.equal(agentRelayTools("limited", [baseline("relay_send_message")]).report_result, false);
 });
 
+test("a later baseline of the agent beats an older subagent.selected", () => {
+  const base = (names) => ({
+    type: "session.tool_baseline",
+    data: { surface: "responses:capi:none:agent=limited", tools: names.map((name) => ({ name, deferred: false })) },
+  });
+  // the agent file gained relay/* and the session was reloaded: no new subagent.selected, a new baseline
+  assert.deepEqual(agentRelayTools("limited", [selected("limited", ["read"]), base(["view", "relay_report_result", "relay_send_message"])]), both);
+  // the other order: the newer selected wins
+  assert.deepEqual(agentRelayTools("limited", [base(["view", "relay_report_result", "relay_send_message"]), selected("limited", ["read"])]), none);
+  // a baseline of another agent does not count
+  const other = { type: "session.tool_baseline", data: { surface: "x:agent=other", tools: [{ name: "relay_send_message" }] } };
+  assert.deepEqual(agentRelayTools("limited", [selected("limited", ["read"]), other]), none);
+  // a later baseline without a tools list means all tools
+  assert.deepEqual(agentRelayTools("limited", [selected("limited", ["read"]), { type: "session.tool_baseline", data: { surface: "x:agent=limited" } }]), both);
+});
+
 test("a missing tools list means all tools", () => {
   assert.deepEqual(agentRelayTools("limited", [selected("limited", undefined)]), both);
   const baseline = { type: "session.tool_baseline", data: { surface: "x:agent=limited" } };

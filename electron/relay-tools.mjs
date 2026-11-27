@@ -12,18 +12,24 @@ const grants = (entry, tool) => {
 
 const flags = (entries) => Object.fromEntries(RELAY_TOOLS.map((t) => [t, entries.some((e) => grants(e, t))]));
 
-/** Relay tools the agent can call, from events.jsonl. The default agent ("" or undefined) and unknown ones have both. */
+/** Relay tools the agent can call, from events.jsonl. The default agent ("" or undefined) and unknown ones have both.
+ *  Of the agent's last subagent.selected and its last tool baseline (surface ending in `agent=<name>`), the later one
+ *  in the list counts: a reload after the agent file changed writes a new baseline but no new subagent.selected. */
 export function agentRelayTools(agent, events) {
   if (!agent) return both();
   const list = events ?? [];
-  const sel = list.findLast((e) => e?.type === "subagent.selected" && e.data?.agentName === agent);
-  // A missing tools list means all tools (an agent file without a `tools:` key).
-  if (sel) return Array.isArray(sel.data.tools) ? flags(sel.data.tools) : both();
-  const base = list.findLast(
+  const selAt = list.findLastIndex((e) => e?.type === "subagent.selected" && e.data?.agentName === agent);
+  const baseAt = list.findLastIndex(
     (e) => e?.type === "session.tool_baseline" && String(e.data?.surface ?? "").endsWith(`agent=${agent}`),
   );
-  if (base) return Array.isArray(base.data.tools) ? flags(base.data.tools.map((t) => t?.name)) : both();
-  return both();
+  if (selAt < 0 && baseAt < 0) return both();
+  // A missing tools list means all tools (an agent file without a `tools:` key).
+  if (selAt > baseAt) {
+    const tools = list[selAt].data.tools;
+    return Array.isArray(tools) ? flags(tools) : both();
+  }
+  const tools = list[baseAt].data.tools;
+  return Array.isArray(tools) ? flags(tools.map((t) => t?.name)) : both();
 }
 
 /** Is this tool-call title a call of the given relay tool? */

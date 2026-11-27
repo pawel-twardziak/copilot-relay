@@ -89,7 +89,7 @@ export function createChainState() {
       return ++prompts;
     },
     update(u) {
-      if (!topLevel(u)) return;
+      if (seq === null || !topLevel(u)) return; // no chain running: nothing to collect
       if (u?.sessionUpdate === "tool_call") {
         text = "";
         if (u.title) titles.push(u.title);

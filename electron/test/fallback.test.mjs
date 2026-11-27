@@ -72,6 +72,20 @@ test("start resets the chain; a new prompt starts a new last message, titles sta
   assert.deepEqual(c.snapshot(), { seq: "s2", origin: owner, text: "", titles: [], lastStop: null, reported: true });
 });
 
+test("with no chain running, text and titles are not collected", () => {
+  const c = createChainState();
+  c.update(toolCall("view"));
+  c.update(chunk("before any chain"));
+  assert.deepEqual(c.snapshot(), { seq: null, origin: null, text: "", titles: [], lastStop: null, reported: false });
+  c.start({ seq: "s1", origin: fromParent });
+  c.prompt();
+  c.update(chunk("in the chain"));
+  c.start(); // the chain ended
+  c.update(toolCall("edit"));
+  c.update(chunk("between chains"));
+  assert.deepEqual(c.snapshot(), { seq: null, origin: null, text: "", titles: [], lastStop: null, reported: false });
+});
+
 test("stopped records the stop of the most recently started prompt only", () => {
   const c = createChainState();
   c.start({ seq: "s1", origin: fromParent });
