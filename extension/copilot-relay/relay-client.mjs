@@ -141,6 +141,14 @@ export class RelayClient {
     }
   }
 
+  /** Forward this session's last reply to `to` (a peer key) as its report or message; `{ old: true }` from a broker without the route. */
+  async fallback(to, text) {
+    const r = await this.#post("/api/peer/fallback", { key: this.key, to, text });
+    if (r.status === 404) return { old: true };
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error ?? r.statusText);
+    return { result: (await r.json()).result };
+  }
+
   /** Report whether the session is working (true) or idle (false). */
   async state(busy) {
     await this.#post("/api/peer/state", { key: this.key, busy }).catch(() => {});

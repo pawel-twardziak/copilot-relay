@@ -109,3 +109,26 @@ test("fetchLinkState returns the links and the held counts ({} when the broker s
   body = { links: [], heldByKind: [] };
   assert.deepEqual(await c.fetchLinkState(), { links: [], held: {}, heldByKind: {} });
 });
+
+test("fallback posts key, to and text; a 404 keeps it as old", async () => {
+  const bodies = [];
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      bodies.push([req.url, JSON.parse(body)]);
+      if (bodies.length === 1) return res.writeHead(200, { "content-type": "application/json" }).end('{"result":"ok"}');
+      res.writeHead(404).end();
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const client = new RelayClient({ url: `http://127.0.0.1:${server.address().port}`, key: "cli:me", cwd: "/", onMessage() {} });
+  try {
+    assert.deepEqual(await client.fallback("cli:p", "hi"), { result: "ok" });
+    assert.deepEqual(bodies[0], ["/api/peer/fallback", { key: "cli:me", to: "cli:p", text: "hi" }]);
+    assert.deepEqual(await client.fallback("cli:p", "hi"), { old: true });
+  } finally {
+    server.closeAllConnections();
+    await new Promise((r) => server.close(r));
+  }
+});
