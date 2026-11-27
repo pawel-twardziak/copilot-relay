@@ -36,8 +36,9 @@ test("the renderer scripts share one global scope without clashing", async () =>
   const before = new Set(Object.keys(ctx));
   load("message-text.js");
   load("find-text.js");
+  load("find-bar.js");
   // the new scripts leak only their own global
-  assert.deepEqual(Object.keys(ctx).filter((k) => !before.has(k)).sort(), ["FindText", "MessageText"]);
+  assert.deepEqual(Object.keys(ctx).filter((k) => !before.has(k)).sort(), ["FindBar", "FindText", "MessageText"]);
   // what app.js declares at top level must not clash with them
   vm.runInContext("const shownUserText = (raw) => MessageText.shownUserText(raw);", ctx);
 });

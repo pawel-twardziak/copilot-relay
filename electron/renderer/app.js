@@ -402,6 +402,7 @@ class SessionView {
     }
     this.panelHandle = h("div", { class: "panel-handle", hidden: true, onpointerdown: (e) => this.dragPanel(e) });
     this.row = h("div", { class: "chat-row" }, this.log, this.panelHandle, this.panel, this.commsPanel);
+    this.findBar = new FindBar(this.log, { onClose: () => this.input.focus() }); // Ctrl+F, above the log
     this.drawerOpen = false; // the narrow layout's drawer: per view, not stored (layoutPanel)
     new ResizeObserver(() => this.layoutPanel()).observe(this.row); // the layout follows the view's width
     this.follow = true; // follow streamed output: off once you scroll up, on again near the bottom
@@ -484,6 +485,7 @@ class SessionView {
         h("button", { class: "danger", title: "Delete this whole session from disk", onclick: () => deleteSessionFlow({ sessionId: this.sessionId, cwd: this.cwd, title: this.title }) }, "Delete"),
       ),
       this.relationsEl,
+      this.findBar.el,
       this.row,
       this.editBar,
       this.heldEl,
@@ -3051,7 +3053,10 @@ function activate(id, { keepSchedules = false } = {}) {
   if (!keepSchedules) Schedules.hide();
   filePreview.close();
   activeId = id;
-  for (const [sid, v] of views) v.el.classList.toggle("active", sid === id);
+  for (const [sid, v] of views) {
+    v.el.classList.toggle("active", sid === id);
+    v.findBar[sid === id ? "show" : "hide"](); // only the shown view's matches are highlighted
+  }
   $("#empty").style.display = id ? "none" : "";
   renderList();
   commsRefresh(); // the shown panel's timers tick
@@ -3069,6 +3074,7 @@ async function openSession(s, { activate: show = true } = {}) {
   if (existing) {
     existing.el.remove();
     existing.stopKeeper();
+    existing.findBar.close();
     views.delete(s.sessionId);
     // resuming a dead view: what was waiting in it moves to the new one (unpaused: a new view), with the delivery
     // ids it took, so the broker's redelivery of a queued report is not taken twice
@@ -3158,6 +3164,7 @@ async function newSession(cwd) {
 function dropView(id) {
   const v = views.get(id);
   v?.stopKeeper();
+  v?.findBar.close();
   views.delete(id);
   lastCommands.delete(id);
   lastUsage.delete(id); // a re-opened session must not flash this stale snapshot
@@ -3178,6 +3185,7 @@ async function reopenView(old, error, { holdInbox = false, typed, keepFollowUp =
   if (views.get(sessionId) === old) views.delete(sessionId);
   old.el.remove();
   old.stopKeeper();
+  old.findBar.close();
   // handed over before the replay: a report redelivered while the session reopens must already count as seen
   await openSession({ sessionId, cwd, title, parentSessionId, seenDeliveries, pendingNotes, holdInbox, held, discarded });
   const v = views.get(sessionId);
@@ -4419,6 +4427,16 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault();
     newSession();
   }
+});
+// Ctrl+F (Cmd+F on macOS, where Ctrl+F moves the caret): the active view's find bar. Not over a modal page or dialog,
+// the image viewer (it takes its own keys) or the file preview.
+const IS_MAC = /Mac/.test(navigator.platform);
+document.addEventListener("keydown", (e) => {
+  if (!(IS_MAC ? e.metaKey : e.ctrlKey) || e.altKey || e.shiftKey || e.key.toLowerCase() !== "f") return;
+  const v = views.get(activeId);
+  if (!v || document.querySelector("dialog[open]") || viewer.isOpen || filePreview.isOpen) return;
+  e.preventDefault();
+  v.findBar.open();
 });
 setInterval(renderList, 60_000); // keep "x min ago" fresh
 setStatus("Loading sessions…");

@@ -14,6 +14,8 @@
   --user: #1f2a3a;
   --edge: #6e7681; /* the Communication graph's lines */
   --shadow: rgba(0, 0, 0, .35); /* the Communication graph's boxes */
+  --find-match: rgba(210, 153, 34, .35); /* the find bar's matches */
+  --find-current: #f0883e; /* the find bar's current match */
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
   font-size: 14px;
   color-scheme: dark;
@@ -134,6 +136,14 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberat
 .rel-chip .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rel-chip .rel-done { color: var(--ok); }
 .rel-chip .count { flex: none; padding: 0 5px; border-radius: 8px; background: var(--bg); color: var(--muted); font-size: 11px; }
+/* the find bar (Ctrl+F) above the log; its matches are highlights (Range objects), not elements */
+.find-bar { display: flex; align-items: center; justify-content: flex-end; gap: 6px; padding: 4px 14px; border-bottom: 1px solid var(--border); background: var(--panel); font-size: 12px; }
+.find-bar[hidden] { display: none; }
+.find-bar input { flex: 0 1 280px; min-width: 120px; padding: 3px 8px; }
+.find-bar .find-count { min-width: 48px; color: var(--muted); font-variant-numeric: tabular-nums; text-align: center; }
+.find-bar button { padding: 2px 8px; }
+::highlight(find-match) { background-color: var(--find-match); }
+::highlight(find-current) { background-color: var(--find-current); color: var(--bg); }
 .log { flex: 1; overflow-y: auto; padding: 16px 18px 24px; display: flex; flex-direction: column; gap: 10px; }
 .msg { max-width: 920px; line-height: 1.5; overflow-wrap: anywhere; }
 .msg.user { align-self: flex-end; background: var(--user); border: 1px solid #2d4466; padding: 8px 12px; border-radius: 10px; white-space: pre-wrap; }
