@@ -3948,6 +3948,88 @@ function rowItems(rows) {
   return rows.map(({ s, depth, showProject }) => item(s, views.get(s.sessionId), { depth, showProject }));
 }
 
+/** The sessions the sidebar lists: Copilot's list plus the open views it does not list (a child just created, say). */
+function listedSessions() {
+  const listed = new Set(sessions.map((s) => s.sessionId));
+  const unlisted = [...views.values()].filter((v) => !listed.has(v.sessionId)).map((v) => ({ sessionId: v.sessionId, cwd: v.cwd, title: v.title }));
+  return [...sessions, ...unlisted];
+}
+
+// Message search (the filter field's second half): the answer to the latest query, applied only while it is current
+const CONTENT_MIN = 2;
+const CONTENT_DEBOUNCE_MS = 250;
+let contentQuery = ""; // the trimmed query the state below belongs to ("" = no search)
+let contentState = null; // null while searching, else { result } or { error }
+let contentSeq = 0;
+let contentTimer = null;
+
+function scheduleContentSearch() {
+  const q = $("#search").value.trim();
+  clearTimeout(contentTimer);
+  const seq = ++contentSeq; // an older answer is dropped from here on
+  contentQuery = q.length >= CONTENT_MIN ? q : "";
+  contentState = null;
+  if (!contentQuery) return;
+  contentTimer = setTimeout(async () => {
+    let state;
+    try {
+      const r = await api.searchSessions(q, listedSessions().map((s) => s.sessionId));
+      if (r.cancelled) return;
+      state = { result: r };
+    } catch (e) {
+      state = { error: String(e?.message ?? e) };
+    }
+    if (seq !== contentSeq) return;
+    contentState = state;
+    renderList();
+  }, CONTENT_DEBOUNCE_MS);
+}
+
+/** Opens the session of a hit (Task 7 adds the jump to the message). hit: { k, before, after } or null (the first hit). */
+async function jumpToHit(sessionId, hit) {
+  const s = sessions.find((x) => x.sessionId === sessionId) ?? views.get(sessionId);
+  if (!s) return;
+  if (views.has(sessionId)) activate(sessionId);
+  else await openSession(s);
+}
+
+function snippetNode(sessionId, hit) {
+  const { before, match, after } = hit.snippet;
+  const el = h("div", { class: "content-hit", role: "button", tabindex: "0", onclick: () => jumpToHit(sessionId, el._hit), onkeydown: (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    e.preventDefault();
+    jumpToHit(sessionId, el._hit);
+  } }, before, h("mark", {}, match), after);
+  el._hit = { sessionId, k: hit.k, before: hit.snippet.before, after: hit.snippet.after };
+  return el;
+}
+
+/** The "In messages" section under the list; null when there is nothing to show. */
+function renderContentResults() {
+  if (!contentQuery) return null;
+  if (!contentState) return h("div", { class: "content-results" }, h("div", { class: "content-note" }, "Searching messages…"));
+  if (contentState.error) return h("div", { class: "content-results" }, h("div", { class: "content-note" }, `Message search failed: ${contentState.error}`));
+  const { sessions: found, more } = contentState.result;
+  if (!found.length) return null;
+  const total = found.reduce((n, x) => n + x.count, 0);
+  const rows = found.map((f) => {
+    const s = sessions.find((x) => x.sessionId === f.sessionId) ?? views.get(f.sessionId);
+    const name = s?.title || (s?.cwd ? baseName(s.cwd) : f.sessionId);
+    return h(
+      "div",
+      { class: "content-session" },
+      h("div", { class: "content-title", role: "button", tabindex: "0", title: name, onclick: () => jumpToHit(f.sessionId, null), onkeydown: (e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault();
+        jumpToHit(f.sessionId, null);
+      } }, h("span", { class: "name" }, name), h("span", { class: "count" }, String(f.count))),
+      ...f.hits.map((hit) => snippetNode(f.sessionId, hit)),
+      f.count > f.hits.length ? h("div", { class: "content-more", role: "button", tabindex: "0", onclick: () => jumpToHit(f.sessionId, null) }, `+${f.count - f.hits.length} more`) : null,
+    );
+  });
+  return h("div", { class: "content-results" }, h("div", { class: "group-title" }, h("span", {}, `In messages (${total} in ${more ? "50+" : found.length} sessions)`)), ...rows);
+}
+
 /** Also redraws every view's relation bar: its dots and the Close all sub-sessions button follow the open views. */
 function renderList() {
   const q = $("#search").value.trim().toLowerCase();
@@ -3955,14 +4037,14 @@ function renderList() {
 
   for (const v of views.values()) v.renderRelations();
 
-  // the listed sessions plus the open views Copilot does not list (a child just created, say)
-  const listed = new Set(sessions.map((s) => s.sessionId));
-  const unlisted = [...views.values()].filter((v) => !listed.has(v.sessionId)).map((v) => ({ sessionId: v.sessionId, cwd: v.cwd, title: v.title }));
-  const model = UiState.listModel([...sessions, ...unlisted], { pinned: ui.pinned, open: new Set(views.keys()), collapsed: ui.collapsed, query: q, tree });
+  const model = UiState.listModel(listedSessions(), { pinned: ui.pinned, open: new Set(views.keys()), collapsed: ui.collapsed, query: q, tree });
   if (model.pinned.length) out.push(h("div", { class: "group-title" }, h("span", {}, "📌 Pinned")), ...rowItems(model.pinned));
   if (model.open.length) out.push(h("div", { class: "group-title" }, h("span", {}, "Open in app")), ...rowItems(model.open));
   for (const g of model.groups) out.push(...groupBlock(g));
-  if (!out.length) out.push(h("div", { class: "group-title" }, h("span", {}, q ? "No matches" : "No sessions yet")));
+  const content = renderContentResults();
+  if (content) out.push(content);
+  // No matches: the list model is empty and the message search (once in, if there is one) found nothing either
+  if (!out.length && !(contentQuery && !contentState)) out.push(h("div", { class: "group-title" }, h("span", {}, q ? "No matches" : "No sessions yet")));
   $("#session-list").replaceChildren(...out);
 }
 
@@ -4260,7 +4342,10 @@ function openJobRun({ jobId, runId }) {
   Schedules.openRun(jobId, runId);
 }
 api.onJobOpenRun(openJobRun);
-$("#search").addEventListener("input", renderList);
+$("#search").addEventListener("input", () => {
+  scheduleContentSearch();
+  renderList();
+});
 // Left Shift for message recall (an arrow key's event doesn't say which Shift is down). Tracked on the whole document,
 // in the capture phase, so a Shift pressed before the message box got focus counts; reset whenever it can't be down.
 const leftShift = { down: false };

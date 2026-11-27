@@ -54,6 +54,18 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberat
   padding: 10px 8px 4px; display: flex; justify-content: space-between; gap: 6px;
 }
 .group-title span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* message hits under the list */
+.content-session { padding: 2px 0 6px; }
+.content-title { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+.content-title:hover, .content-hit:hover, .content-more:hover { background: var(--panel-2); }
+.content-title:focus-visible, .content-hit:focus-visible, .content-more:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.content-title .name { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.content-title .count { flex: none; margin-left: auto; padding: 0 6px; border-radius: 8px; background: var(--panel-2); color: var(--muted); font-size: 11px; }
+.content-hit { padding: 2px 8px 2px 16px; border-radius: 4px; cursor: pointer; color: var(--muted); font-size: 12px; line-height: 1.35; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.content-hit mark { background: color-mix(in srgb, var(--accent) 30%, transparent); color: var(--text); border-radius: 2px; }
+.content-more { padding: 2px 8px 2px 16px; border-radius: 4px; cursor: pointer; color: var(--muted); font-size: 11px; }
+.content-note { padding: 8px; color: var(--muted); font-size: 12px; }
 .group-title .new-here { visibility: hidden; padding: 0 6px; font-size: 12px; line-height: 16px; }
 .group-title:hover .new-here { visibility: visible; }
 .group-title.toggle { cursor: pointer; justify-content: flex-start; align-items: center; border-radius: 4px; }

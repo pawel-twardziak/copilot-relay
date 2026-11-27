@@ -4547,5 +4547,54 @@ export const checks = [
       assert.deepEqual(strip(out.second), ["# 📌 Pinned", "Q:0", "P:0", "C:1", "# Open in app", "scripted-work:0", "# work (0) +", "# a (1) +", "R:0", "# b (0) +"]);
     },
   },
+  {
+    // message hits under the title/folder list: the filter field also searches the sessions' histories
+    name: "content-search-sidebar",
+    modes: ["off"],
+    sessionId: HISTORY_ID,
+    async run(app) {
+      await playScenario(app);
+      const dir = path.join(app.dir, "copilot-home", "session-state", HISTORY_ID);
+      mkdirSync(dir, { recursive: true });
+      const events = [
+        { type: "session.start", data: {}, timestamp: new Date().toISOString() },
+        { type: "user.message", data: { content: "alpha <b> one" }, timestamp: new Date().toISOString() },
+        { type: "user.message", data: { content: "[from api-1]\nalpha two" }, timestamp: new Date().toISOString() },
+        { type: "assistant.message", data: { messageId: "m1", content: "Alpha three" }, timestamp: new Date().toISOString() },
+      ];
+      writeFileSync(path.join(dir, "events.jsonl"), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
+      await app.reload();
+      const type = (text) => app.ev(`(() => { const i = document.querySelector("#search"); i.value = ${JSON.stringify(text)}; i.dispatchEvent(new Event("input")); })()`);
+      const section = `document.querySelector("#session-list .content-results")`;
+      await type("alpha");
+      let r;
+      await until(async () => {
+        r = await app.ev(`(() => {
+          const s = ${section};
+          if (!s || !s.querySelector(".content-hit")) return null;
+          const hits = [...s.querySelectorAll(".content-hit")];
+          return {
+            header: s.querySelector(".group-title").textContent.trim(),
+            marks: hits.map((e) => e.querySelector("mark")?.textContent),
+            firstText: hits[0].textContent,
+            bElements: hits[0].querySelectorAll("b").length,
+            props: hits.map((e) => e._hit?.sessionId),
+          };
+        })()`);
+        return r;
+      }, "the content section");
+      assert.equal(r.header, "In messages (3 in 1 sessions)", JSON.stringify(r));
+      assert.deepEqual(r.marks, ["alpha", "alpha", "Alpha"]);
+      assert.ok(r.firstText.includes("<b>"), r.firstText);
+      assert.equal(r.bElements, 0);
+      assert.deepEqual(r.props, [HISTORY_ID, HISTORY_ID, HISTORY_ID]);
+      await type("api-1"); // a sender header is not searchable
+      await new Promise((res) => setTimeout(res, 800));
+      assert.equal(await app.ev(`!!${section}`), false);
+      await type("a"); // below two characters
+      await new Promise((res) => setTimeout(res, 800));
+      assert.equal(await app.ev(`!!${section}`), false);
+    },
+  },
   ...commsChecks,
 ];
