@@ -1088,8 +1088,9 @@ async function sessionRequested(parentSessionId, request) {
     { folderState: folder },
   );
   // the card reads only `start` for the child's values: the request's own fields (model-written) are not sent raw
-  send("delegation:request", { requestId: req.requestId, parentSessionId, name: req.name, task: req.task, start });
-  console.info(`[delegation] session_request ${id}: card sent to the window`);
+  if (send("delegation:request", { requestId: req.requestId, parentSessionId, name: req.name, task: req.task, start }))
+    console.info(`[delegation] session_request ${id}: card sent to the window`);
+  else console.warn(`[delegation] session_request ${id}: no window, the card was not sent`);
 }
 
 /** The broker asks the user (through the sender's view) to reopen a closed relative that a message is waiting for. */
@@ -2110,10 +2111,19 @@ function startMainLog() {
     return;
   }
   teeConsole(mainLog);
-  // written, not handled: an uncaught exception still ends the process as before
+  // only watched: Electron's own handling of an uncaught exception (its error dialog) stays as it was. Node's
+  // warnings need nothing more: its printer writes them with console.error, which now writes the file too.
   process.on("uncaughtExceptionMonitor", (err, origin) => mainLog.write("error", [`[main] ${origin}:`, err]));
-  process.on("warning", (w) => mainLog.write("warn", ["[main]", w]));
   console.info(`[log] Copilot Sessions ${app.getVersion()} started (${process.platform} ${process.arch}, Electron ${process.versions.electron})`);
+}
+
+/** View → Show Log File: the file in its folder, or the folder when no line could be written to it. */
+function showLogFile() {
+  if (!mainLog) return dialog.showMessageBox(win, { type: "info", message: "This run has no log file.", detail: "See the console output." });
+  if (existsSync(mainLog.file)) return shell.showItemInFolder(mainLog.file);
+  shell.openPath(path.dirname(mainLog.file)).then((err) => {
+    if (err) dialog.showMessageBox(win, { type: "warning", message: "The log file could not be written.", detail: `${mainLog.file}\n${err}` });
+  });
 }
 
 // One instance at a time: two would share (and clean up) the same paste folder and settings file.
@@ -2152,7 +2162,7 @@ if (!app.requestSingleInstanceLock()) {
             { label: "Reload", accelerator: "CmdOrCtrl+R", click: () => confirmedReload((wc) => wc.reload()) },
             { label: "Force Reload", accelerator: "Shift+CmdOrCtrl+R", click: () => confirmedReload((wc) => wc.reloadIgnoringCache()) },
             { role: "toggleDevTools" },
-            { label: "Show Log File", click: () => mainLog && shell.showItemInFolder(mainLog.file) },
+            { label: "Show Log File", click: () => showLogFile() },
             { type: "separator" },
             { role: "togglefullscreen" },
           ],

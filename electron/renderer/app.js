@@ -4262,7 +4262,12 @@ api.onRelayMessage((m) => forView(m.sessionId, (v) => v.incoming(m)));
 api.onRelayStatus((s) => forView(s.sessionId, (v) => v.relayStatus(s)));
 
 // delegated sessions: only the app's approval answers a request (see delegation:answer in main)
-api.onDelegationRequest((r) => forView(r.parentSessionId, (v) => v.delegationCard(r)));
+api.onDelegationRequest((r) => {
+  // a card with no view is not on screen: said in the log (main.log takes the window's warnings)
+  if (!views.has(r.parentSessionId))
+    console.warn(`[delegation] session_request ${r.requestId}: no view for session ${r.parentSessionId}${deletedIds.has(r.parentSessionId) ? " (deleted, dropped)" : " (kept until it opens)"}`);
+  forView(r.parentSessionId, (v) => v.delegationCard(r));
+});
 api.onDelegationCreated(({ sessionId, cwd, configOptions, parentSessionId, title }) => {
   // as in newSession, but the view is not activated: approving a child doesn't take you away from what is on screen
   if (views.has(sessionId)) return;
