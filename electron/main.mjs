@@ -1480,8 +1480,14 @@ handle("sessions:setConfig", async (sessionId, configId, value) => {
 handle("sessions:setContextTier", async (sessionId, value) => {
   if (!isSessionId(sessionId)) return { refused: `Invalid session id: ${sessionId}` };
   await keeper.whenIdle(sessionId);
-  return switchTier({ sessionId, value, tiers, ...restartGuards(sessionId), live: liveTierSwitch(sessionId, value) });
+  const res = await switchTier({ sessionId, value, tiers, ...restartGuards(sessionId), live: liveTierSwitch(sessionId, value) });
+  // a refusal carries the open session's options as they are now: an update during a failed live set may have shown
+  // the new tier already
+  const entry = open.get(sessionId);
+  return res.refused && entry ? { ...res, configOptions: viewConfig(sessionId, entry.configOptions) } : res;
 });
+
+const LIVE_TIER_TIMEOUT_MS = 15_000;
 
 /** How the open session switches to the tier `value` stands for without a restart, or null: through Copilot's own
  *  context option, when it has one with a value for that tier. */
@@ -1492,8 +1498,14 @@ function liveTierSwitch(sessionId, value) {
   if (!entry || target == null) return null;
   return async () => {
     keeper.activity(sessionId); // another context window has no fresh cache entry: the keeper waits for a turn
-    const updated = target === native.currentValue ? null : await setConfigOption(sessionId, entry, native.id, target);
-    return viewConfig(sessionId, updated ?? entry.configOptions);
+    historyBusy.add(sessionId); // as a restart: a delete or another restart is refused meanwhile
+    try {
+      const set = target === native.currentValue ? null : setConfigOption(sessionId, entry, native.id, target);
+      const updated = set && (await withDeadline(set, Date.now() + LIVE_TIER_TIMEOUT_MS, "Copilot did not answer the context change in time."));
+      return viewConfig(sessionId, updated ?? entry.configOptions);
+    } finally {
+      historyBusy.delete(sessionId);
+    }
   };
 }
 

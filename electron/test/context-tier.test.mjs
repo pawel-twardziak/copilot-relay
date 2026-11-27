@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
-import { contextOption, createTierStore, effectiveTier, isContextChoice, nativeContextOption, nativeValueFor, saveAndReopen, switchTier, tierArgs, withContextOption } from "../context-tier.mjs";
+import { contextOption, createTierStore, effectiveTier, isContextChoice, nativeContextOption, nativeTierOf, nativeValueFor, saveAndReopen, switchTier, tierArgs, withContextOption } from "../context-tier.mjs";
 
 let dir;
 let file;
@@ -23,10 +23,9 @@ test("effectiveTier: override wins, then the Settings default, then 200k", () =>
   assert.equal(effectiveTier("bogus", undefined), "default");
 });
 
-test("tierArgs always names the tier, so Copilot's own saved tier never applies", () => {
+test("tierArgs gives the Copilot flag only for the long tier", () => {
   assert.deepEqual(tierArgs("long_context"), ["--context", "long_context"]);
-  assert.deepEqual(tierArgs("default"), ["--context", "default"]);
-  assert.deepEqual(tierArgs("bogus"), ["--context", "default"]);
+  assert.deepEqual(tierArgs("default"), []);
 });
 
 test("contextOption labels the Default entry with the Settings value", () => {
@@ -77,12 +76,18 @@ test("nativeContextOption finds Copilot's own context option by id, category, na
   assert.equal(nativeContextOption(null), null);
   for (const native of [
     sel("context_size"),
-    sel("x", { category: "context" }),
-    sel("x", { name: "Context window" }),
+    sel("x", { category: "context" }, [["s", "200K"], ["l", "1M"]]),
+    sel("x", { name: "Context window" }, [["s", "Default"], ["l", "Long"]]),
     sel("x", {}, [["small", "200K"], ["long_context", "1M"]]),
   ]) {
     assert.equal(nativeContextOption([model, native]), native);
   }
+  // a "context" option whose values are not the two tiers is left alone, also ahead of the real one
+  const decoy = sel("context_management", { name: "Context management" }, [["default", "Default"], ["aggressive", "Aggressive"], ["off", "Off"]]);
+  assert.equal(nativeContextOption([decoy]), null);
+  const real = sel("context_size");
+  assert.equal(nativeContextOption([decoy, real]), real);
+  assert.equal(nativeContextOption([sel("context", {}, [["a", "A"], ["b", "B"]])]), null);
   // ours never counts, nor a select without options
   assert.equal(nativeContextOption([sel("context_tier")]), null);
   assert.equal(nativeContextOption([{ id: "context", type: "select" }]), null);
@@ -113,6 +118,24 @@ test("withContextOption hides Copilot's own context option: one select", () => {
     out.map((o) => o.id),
     ["model", "context_tier"],
   );
+  const decoy = sel("context_management", {}, [["default"], ["off"]]);
+  assert.deepEqual(
+    withContextOption([decoy], null, "default").map((o) => o.id),
+    ["context_management", "context_tier"],
+    "an unrelated option stays",
+  );
+});
+
+test("withContextOption shows Copilot's live tier when it differs from the stored one", () => {
+  const at = (cur) => ({ ...sel("context_size"), currentValue: cur });
+  assert.equal(nativeTierOf(at("long_context")), "long_context");
+  assert.equal(nativeTierOf(at("other")), null);
+  const ctx = (options) => options.find((o) => o.id === "context_tier").currentValue;
+  assert.equal(ctx(withContextOption([at("default")], null, "default")), "inherit", "the same: Default stays");
+  assert.equal(ctx(withContextOption([at("long_context")], null, "default")), "long_context", "Copilot runs 1M");
+  assert.equal(ctx(withContextOption([at("default")], "long_context", "default")), "default", "reset by Copilot");
+  assert.equal(ctx(withContextOption([at("long_context")], "long_context", "default")), "long_context");
+  assert.equal(ctx(withContextOption([at("other")], "long_context", "default")), "long_context", "an unknown value: the stored one");
 });
 
 test("store: set, get, inherit removes, copy, delete, and a new instance sees the same", () => {
@@ -206,6 +229,15 @@ test("switchTier live: a failed set restores the override and is refused, nothin
   const g = fakeSwitch({ live: async () => { throw new Error("nope"); }, storeFile: path.join(dir, "g.json") });
   await g.run("inherit");
   assert.equal(g.store.get("s1"), null, "no override before: none after");
+});
+
+test("switchTier live: an override that can't be saved is refused before Copilot is asked", async () => {
+  fs.writeFileSync(path.join(dir, "sub"), "a file where the folder should be");
+  let called = 0;
+  const f = fakeSwitch({ live: async () => (called++, []) });
+  const res = await f.run("long_context");
+  assert.ok(res.refused, "refused");
+  assert.equal(called, 0);
 });
 
 test("switchTier: a refusal changes nothing and closes nothing", async () => {

@@ -2,7 +2,8 @@
 // a start flag (`copilot --acp --context long_context`), so the app picks the flag per process: from the session's
 // override if it has one, else from the Settings default. The window shows it as a synthetic "Context" select.
 // Copilot 1.0.116+ also offers a context option of its own for supported models: the window never shows it (one
-// select), but a switch goes through it live when it can (nativeContextOption, nativeValueFor).
+// select, which shows Copilot's live value when it differs), and a switch goes through it live when it can
+// (nativeContextOption, nativeValueFor).
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
@@ -26,25 +27,32 @@ export function effectiveTier(override, globalDefault) {
   return normalizeTier(override) ?? normalizeTier(globalDefault) ?? "default";
 }
 
-/** The start flag, always explicit: without it Copilot uses the tier it saved itself, which the select doesn't show. */
 export function tierArgs(tier) {
-  return ["--context", normalizeTier(tier) ?? "default"];
+  return tier === "long_context" ? ["--context", "long_context"] : [];
 }
 
-/** Copilot's own context option among its config options, or null: a select with options that is not ours, whose
- *  id, category or name says "context", or one of whose values is long_context. Its real id was not seen (only the
- *  changelog of 1.0.116 tells it exists), hence the loose match. */
+/** Copilot's own context option among its config options, or null. Its real id was not seen (only the changelog of
+ *  1.0.116 tells it exists), so: first a select (not ours) with a long_context value; else one whose id, category
+ *  or name says "context" and whose values tell both tiers apart. Anything else is left alone. */
 export function nativeContextOption(configOptions) {
   if (!Array.isArray(configOptions)) return null;
+  const selects = configOptions.filter((o) => o?.id !== CONTEXT_OPTION_ID && o?.type === "select" && Array.isArray(o.options));
+  const byValue = selects.find((o) => o.options.some((x) => x?.value === "long_context"));
+  if (byValue) return byValue;
   return (
-    configOptions.find(
-      (o) =>
-        o?.id !== CONTEXT_OPTION_ID &&
-        o?.type === "select" &&
-        Array.isArray(o.options) &&
-        ([o.id, o.category, o.name].some((s) => typeof s === "string" && /context/i.test(s)) || o.options.some((x) => x?.value === "long_context")),
-    ) ?? null
+    selects.find((o) => {
+      if (![o.id, o.category, o.name].some((t) => typeof t === "string" && /context/i.test(t))) return false;
+      const short = nativeValueFor(o, "default");
+      const long = nativeValueFor(o, "long_context");
+      return short != null && long != null && short !== long;
+    }) ?? null
   );
+}
+
+/** The tier Copilot's option is set to now, or null when its value is not one of the two. */
+export function nativeTierOf(option) {
+  if (option?.currentValue == null) return null;
+  return TIERS.find((t) => nativeValueFor(option, t) === option.currentValue) ?? null;
 }
 
 /** The value of Copilot's option for a tier, or null when none can be told apart: the tier's own value first, then a
@@ -83,7 +91,12 @@ export function contextOption(override, globalDefault) {
 export function withContextOption(configOptions, override, globalDefault) {
   const native = nativeContextOption(configOptions);
   const own = Array.isArray(configOptions) ? configOptions.filter((o) => o?.id !== CONTEXT_OPTION_ID && o !== native) : [];
-  return [...own, contextOption(override, globalDefault)];
+  const ours = contextOption(override, globalDefault);
+  // Copilot's live tier wins when it differs (a model change or Copilot itself reset it): the select shows the truth,
+  // and picking the other tier again repairs it
+  const live = nativeTierOf(native);
+  if (live && live !== effectiveTier(override, globalDefault)) ours.currentValue = live;
+  return [...own, ours];
 }
 
 /** Per-session overrides in a small JSON file ({ [sessionId]: tier }); no entry means "follow Settings".
@@ -149,9 +162,9 @@ export async function saveAndReopen({ prev, save, restore, refusal, close }) {
 
 /**
  * Switch a session's context window. With `live` (Copilot's own option can take the new tier): the override is saved,
- * then `live()` sets the option and its config options come back as { configOptions }; no restart. A failed set
- * restores the override and comes back as { refused } (nothing changed). Without `live`: saveAndReopen, where a failed
- * close restores the previous override.
+ * then `live()` sets the option and its config options come back as { configOptions }; no restart. A failed save or
+ * set comes back as { refused } with the override as it was (a failed set restores it). Without `live`:
+ * saveAndReopen, where a failed close restores the previous override.
  * @param {{ sessionId: string, value: unknown, tiers: ReturnType<typeof createTierStore>,
  *           refusal: () => string | null, close: () => Promise<void>, live?: (() => Promise<unknown>) | null }} o
  */
@@ -161,12 +174,21 @@ export async function switchTier({ sessionId, value, tiers, refusal, close, live
     const refused = refusal();
     if (refused) return { refused };
     const prev = tiers.get(sessionId);
-    tiers.set(sessionId, value);
+    const message = (e) => e?.message ?? String(e);
+    try {
+      tiers.set(sessionId, value);
+    } catch (e) {
+      return { refused: message(e) };
+    }
     try {
       return { configOptions: await live() };
     } catch (e) {
-      tiers.set(sessionId, prev ?? INHERIT);
-      return { refused: e?.message ?? String(e) };
+      try {
+        tiers.set(sessionId, prev ?? INHERIT);
+      } catch (again) {
+        console.error(`[context] could not restore the context window of ${sessionId}: ${message(again)}`);
+      }
+      return { refused: message(e) };
     }
   }
   return saveAndReopen({

@@ -470,7 +470,7 @@ class SessionView {
       this.promptBtn,
       h("button", { title: "Copy the whole conversation as Markdown", onclick: () => this.copyThread() }, "Copy thread"),
       this.closeChildrenBtn,
-      h("hr"),
+      h("hr", { role: "separator" }),
       h("button", { class: "danger", title: "Close this session in the app (it stays resumable)", onclick: () => closeView(this.sessionId) }, "Close"),
       h("button", { class: "danger", title: "Delete this whole session from disk", onclick: () => deleteSessionFlow({ sessionId: this.sessionId, cwd: this.cwd, title: this.title }) }, "Delete"),
     );
@@ -2603,6 +2603,7 @@ class SessionView {
   async switchContext(sel, previous) {
     if (this.busy || this.dead || this.deleting) {
       sel.value = previous;
+      sel._retitle?.();
       if (this.busy && !this.dead && !this.deleting) this.error("Wait until Copilot finishes this turn.");
       return;
     }
@@ -2612,8 +2613,11 @@ class SessionView {
     try {
       const res = await api.setContextTier(this.sessionId, sel.value);
       if (res?.refused) {
-        // nothing was changed or closed: the session stays as it is
-        sel.value = previous;
+        // nothing was changed or closed: the session stays as it is (main's options as they are now, when it sent
+        // them: an update during a failed live set may have rebuilt the selects already)
+        if (res.configOptions) this.setConfig(res.configOptions);
+        else sel.value = previous;
+        sel._retitle?.();
         this.setBusy(false);
         this.error(`Could not change the context window: ${res.refused}`);
         return;
@@ -2705,9 +2709,10 @@ class SessionView {
               return opt;
             }),
           );
-          sel.title = titleOf();
+          sel._retitle = () => (sel.title = titleOf());
+          sel._retitle();
           sel.addEventListener("change", async () => {
-            sel.title = titleOf();
+            sel._retitle();
             if (c.id === "context_tier") return this.switchContext(sel, c.currentValue);
             try {
               const updated = await api.setConfig(this.sessionId, c.id, sel.value);
@@ -2715,6 +2720,7 @@ class SessionView {
             } catch (e) {
               this.error(`Could not change ${c.name}: ${e.message}`);
               sel.value = c.currentValue;
+              sel._retitle();
             }
           });
           return sel;
@@ -2806,6 +2812,14 @@ class SessionView {
     this.moreMenu.addEventListener("click", (e) => {
       if (e.target.closest("button")) this.toggleMore(false);
     });
+    // the focus leaving the menu and its button (Tab, a click elsewhere that takes focus) closes it; a click on the
+    // menu's padding moves no focus out, and Esc / arrows keep working from the menu itself
+    this.moreMenu.addEventListener("pointerdown", (e) => {
+      if (!e.target.closest("button")) e.preventDefault();
+    });
+    this.moreMenu.addEventListener("focusout", (e) => {
+      if (!this.moreMenu.hidden && e.relatedTarget && !this.moreMenu.contains(e.relatedTarget) && e.relatedTarget !== this.moreBtn) this.toggleMore(false);
+    });
     this.moreMenu.addEventListener("keydown", (e) => {
       const items = this.moreItems();
       const at = items.indexOf(document.activeElement);
@@ -2814,10 +2828,12 @@ class SessionView {
         this.moreBtn.focus();
       } else if (e.key === "Tab") {
         this.toggleMore(false);
-        return; // the focus moves on as usual
+        this.moreBtn.focus();
+        return; // the focus moves on from ⋯ as usual
       } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-        const step = e.key === "ArrowDown" ? 1 : -1;
-        items[(at + step + items.length) % items.length]?.focus();
+        const down = e.key === "ArrowDown";
+        const next = at < 0 ? (down ? 0 : items.length - 1) : (at + (down ? 1 : -1) + items.length) % items.length;
+        items[next]?.focus();
       } else if (e.key === "Home" || e.key === "End") items[e.key === "Home" ? 0 : items.length - 1]?.focus();
       else return;
       e.preventDefault();
@@ -3125,7 +3141,10 @@ function activate(id, { keepSchedules = false } = {}) {
   if (!keepSchedules) Schedules.hide();
   filePreview.close();
   activeId = id;
-  for (const [sid, v] of views) v.el.classList.toggle("active", sid === id);
+  for (const [sid, v] of views) {
+    v.el.classList.toggle("active", sid === id);
+    if (sid !== id) v.toggleMore(false); // a hidden view's ⋯ menu closes
+  }
   $("#empty").style.display = id ? "none" : "";
   renderList();
   commsRefresh(); // the shown panel's timers tick
@@ -3232,6 +3251,7 @@ async function newSession(cwd) {
 function dropView(id) {
   const v = views.get(id);
   v?.stopKeeper();
+  v?.toggleMore(false); // its document listener goes with it
   views.delete(id);
   lastCommands.delete(id);
   lastUsage.delete(id); // a re-opened session must not flash this stale snapshot
@@ -3252,6 +3272,7 @@ async function reopenView(old, error, { holdInbox = false, typed, keepFollowUp =
   if (views.get(sessionId) === old) views.delete(sessionId);
   old.el.remove();
   old.stopKeeper();
+  old.toggleMore(false);
   // handed over before the replay: a report redelivered while the session reopens must already count as seen
   await openSession({ sessionId, cwd, title, parentSessionId, seenDeliveries, pendingNotes, holdInbox, held, discarded });
   const v = views.get(sessionId);
