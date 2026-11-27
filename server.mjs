@@ -70,6 +70,7 @@ const idsOf = (data) => {
   return id ? ` ${id}` : "";
 };
 let streamSeq = 0;
+const streamOf = new Map(); // key → the number of the stream that holds the session now (for the takeover line)
 const configPath = process.argv[2] ?? path.join(ROOT, "relay.config.json");
 const config = JSON.parse(await readFile(configPath, "utf8").catch(() => "{}"));
 
@@ -448,11 +449,16 @@ const server = http.createServer(async (req, res) => {
         if (parent) delegation.link(key, parent); // before upsert: the first message may already depend on the link
         const onRenamed = (ev) => ev.key === key && write("renamed", { name: ev.name });
         registry.on("peer_renamed", onRenamed);
-        // a second client of the same session (e.g. the copilot-relay extension inside a Copilot the app started):
-        // from now on this stream gets the session's events, the other one none
+        // a new stream while another one of the session is still open: from now on this one gets the session's events.
+        // A reconnect whose old request has not closed yet does it too (info); a stream without the app's alias taking
+        // an app session is a second client (the copilot-relay extension inside a Copilot the app started): warn
         const before = registry.get(key);
-        if (before?.online && before.control)
-          console.warn(`[stream ${sid}] takes ${key} over from a stream that is still open${before.app && !app ? " — the app's; this one has no app alias, so the app gets nothing for this session" : ""}`);
+        if (before?.online && before.control) {
+          const old = streamOf.get(key) ?? "?";
+          if (before.app && !app)
+            console.warn(`[stream ${sid}] takes ${key} over from the app's stream ${old}, which is still open; this one has no app alias, so the app gets nothing for this session`);
+          else trace(`new stream of ${key} while stream ${old} is still open (a reconnect before the old close, or a second client)`);
+        }
         const peer = registry.upsert({
           key,
           name: pickName(key, q.get("name")),
@@ -475,6 +481,7 @@ const server = http.createServer(async (req, res) => {
             /* a reserved name → keep the current name */
           }
         }
+        streamOf.set(key, sid);
         persist(peer);
         write("registered", { name: peer.name, parentKey: peer.parentKey ?? null, reported: delegationStore.isReported(key), adopted: delegationStore.isAdopted(key), broker: BUILD, stream: sid, brokerLog: fileLog ? LOG_FILE : null });
         delegation.attached(key);
@@ -486,7 +493,10 @@ const server = http.createServer(async (req, res) => {
           // only now) keeps the session online
           const current = registry.get(key)?.control === control;
           trace(`closed ${key}${current ? "" : " (an older stream: the session's newer one stays)"}`);
-          if (current) registry.disconnect(key);
+          if (current) {
+            streamOf.delete(key);
+            registry.disconnect(key);
+          }
         });
         return;
       }

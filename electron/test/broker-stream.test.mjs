@@ -96,7 +96,7 @@ test("an older stream of a session that closes after a newer one registered does
   const sender = await b.connect(newKey(), { name: "sender" });
   const older = await b.connect(newKey(), { name: "receiver" });
   const newer = await b.connect(older.key); // e.g. a reconnect whose old request the broker sees closing only now
-  assert.match(readFileSync(path.join(b.tmp, "broker.log"), "utf8"), new RegExp(`WARN  \\[stream s\\d+\\] takes ${older.key} over from a stream that is still open\n`));
+  assert.match(readFileSync(path.join(b.tmp, "broker.log"), "utf8"), new RegExp(`INFO  \\[stream s\\d+\\] new stream of ${older.key} while stream s\\d+ is still open \\(a reconnect before the old close, or a second client\\)\n`));
   older.client.stop();
   // the broker has handled the older stream's close (else the test would pass without the case)
   await until(() => readFileSync(path.join(b.tmp, "broker.log"), "utf8").includes(`closed ${older.key} (an older stream`), "the older stream's close in the log");
@@ -150,5 +150,5 @@ test("a stream without the app alias that takes over an app session is named in 
   const key = newKey();
   await b.connect(key, { name: "app-session", alias: `app:${randomUUID()}` });
   await b.connect(key); // the extension's client: same key, no alias
-  assert.match(readFileSync(path.join(b.tmp, "broker.log"), "utf8"), new RegExp(`takes ${key} over from a stream that is still open — the app's; this one has no app alias`));
+  assert.match(readFileSync(path.join(b.tmp, "broker.log"), "utf8"), new RegExp(`WARN  \\[stream s\\d+\\] takes ${key} over from the app's stream s\\d+, which is still open; this one has no app alias`));
 });

@@ -139,8 +139,8 @@ function friendly(err) {
 // ---------- copilot-relay ----------
 //
 // The app does what the extension does in a terminal (and keeps the extension out of the Copilot it starts, which may
-// load it even with --acp: COPILOT_RELAY_MANAGED, see copilotEnv): it registers each open session with the relay broker under the same key (cli:<sessionId>, so the session
-// keeps its relay name) and gives Copilot the relay tools as an MCP server. The MCP URL needs the identity
+// load it even with --acp: COPILOT_RELAY_MANAGED, see copilotEnv): it registers each open session with the relay
+// broker under the same key (cli:<sessionId>, so the session keeps its relay name) and gives Copilot the relay tools as an MCP server. The MCP URL needs the identity
 // before session/new returns the session ID, so it carries a random alias that the broker maps to the key.
 
 function relayConfig() {
