@@ -3813,12 +3813,15 @@ export const checks = [
     async run(app) {
       const envFile = ENV_FILE;
       rmSync(envFile, { force: true });
-      await app.newSession();
-      await app.check(`!!${V} && !${V}.busy`, "the session's view");
-      const lines = readFileSync(envFile, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
-      assert.ok(lines.length >= 1, "the agent was started");
-      assert.ok(lines.every((l) => l.COPILOT_RELAY_MANAGED === "1"), `every start had COPILOT_RELAY_MANAGED=1: ${JSON.stringify(lines)}`);
-      rmSync(envFile, { force: true });
+      try {
+        await app.newSession();
+        await app.check(`!!${V} && !${V}.busy`, "the session's view");
+        const lines = readFileSync(envFile, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+        assert.ok(lines.length >= 1, "the agent was started");
+        assert.ok(lines.every((l) => l.COPILOT_RELAY_MANAGED === "1"), `every start had COPILOT_RELAY_MANAGED=1: ${JSON.stringify(lines)}`);
+      } finally {
+        rmSync(envFile, { force: true });
+      }
     },
   },
   {

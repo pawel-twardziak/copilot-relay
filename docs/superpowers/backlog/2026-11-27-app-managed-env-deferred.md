@@ -19,6 +19,9 @@ None of these blocked the merge. Line numbers were taken at the review and may d
 - The broker names a takeover: WARN when a stream without the app's alias takes an app session from the app's stream
   (naming the old stream's number), INFO for any other new stream of a key whose old stream is still open (a reconnect
   before the old close, or a second client).
+- From the final review: the key→stream map loses a removed session's entry on its stream's close; the UI checks drop an
+  inherited `COPILOT_RELAY_MANAGED` (else `copilot-env-managed` could pass without the fix when run from inside an app or
+  broker session); the check removes its env file also when it fails.
 
 ## A. Worth doing first
 
@@ -45,6 +48,11 @@ None of these blocked the merge. Line numbers were taken at the review and may d
 1. **A `copilot` that the agent runs inside an app session stays off the relay.**
    - Copilot passes its environment on to its children (the agent's shell commands, the user's MCP servers), so a nested
      `copilot` inherits `COPILOT_RELAY_MANAGED=1`. The broker's own sessions already behave this way. Known limitation.
+
+2. **After a removal the close line says "an older stream".**
+   - Where: the close handler of GET /api/peer/stream (`server.mjs`). `DELETE /api/sessions` removes a peer whose stream is
+     still open; that stream's close then logs "(an older stream: the session's newer one stays)", which is not true. Only
+     wording (from `feat/main-log`).
 
 ## D. Tests and housekeeping
 

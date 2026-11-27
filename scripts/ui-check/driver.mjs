@@ -183,7 +183,7 @@ export async function launch({ scenario, settings = {}, width = 1280, height = 8
   }
   const port = await freePort();
   const relayPort = await freePort(); // the app's relay URL points here (nothing listens without broker): never the real broker on 7777
-  const { WAYLAND_DISPLAY, COPILOT_RELAY_URL, ...env } = process.env; // an inherited COPILOT_RELAY_URL would beat COPILOT_RELAY_PORT
+  const { WAYLAND_DISPLAY, COPILOT_RELAY_URL, COPILOT_RELAY_MANAGED, ...env } = process.env; // an inherited COPILOT_RELAY_URL would beat COPILOT_RELAY_PORT
   // the broker's state files, also in the app's environment: a broker the app starts by itself (RelayClient's
   // #autostart, when its connection is refused) inherits it and must never fall back to the real state files
   const namesFile = path.join(tmp, "relay-names.json");

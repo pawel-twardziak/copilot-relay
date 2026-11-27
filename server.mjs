@@ -493,10 +493,8 @@ const server = http.createServer(async (req, res) => {
           // only now) keeps the session online
           const current = registry.get(key)?.control === control;
           trace(`closed ${key}${current ? "" : " (an older stream: the session's newer one stays)"}`);
-          if (current) {
-            streamOf.delete(key);
-            registry.disconnect(key);
-          }
+          if (streamOf.get(key) === sid) streamOf.delete(key); // also after a removal (DELETE /api/sessions)
+          if (current) registry.disconnect(key);
         });
         return;
       }
