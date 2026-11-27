@@ -24,9 +24,13 @@ test("dayLabel: short weekday, day, short month, year", () => {
   assert.match(MT.dayLabel(at(2026, 11, 21, 12, 0), "en-GB"), /^Sat,? 21 Nov 2026$/);
 });
 
-test("full: the local date and time", () => {
+test("dayLabel: en-GB when no locale is given, whatever the system locale", () => {
+  assert.match(MT.dayLabel(at(2026, 11, 21, 12, 0)), /^Sat,? 21 Nov 2026$/);
+});
+
+test("full: the local date and time, in en-GB", () => {
   const ms = at(2026, 11, 21, 20, 22, 59);
-  assert.equal(MT.full(ms), new Date(ms).toLocaleString());
+  assert.equal(MT.full(ms), "21/11/2026, 20:22:59");
 });
 
 test("assign: users by ordinal, agents by messageId", () => {
