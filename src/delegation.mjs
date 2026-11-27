@@ -126,8 +126,12 @@ export class Delegation {
       from: notice ? "relay" : item.from,
       text: item.text,
       status: typeof delivered === "string" ? delivered : delivered ? "delivered" : "queued",
+      ...(this.#inFallback ? { fallback: true } : {}),
     });
   }
+
+  /** True while `fallback` runs: the items it logs are marked as forwarded by the app. */
+  #inFallback = false;
 
   /** Log that the dropped outbox items were never delivered. */
   #logDropped(items) {
@@ -280,6 +284,22 @@ export class Delegation {
     return delivered
       ? "Report delivered to your parent session."
       : "Report stored. Your parent session will receive it when it returns.";
+  }
+
+  /**
+   * The app forwards the last reply of a session that cannot use the relay tools (`callerKey`) to `toKey`: its
+   * first reply to its live parent is a report, anything else a send_message. The log items carry `fallback: true`.
+   */
+  fallback(callerKey, toKey, text) {
+    this.#inFallback = true;
+    try {
+      if (this.#liveParent(callerKey) === toKey && !this.store.isReported(callerKey)) return this.report(callerKey, text);
+      const name = this.registry.get(toKey)?.name || this.store.nameOf(toKey) || this.nameOf(toKey);
+      if (!name) return `No session "${toKey}". Call list_sessions to see who is online.`;
+      return this.registry.send(callerKey, name, text, { fallback: true });
+    } finally {
+      this.#inFallback = false;
+    }
   }
 
   /**

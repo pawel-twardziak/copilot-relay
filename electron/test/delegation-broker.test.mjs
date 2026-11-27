@@ -1326,3 +1326,65 @@ test("heldByKind counts unacknowledged marked items per recipient and kind, with
   assert.ok(changes > before);
   assert.deepEqual(d.heldByKind()["cli:child"], { child: 0, parent: 0, other: 1 });
 });
+
+/** setup() with the registry hooks wired as in server.mjs and a third app session "obcy". */
+function fallbackSetup() {
+  const base = setup();
+  const { registry, d } = base;
+  registry.appMessage = (f, t, x) => d.appMessage(f, t, x);
+  const otherPush = [];
+  registry.upsert({ key: "cli:other", name: "obcy", kind: "cli", app: true, push: (m) => (otherPush.push(m), true), control() {} });
+  return { ...base, otherPush };
+}
+
+test("fallback to the parent reports", () => {
+  const { d, store, parentPush } = fallbackSetup();
+  assert.match(d.fallback("cli:child", "cli:parent", "done"), /Report delivered/);
+  assert.equal(store.isReported("cli:child"), true);
+  assert.equal(parentPush.length, 1);
+  assert.equal(parentPush[0].fromChild, true);
+  assert.equal(parentPush[0].text, "done");
+});
+
+test("fallback after the report is a message, not 'already reported'", () => {
+  const { d, parentPush } = fallbackSetup();
+  d.fallback("cli:child", "cli:parent", "done");
+  const out = d.fallback("cli:child", "cli:parent", "more");
+  assert.doesNotMatch(out, /already/i);
+  assert.match(out, /Message to mama-/);
+  assert.equal(parentPush.length, 2);
+  assert.equal(parentPush[1].fromChild, true);
+  assert.equal(parentPush[1].text, "more");
+});
+
+test("fallback to another session is a message charged to the budget", () => {
+  const { d, registry, otherPush } = fallbackSetup();
+  const before = registry.budget;
+  assert.match(d.fallback("cli:child", "cli:other", "hej"), /Message to obcy-/);
+  assert.equal(otherPush.length, 1);
+  assert.equal(otherPush[0].heldAs, "other");
+  assert.equal(registry.budget, before - 1);
+});
+
+test("fallback to an unknown peer is the unknown-peer answer", () => {
+  const { d } = fallbackSetup();
+  assert.match(d.fallback("cli:child", "cli:nobody", "x"), /^No session/);
+});
+
+test("fallback log items carry fallback: true, the tool paths do not", () => {
+  const items = [];
+  const base = fallbackSetup();
+  base.d.comms = { append: (i) => items.push(i), status() {} };
+  base.d.fallback("cli:child", "cli:parent", "done");
+  base.d.fallback("cli:child", "cli:other", "hej");
+  base.registry.send("cli:child", base.registry.get("cli:parent").name, "tool");
+  assert.deepEqual(items.map((i) => [i.kind, i.fallback]), [["report", true], ["message", true], ["message", undefined]]);
+});
+
+test("fallback to a parent that left the registry still stores the report", () => {
+  const { d, registry, store } = fallbackSetup();
+  registry.remove("cli:parent");
+  assert.match(d.fallback("cli:child", "cli:parent", "done"), /Report stored/);
+  assert.equal(store.isReported("cli:child"), true);
+  assert.equal(store.pending("cli:parent").length, 1);
+});

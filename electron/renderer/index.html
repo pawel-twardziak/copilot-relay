@@ -65,6 +65,10 @@
                 <span><input id="set-queue" type="checkbox" /> Deliver queued messages during a turn</span>
               </label>
               <p class="hint">Messages for a working session are delivered after its current tool step. Off: they wait until the turn ends.</p>
+              <label class="check">
+                <span><input id="set-fallback" type="checkbox" /> Approve forwarded replies of sessions without relay tools</span>
+              </label>
+              <p class="hint">A session whose agent has no relay tools cannot answer the session that wrote to it, so the app forwards its last reply. On: each forward waits for your Send in that session's view. A session's own "Forwarded replies" switch overrides this.</p>
               <label>
                 Tool and subagent details
                 <select id="set-activity"><option value="off">In the chat</option><option value="subagents">Subagents in a side panel</option><option value="all">Everything in a side panel</option></select>
@@ -247,6 +251,7 @@
     <script src="find-text.js"></script>
     <script src="find-bar.js"></script>
     <script src="held-replies.js"></script>
+    <script src="fallback.js"></script>
     <script src="scroll-follow.js"></script>
     <script src="stream-runs.js"></script>
     <script src="tool-calls.js"></script>

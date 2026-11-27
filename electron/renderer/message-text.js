@@ -3,10 +3,12 @@
 (() => {
   const MQ = globalThis.MessageQueue ?? require("./message-queue.js");
   const FL = globalThis.FileLinks ?? require("./file-links.js");
+  // looked up when used: fallback.js is loaded after this script in the window
+  const FB = () => globalThis.Fallback ?? require("./fallback.js");
 
   /** Text of a replayed user message as the user sees it: a queued message comes back wrapped, the app's continue
-   *  prompt as its label. */
-  const shownUserText = (raw) => (MQ.isContinuePrompt(raw) ? MQ.CONTINUE_LABEL : MQ.unwrap(raw) ?? raw);
+   *  prompt as its label, a prompt with the reply fallback's note without it. */
+  const shownUserText = (raw) => (MQ.isContinuePrompt(raw) ? MQ.CONTINUE_LABEL : FB().stripNote(MQ.unwrap(raw) ?? raw));
 
   /** The text without a leading `[from <name>]` line and, when present, the `[folder "…"]` line after it. */
   function relayBody(text) {

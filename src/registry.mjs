@@ -217,7 +217,7 @@ export class Registry extends EventEmitter {
   }
 
   /** Agent-to-agent message. Returns a human-readable result for the calling tool. */
-  send(fromKey, toName, text) {
+  send(fromKey, toName, text, { fallback = false } = {}) {
     const from = this.byKey.get(fromKey);
     if (!from) return "You are not registered with the relay broker.";
     const to = this.byName.get(String(toName).trim().toLowerCase());
@@ -232,7 +232,7 @@ export class Registry extends EventEmitter {
     const [parentKey, childKey] = from.parentKey === to.key ? [to.key, from.key] : [from.key, to.key];
     if (linked ? !this.chargePair(parentKey, childKey) : this.budget <= 0) {
       this.emit("system", { text: `Blocked ${from.name} → ${to.name}: message budget exhausted (waiting for a human prompt).` });
-      this.#log({ kind: "message", fromKey: from.key, toKey: to.key, from: from.name, to: to.name, text, status: "blocked" });
+      this.#log({ kind: "message", fromKey: from.key, toKey: to.key, from: from.name, to: to.name, text, status: "blocked", ...(fallback ? { fallback } : {}) });
       return BUDGET_EXHAUSTED;
     }
     if (!linked) this.budget--;
@@ -249,7 +249,7 @@ export class Registry extends EventEmitter {
         text,
         prompt: linked && this.decorate ? this.decorate(to.key, prompt) : prompt,
       });
-      this.#log({ kind: "message", fromKey: from.key, toKey: to.key, from: from.name, to: to.name, text, status: pushed ? "delivered" : "queued" });
+      this.#log({ kind: "message", fromKey: from.key, toKey: to.key, from: from.name, to: to.name, text, status: pushed ? "delivered" : "queued", ...(fallback ? { fallback } : {}) });
     }
     const how = to.kind === "mcp" ? "placed in their inbox" : to.online ? "delivered" : "queued (recipient briefly offline)";
     return `Message to ${to.name} ${how}. Their reply will arrive as a new message — do not wait for it.`;

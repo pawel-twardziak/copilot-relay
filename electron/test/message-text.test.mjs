@@ -24,6 +24,13 @@ test("shownUserText keeps the relay header", () => {
   assert.equal(shownUserText("plain"), "plain");
 });
 
+test("shown and searchable text drop the reply fallback's note", async () => {
+  const { fallbackNote } = await import("../relay-tools.mjs");
+  const raw = `[from p]\nthe task\n\n${fallbackNote({ toName: "p", kind: "report" })}`;
+  assert.equal(shownUserText(raw), "[from p]\nthe task");
+  assert.equal(searchableUserText(raw), "the task");
+});
+
 test("the renderer scripts share one global scope without clashing", async () => {
   const fs = await import("node:fs");
   const vm = await import("node:vm");

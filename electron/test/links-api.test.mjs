@@ -271,3 +271,14 @@ test("GET /api/links answers links, held and heldByKind", () => {
   assert.equal(r.status, 200);
   assert.deepEqual(r.json, { links: [], held: { "cli:p": 2 }, heldByKind: byKind });
 });
+
+test("fallback forwards the reply and answers its result; missing to or text is 400", () => {
+  const { routes, store } = setup();
+  const out = routes["POST /api/peer/fallback"]({ key: "cli:child", to: "cli:parent", text: "done" });
+  assert.equal(out.status, 200);
+  assert.match(out.json.result, /Report delivered/);
+  assert.equal(store.isReported("cli:child"), true);
+  assert.equal(routes["POST /api/peer/fallback"]({ key: "cli:child", to: "cli:parent" }).status, 400);
+  assert.equal(routes["POST /api/peer/fallback"]({ key: "cli:child", text: "x" }).status, 400);
+  assert.equal(routes["POST /api/peer/fallback"]({ to: "cli:parent", text: "x" }).status, 400);
+});

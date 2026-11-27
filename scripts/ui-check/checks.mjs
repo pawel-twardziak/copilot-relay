@@ -15,6 +15,8 @@ import { ANSWER_MARKDOWN } from "../../electron/test/fixtures/acp/markdown-scena
 import { CHILD_PART, DEFAULT_PART } from "../../electron/session-prompts.mjs";
 import { REMINDER } from "../../electron/delegation.mjs";
 import { KEEPALIVE_MARKER } from "../../electron/cache-keeper.mjs";
+import { NOTE_MARK, fallbackNote } from "../../electron/relay-tools.mjs";
+import * as FB from "../../electron/test/fixtures/acp/fallback-scenario.mjs";
 import { gitIn } from "../../electron/test/git-helper.mjs";
 import { launch, until } from "./driver.mjs";
 
@@ -325,10 +327,10 @@ async function stubEditCount(app) {
   })()`);
   assert.equal(ok, true, "startEdit calls api.countFrom once");
 }
-/** The pids of the scripted agents running in the launch's work folder (the session's Copilot processes). Only the
- *  agent itself (`node …/scripted-agent.mjs`) counts, not the shell that started it (`sh -c '…scripted-agent.mjs' …`). */
-function agentPids(app) {
-  const work = path.join(app.dir, "work");
+/** The pids of the scripted agents running in the launch's work folder, or in `work` (the session's Copilot
+ *  processes). Only the agent itself (`node …/scripted-agent.mjs`) counts, not the shell that started it
+ *  (`sh -c '…scripted-agent.mjs' …`). */
+function agentPids(app, work = path.join(app.dir, "work")) {
   return readdirSync("/proc")
     .filter((p) => /^\d+$/.test(p))
     .filter((p) => {
@@ -760,11 +762,11 @@ async function commsSend(app, id, text, { idle = true } = {}) {
   if (idle) await app.check(`!${VC(id)}.busy`, `the turn of ${id} to end`);
 }
 /** The parent asks for a child (create_session in a new UUID folder) and its card is approved: the child's view is
- *  open, connected, under the parent in the tree; its id. */
-async function commsChild(app, parent, name, task) {
+ *  open, connected, under the parent in the tree; its id. extra: more fields of the request (e.g. its agent). */
+async function commsChild(app, parent, name, task, extra = {}) {
   const id = randomUUID();
   mkdirSync(path.join(app.dir, id));
-  await commsSend(app, parent, `create_session_json ${J({ name, task, folder: path.join(app.dir, id) })}`, { idle: false });
+  await commsSend(app, parent, `create_session_json ${J({ name, task, folder: path.join(app.dir, id), ...extra })}`, { idle: false });
   const card = `[...${VC(parent)}.el.querySelectorAll(".perm.delegation")].at(-1)`;
   await app.check(`!!${card} && !${card}.classList.contains("done") && !${card}.querySelector(".opts button.primary").disabled`, `the card for ${name}`);
   await app.ev(`${card}.querySelector(".opts button.primary").click()`);
@@ -1212,6 +1214,336 @@ const commsChecks = [
       assert.equal(await app.ev("ui.commsSplitSet"), false, "a double click: auto again");
       assert.equal(JSON.parse(await storedUi(app)).commsSplitSet, false, "stored");
       assert.ok(Math.abs((await commsHeights(app, parent)).graph - auto) <= 1, "the graph's needed height again");
+    },
+  },
+];
+
+// ---------- the reply fallback (docs/superpowers/specs/2026-11-27-relay-fallback-design.md) ----------
+// A delegated child whose agent ("limited", see fallback-scenario.mjs) has no relay tools: the app tells it in its
+// prompt that its last message is forwarded, and forwards it to the parent as its report (after Send on a card, or at
+// once with the approval off). Parent and child sit in UUID folders: main keeps the switch and the pending forwards
+// per session id, and reads the agent's tools from the session's history, which it does only for a UUID.
+const FALLBACK_SCENARIO = path.join(FIXTURES, "fallback-scenario.mjs");
+/** The prompts the scripted agent got in the session's folder (as sent: with the note, the wrapper), without the
+ *  commands (a delegated child's /rename). */
+const promptsIn = (dir) =>
+  JSON.parse(readFileSync(path.join(dir, ".scripted-agent.json"), "utf8"))
+    .updates.filter((u) => u.sessionUpdate === "user_message_chunk" && !u.content.text.startsWith("/"))
+    .map((u) => u.content.text);
+/** The texts of the held replies of children in the view. */
+const childReplies = (app, id) => app.ev(`[...${VC(id)}.el.querySelectorAll('.held-group[data-kind="child"] .held-text')].map((e) => e.title || e.textContent.trim())`);
+/** The view's forward cards: their question, the reply's full text, the line under them. */
+const forwardCards = (app, id) => app.ev(`[...${VC(id)}.el.querySelectorAll(".fallback-card")].map((c) => ({
+  head: c.querySelector(".held-head").textContent,
+  text: c.querySelector(".held-text").title,
+  line: c.querySelector(".fallback-line")?.textContent ?? null,
+}))`);
+const systemLines = (app, id) => app.ev(`[...${VC(id)}.log.querySelectorAll(":scope > .msg.system")].map((e) => e.textContent)`);
+const bubbleTexts = (app, id) => app.ev(`[...${VC(id)}.log.querySelectorAll(":scope > .msg.user, :scope > .msg.relay")].map((e) => (e.querySelector(".body") ?? e).textContent)`);
+const sentLine = (to) => `Sent this reply to "${to}" as its report (no relay tools).`;
+const askedCard = (to) => `This session has no relay tools. Send this reply to "${to}" as its report?`;
+/** A parent asks for a child running agent (omitted: the default agent) on task; the child's turn starts at once. */
+async function fallbackChild(app, { task = FB.TASK, agent = "limited" } = {}) {
+  const parent = await commsSession(app);
+  const child = await commsChild(app, parent, "kid", task, agent ? { agent } : {});
+  return { parent, child, parentName: await app.ev(`${VC(parent)}.relayName`), childDir: path.join(app.dir, child) };
+}
+/** The child's prompts: the first one ends with the note naming the parent (a report), and its bubble does not show it. */
+async function assertNoted(app, { child, childDir, parentName }) {
+  const [first] = promptsIn(childDir);
+  assert.ok(first.endsWith(`\n\n${fallbackNote({ toName: parentName, kind: "report" })}`), `the note at the end of the first prompt: ${first}`);
+  const bubbles = await bubbleTexts(app, child);
+  assert.ok(bubbles[0]?.includes("Count the files"), `the task's bubble: ${JSON.stringify(bubbles)}`);
+  for (const t of bubbles) assert.ok(!t.includes(NOTE_MARK) && !t.includes("cannot use the relay tools"), `a bubble shows the note: ${t}`);
+}
+const answerPermissionIn = async (app, id) => {
+  await app.check(`!!${VC(id)}.el.querySelector(".perm:not(.done) .opts button.primary")`, "a permission card");
+  await app.ev(`${VC(id)}.el.querySelector(".perm:not(.done) .opts button.primary").click()`);
+};
+const settle = () => new Promise((r) => setTimeout(r, 600)); // a forward or a card would have come by now
+/** fallback-midturn and fallback-replay: the queue on, the child's first turn waits for a permission, an unlinked
+ *  session's message is approved in the child meanwhile and delivered mid-turn; the chain (first prompt, the delivered
+ *  message, the continue prompt) ends with one card, to the parent. */
+async function midTurnCard(app) {
+  assert.equal(await app.ev("queueMidTurn"), true, "the queue setting");
+  const other = await commsSession(app);
+  const s = await fallbackChild(app, { task: FB.TASK_WAIT });
+  const { child, childDir, parentName } = s;
+  await app.check(`!!${VC(child)}.el.querySelector(".perm:not(.done) .opts button.primary") && ${VC(child)}.prompting`, "the child's turn waiting for its permission");
+  const childName = await app.ev(`${VC(child)}.relayName`);
+  await commsSend(app, other, `send_message ${childName} hello child`);
+  const held = `${VC(child)}.el.querySelector('.held-group[data-kind="other"] .held-approve')`;
+  await app.check(`!!${held}`, "the other session's message held in the child");
+  await app.ev(`${held}.click()`);
+  await app.check(`${VC(child)}.queue.length === 1`, "the approved message queued during the turn");
+  await answerPermissionIn(app, child);
+  await app.check(`!${VC(child)}.busy && ${VC(child)}.el.querySelectorAll(".fallback-card").length > 0`, "the chain to end with a card");
+  await settle();
+  const prompts = promptsIn(childDir);
+  assert.equal(prompts.length, 3, `the first prompt, the delivered message, the continue prompt: ${JSON.stringify(prompts)}`);
+  assert.ok(prompts[1].startsWith("[queued message, delivered during your work]\n") && prompts[1].includes("hello child"), prompts[1]);
+  assert.ok(!prompts[1].includes(NOTE_MARK), "no note on the delivered message");
+  assert.ok(prompts[2].startsWith("[continue after queued messages]\n") && !prompts[2].includes(NOTE_MARK), prompts[2]);
+  await assertNoted(app, s);
+  assert.deepEqual(await forwardCards(app, child), [{ head: askedCard(parentName), text: FB.FINAL, line: null }], "one card, the chain's last reply to the first sender");
+  return { ...s, other };
+}
+/** Send on the child's only card: the parent holds the reply as the child's report, the child's line says it went. */
+async function sendForward(app, { parent, child, parentName }, text) {
+  await app.ev(`${VC(child)}.el.querySelector(".fallback-card .fallback-send").click()`);
+  await app.check(`${VC(child)}.el.querySelectorAll(".fallback-card").length === 0`, "the card to go");
+  await until(async () => (await childReplies(app, parent)).some((t) => t.includes(text)), "the report held in the parent");
+  await until(async () => (await systemLines(app, child)).some((t) => t.startsWith(sentLine(parentName))), "the sent line in the child");
+}
+
+const fallbackChecks = [
+  {
+    // a child without relay tools: its prompt carries the note (its bubble does not show it), its reply waits on a
+    // card, the "Forwarded replies" switch shows; Send forwards it to the parent as its report
+    name: "fallback-card",
+    modes: ["off"],
+    scenario: FALLBACK_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      const s = await fallbackChild(app);
+      const { child, parent, parentName } = s;
+      await app.check(`!${VC(child)}.busy && ${VC(child)}.el.querySelectorAll(".fallback-card").length === 1`, "the card in the child");
+      await assertNoted(app, s);
+      assert.deepEqual(await forwardCards(app, child), [{ head: askedCard(parentName), text: FB.RESULT, line: null }]);
+      assert.equal(await app.ev(`${VC(child)}.fallbackLabel.hidden`), false, "the switch shows");
+      assert.equal(await app.ev(`${VC(child)}.fallbackSwitch.checked`), true, "on by default");
+      await settle();
+      assert.deepEqual(await childReplies(app, parent), [], "nothing reached the parent before Send");
+      await sendForward(app, s, FB.RESULT);
+      assert.deepEqual(await app.ev(`api.fallbackList(${J(child)})`), [], "nothing pending in main");
+    },
+  },
+  {
+    // the child's own switch off (during its turn): the reply goes to the parent at once, no card, a sent line
+    name: "fallback-off",
+    modes: ["off"],
+    scenario: FALLBACK_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      const s = await fallbackChild(app, { task: FB.TASK_WAIT });
+      const { child, parent, parentName } = s;
+      await app.check(`!${VC(child)}.fallbackLabel.hidden && !!${VC(child)}.el.querySelector(".perm:not(.done)")`, "the switch during the child's turn");
+      await app.ev(`${VC(child)}.fallbackSwitch.click()`);
+      await app.check(`${VC(child)}.fbApproval === false`, "the switch off");
+      assert.equal(await app.ev(`api.getFallbackApproval(${J(child)})`), false, "saved for the session");
+      await answerPermissionIn(app, child);
+      await until(async () => (await childReplies(app, parent)).some((t) => t.includes(FB.RESULT)), "the report held in the parent");
+      await until(async () => (await systemLines(app, child)).some((t) => t.startsWith(sentLine(parentName))), "the sent line in the child");
+      await settle();
+      assert.deepEqual(await forwardCards(app, child), [], "no card");
+      await assertNoted(app, s);
+    },
+  },
+  {
+    // Don't send: nothing reaches the parent, a line says so
+    name: "fallback-dont",
+    modes: ["off"],
+    scenario: FALLBACK_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      const { child, parent, parentName } = await fallbackChild(app);
+      await app.check(`!${VC(child)}.busy && ${VC(child)}.el.querySelectorAll(".fallback-card").length === 1`, "the card in the child");
+      await app.ev(`${VC(child)}.el.querySelector(".fallback-card .fallback-drop").click()`);
+      await app.check(`${VC(child)}.el.querySelectorAll(".fallback-card").length === 0`, "the card to go");
+      await until(async () => (await systemLines(app, child)).includes(`Did not send this reply to "${parentName}".`), "the line in the child");
+      await settle();
+      assert.deepEqual(await childReplies(app, parent), [], "nothing reached the parent");
+      assert.ok(!(await app.ev(`${VC(parent)}.log.textContent`)).includes(FB.RESULT), "nor its chat");
+      assert.ok(!(await systemLines(app, child)).some((t) => t.startsWith("Sent this reply")), "no sent line");
+      assert.deepEqual(await app.ev(`api.fallbackList(${J(child)})`), [], "nothing pending in main");
+    },
+  },
+  {
+    // Don't send in a dead view (the child's process exited): the card goes, main keeps nothing, nothing is sent
+    name: "fallback-dead-dont",
+    modes: ["off"],
+    scenario: FALLBACK_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      const { child, childDir, parent, parentName } = await fallbackChild(app);
+      await app.check(`!${VC(child)}.busy && ${VC(child)}.el.querySelectorAll(".fallback-card").length === 1`, "the card in the child");
+      const pids = agentPids(app, childDir);
+      assert.equal(pids.length, 1, "one agent process for the child");
+      process.kill(pids[0], "SIGKILL");
+      await app.check(`${VC(child)}.dead`, "the child's view to be dead");
+      assert.equal(await app.ev(`${VC(child)}.el.querySelectorAll(".fallback-card").length`), 1, "the card stays in the dead view");
+      await app.ev(`${VC(child)}.el.querySelector(".fallback-card .fallback-drop").click()`);
+      await app.check(`${VC(child)}.el.querySelectorAll(".fallback-card").length === 0`, "the card to go");
+      await until(async () => (await systemLines(app, child)).includes(`Did not send this reply to "${parentName}".`), "the line in the child");
+      assert.ok(!(await systemLines(app, child)).some((t) => t.startsWith("Not sent")), "no Not sent line");
+      assert.deepEqual(await app.ev(`api.fallbackList(${J(child)})`), [], "nothing pending in main");
+      await settle();
+      assert.ok(!(await childReplies(app, parent)).some((t) => t.includes(FB.RESULT)), "the reply did not reach the parent");
+    },
+  },
+  {
+    // Stop while the note is asked: the prompt never goes out, and the pending notes it took (a notice for the model)
+    // go with the next prompt, as they would without the fallback
+    name: "fallback-stop-notes",
+    modes: ["off"],
+    scenario: FALLBACK_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      const { child, childDir } = await fallbackChild(app);
+      await app.check(`!${VC(child)}.busy && ${VC(child)}.el.querySelectorAll(".fallback-card").length === 1`, "the child's turn to end");
+      const sentBefore = promptsIn(childDir).length;
+      // window.api is frozen: runPrompt is rebuilt with its note request held until the check lets it go
+      const ok = await app.ev(`(() => {
+        const src = SessionView.prototype.runPrompt.toString();
+        if (src.split("api.fallbackNote(").length !== 2) return false;
+        window.__noteGate = new Promise((r) => { window.__openNote = r; });
+        window.__fallbackNote = (...a) => window.__noteGate.then(() => api.fallbackNote(...a));
+        SessionView.prototype.runPrompt = (0, eval)("({ " + src.replace("api.fallbackNote(", "__fallbackNote(") + " })").runPrompt;
+        return true;
+      })()`);
+      assert.equal(ok, true, "runPrompt asks api.fallbackNote once");
+      await app.ev(`${VC(child)}.pendingNotes.push("NOTICE: kid2 was adopted.")`);
+      const enter = (text) => app.ev(`(() => { const v = ${VC(child)}; v.input.value = ${J(text)}; v.input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); })()`);
+      await enter("first try");
+      await app.check(`${VC(child)}.busy`, "the prompt waiting for its note");
+      await app.ev(`${VC(child)}.stopBtn.click()`);
+      await app.ev(`__openNote()`);
+      await app.check(`!${VC(child)}.busy`, "the stopped turn to end");
+      await settle();
+      assert.equal(promptsIn(childDir).length, sentBefore, "the stopped prompt never went out");
+      assert.deepEqual(await app.ev(`${VC(child)}.pendingNotes`), ["NOTICE: kid2 was adopted."], "the notes wait for the next prompt");
+      await enter("second try");
+      await until(async () => promptsIn(childDir).length === sentBefore + 1, "the next prompt to go out");
+      const last = promptsIn(childDir).at(-1);
+      assert.ok(last.startsWith("NOTICE: kid2 was adopted.\n\nsecond try"), last);
+      assert.deepEqual(await app.ev(`${VC(child)}.pendingNotes`), [], "taken by the prompt that went out");
+    },
+  },
+  {
+    // a child with the default agent (it has the relay tools): no note, no switch, no card, nothing forwarded
+    name: "fallback-default-agent",
+    modes: ["off"],
+    scenario: FALLBACK_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      const { child, parent, childDir } = await fallbackChild(app, { agent: null });
+      await until(async () => (await app.ev(`${VC(child)}.log.textContent`)).includes(FB.RESULT), "the child's reply");
+      await app.check(`!${VC(child)}.busy`, "the child's turn to end");
+      await settle();
+      const [first] = promptsIn(childDir);
+      assert.ok(first.endsWith(FB.TASK) && !first.includes(NOTE_MARK), `the prompt as without the fallback: ${first}`);
+      assert.equal(await app.ev(`${VC(child)}.fbCannot`), false, "no note was given");
+      assert.equal(await app.ev(`${VC(child)}.fallbackLabel.hidden`), true, "no switch");
+      assert.deepEqual(await forwardCards(app, child), [], "no card");
+      assert.deepEqual(await app.ev(`api.fallbackList(${J(child)})`), [], "nothing pending in main");
+      assert.deepEqual(await childReplies(app, parent), [], "nothing forwarded to the parent");
+    },
+  },
+  {
+    // the queue on: a message of another session delivered mid-turn joins the chain; one card, to the parent (the
+    // sender of the chain's first message), with the continue prompt's reply; the other session gets nothing
+    name: "fallback-midturn",
+    modes: ["off"],
+    scenario: FALLBACK_SCENARIO,
+    settings: { relay: true, queueMidTurn: true },
+    broker: true,
+    async run(app) {
+      const s = await midTurnCard(app);
+      await sendForward(app, s, FB.FINAL);
+      await settle();
+      assert.equal(await app.ev(`${VC(s.other)}.el.querySelectorAll(".held-row").length`), 0, "nothing held in the other session");
+      assert.ok(!(await app.ev(`${VC(s.other)}.log.textContent`)).includes(FB.FINAL), "nothing in the other session's chat");
+    },
+  },
+  {
+    // the child reopened with a card pending: the replayed bubbles show no note and no wrapper, the card is back and
+    // Send still forwards it
+    name: "fallback-replay",
+    modes: ["off"],
+    scenario: FALLBACK_SCENARIO,
+    settings: { relay: true, queueMidTurn: true },
+    broker: true,
+    async run(app) {
+      const s = await midTurnCard(app);
+      const { child, childDir, parentName } = s;
+      await app.ev(`closeView(${J(child)})`);
+      await app.check(`!views.has(${J(child)})`, "the child's view to close");
+      await app.ev(`openSession({ sessionId: ${J(child)}, cwd: ${J(childDir)} })`, "the child to reopen");
+      await app.check(`!!${VC(child)} && !${VC(child)}.busy && !${VC(child)}.resuming`, "the reopened child");
+      const bubbles = await bubbleTexts(app, child);
+      assert.equal(bubbles.length, 3, JSON.stringify(bubbles));
+      for (const t of bubbles) {
+        for (const shown of [NOTE_MARK, "cannot use the relay tools", "[queued message, delivered during your work]", "[End of the queued message."]) assert.ok(!t.includes(shown), `a replayed bubble shows ${shown}: ${t}`);
+      }
+      assert.ok(bubbles[0].includes(FB.TASK_WAIT), bubbles[0]);
+      // the delivered message as it went out, without the wrapper (a relay header line is hidden as in any bubble)
+      const inner = await app.ev(`FileLinks.parseRelayHeader(MessageQueue.unwrap(${J(promptsIn(childDir)[1])})).display`);
+      assert.ok(inner.includes("hello child"), inner);
+      assert.equal(bubbles[1], inner, "the mid-turn bubble shows the unwrapped text");
+      assert.equal(bubbles[2], "↻ continuing the task");
+      await app.check(`${VC(child)}.el.querySelectorAll(".fallback-card").length === 1`, "the pending card again");
+      assert.deepEqual(await forwardCards(app, child), [{ head: askedCard(parentName), text: FB.FINAL, line: null }]);
+      assert.equal(await app.ev(`${VC(child)}.fallbackLabel.hidden`), false, "the switch shows with a card pending");
+      await sendForward(app, s, FB.FINAL);
+    },
+  },
+  {
+    // "Delete this reply" under a pending card: the cut history no longer holds the reply, so the reopened view shows
+    // no card (and main keeps no forward to send)
+    name: "fallback-truncate",
+    modes: ["off"],
+    scenario: FALLBACK_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      const { child, childDir, parent } = await fallbackChild(app);
+      await app.check(`!${VC(child)}.busy && ${VC(child)}.el.querySelectorAll(".fallback-card").length === 1`, "the card in the child");
+      // Copilot's history of the turn (the scripted agent keeps none): the prompt as sent, then the reply
+      const file = path.join(app.dir, "copilot-home", "session-state", child, "events.jsonl");
+      const event = (type, data) => JSON.stringify({ type, id: randomUUID(), timestamp: new Date().toISOString(), data }) + "\n";
+      appendFileSync(file, event("user.message", { content: promptsIn(childDir)[0] }) + event("assistant.message", { messageId: "fb-reply", content: FB.RESULT }));
+      const reply = `[...${VC(child)}.log.querySelectorAll(":scope > .msg.agent")].find((e) => e._kind === "reply")`;
+      await app.check(`!!${reply}`, "the reply with its actions");
+      await app.ev(`(() => { window.confirm = () => true; const v = ${VC(child)}; window.__cut = v.historyAction(${reply}, "delete"); })()`);
+      await app.ev(`window.__cut`, "the delete to finish");
+      await app.check(`!!${VC(child)} && !${VC(child)}.busy && !${VC(child)}.resuming`, "the reopened child");
+      const kept = readFileSync(file, "utf8").trim().split("\n").map((l) => JSON.parse(l).type);
+      assert.deepEqual(kept, ["session.start", "subagent.selected", "user.message"], "the reply cut from the history");
+      await settle();
+      assert.deepEqual(await forwardCards(app, child), [], "no card after the reopen");
+      assert.deepEqual(await app.ev(`api.fallbackList(${J(child)})`), [], "nothing pending in main");
+      assert.deepEqual(await childReplies(app, parent), [], "nothing reached the parent");
+    },
+  },
+  {
+    // Settings → Sessions: the approval off by default, saved; a new child's reply goes at once, without a card
+    name: "fallback-settings",
+    modes: ["off"],
+    scenario: FALLBACK_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      await app.ev(`document.querySelector("#btn-settings").click()`);
+      await app.check(`document.querySelector("#settings").open`, "the Settings page");
+      assert.equal(await app.ev(`document.querySelector("#set-fallback").checked`), true, "on by default");
+      await app.ev(`document.querySelector("#set-fallback").click()`);
+      await app.ev(`document.querySelector("#set-save").click()`);
+      await app.check(`!document.querySelector("#settings").open`, "the Settings page to close");
+      await app.check(`api.getSettings().then((s) => s.approveFallback === false)`, "the setting saved");
+      const s = await fallbackChild(app);
+      const { child, parent, parentName } = s;
+      await until(async () => (await childReplies(app, parent)).some((t) => t.includes(FB.RESULT)), "the report held in the parent");
+      await until(async () => (await systemLines(app, child)).some((t) => t.startsWith(sentLine(parentName))), "the sent line in the child");
+      await settle();
+      assert.deepEqual(await forwardCards(app, child), [], "no card");
+      assert.equal(await app.ev(`${VC(child)}.fallbackSwitch.checked`), false, "the child's switch follows the setting");
+      await assertNoted(app, s);
     },
   },
 ];
@@ -4959,4 +5291,5 @@ export const checks = [
     },
   },
   ...commsChecks,
+  ...fallbackChecks,
 ];

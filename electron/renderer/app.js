@@ -272,7 +272,7 @@ let activeId = null;
 let queueMidTurn = false; // setting: deliver queued messages while a turn runs
 let activityPanel = "off"; // setting: where activity group details open (off | subagents | all)
 /** Text of a replayed user message as the user sees it: a queued message comes back wrapped, the app's continue
- *  prompt as its label. */
+ *  prompt as its label, a prompt with the reply fallback's note without it. */
 const shownUserText = (raw) => MessageText.shownUserText(raw);
 /** The text of a replayed user message that is yours (Edit, Left Shift+Up/Down): none for the continue prompt. */
 const ownUserText = (raw) => (MessageQueue.isContinuePrompt(raw) ? "" : shownUserText(raw));
@@ -336,10 +336,18 @@ class SessionView {
     this.groupEls = new Map(); // Activity groupId -> its subagent group element
     this.renderQueued = false;
     this.queue = []; // MessageQueue items (relay messages, your prompts sent while busy) waiting for delivery
-    this.held = held ?? []; // messages waiting for your approval (not the queue), of every kind (child, parent, other, user): { id, kind, from, text, prompt, fromCwd, human, deliveryId, arrivedAt }
+    this.held = held ?? []; // messages waiting for your approval (not the queue), of every kind (child, parent, other, user): { id, kind, from, fromKey, text, prompt, fromCwd, human, deliveryId, arrivedAt }
     this.holdOn = { child: true, parent: true, other: true, user: true }; // the per-session switches by kind (stored only when off); on until api.getHoldReplies answers
     this.holdTouched = {}; // kinds whose switch you used: the stored answer does not overwrite them
     this.paused = false; // Stop with items queued: nothing is delivered automatically until resumed
+    // the reply fallback (Fallback): the running chain { id, origin } main tracks (from the prompt that started it to
+    // its last one, the continue prompt included), the forwards waiting for your approval { id, toName, kind, text,
+    // line, busy }, whether main gave this view's prompts a note (its agent cannot answer), the "fallback" switch
+    this.fbSeq = null;
+    this.forwards = [];
+    this.fbCannot = false;
+    this.fbApproval = true; // on until api.getFallbackApproval answers
+    this.fbTouched = false; // you used the switch: the stored answer does not overwrite it
     // prompts of this view pending: a mid-turn delivery overlaps the running one, one turn for the app (its tools,
     // switch point, interrupted prompts and your Stop: MessageQueue.createChain)
     this.chain = MessageQueue.createChain();
@@ -461,7 +469,11 @@ class SessionView {
       this.holdSwitches[kind] = h("input", { type: "checkbox", class: "held-switch", "data-kind": kind, checked: true, onchange: () => this.setHold(kind, this.holdSwitches[kind].checked) });
       this.holdLabels[kind] = h("label", { class: "held-switch-label", hidden: true, title: HOLD_TITLES[kind] }, this.holdSwitches[kind], ` ${HeldReplies.switchLabel(kind)}`);
     }
-    this.holdBar = h("span", { class: "held-switches", hidden: true }, "Approve:", ...HeldReplies.SWITCH_KINDS.map((kind) => this.holdLabels[kind]));
+    // the reply fallback's switch: this session's own replies the app forwards (its agent has no relay tools)
+    this.fallbackSwitch = h("input", { type: "checkbox", class: "held-switch", "data-kind": "fallback", checked: true, onchange: () => this.setFallbackApproval(this.fallbackSwitch.checked) });
+    this.fallbackLabel = h("label", { class: "held-switch-label", hidden: true, title: Fallback.SWITCH_TITLE }, this.fallbackSwitch, ` ${Fallback.SWITCH_LABEL}`);
+    this.holdBar = h("span", { class: "held-switches", hidden: true }, "Approve:", ...HeldReplies.SWITCH_KINDS.map((kind) => this.holdLabels[kind]), this.fallbackLabel);
+    this.fallbackEl = h("div", { class: "held fallback-cards", hidden: true }); // the forwards waiting for your approval
     this.editBar = h("div", { class: "edit-bar", hidden: true }, this.editText, h("button", { onclick: () => this.cancelEdit() }, "Cancel"));
 
     // the ⋯ menu: the header's rare and destructive actions (Setup, Copy thread, Close all sub-sessions, Close, Delete)
@@ -504,12 +516,14 @@ class SessionView {
       this.row,
       this.editBar,
       this.heldEl,
+      this.fallbackEl,
       this.queueEl,
       h("div", { class: "composer" }, this.cmdPopup, this.input, this.agentPicker, h("div", { class: "btns" }, this.sendBtn, this.stopBtn)),
       h("div", { class: "status-bar" }, this.statusEl, this.holdBar, this.keeperLabel, this.bgEl), // the running line sits beside the status: no shift
     );
     this.renderHeld(); // replies handed over from the view this one replaces
     this.loadHoldSwitch();
+    this.loadFallback();
     this.loadKeeper();
     this.bgEl.onclick = () => {
       const first = this.activity.running().map((id) => this.groupEls.get(id)).find(Boolean);
@@ -1350,13 +1364,17 @@ class SessionView {
       this.holdSwitches[kind].disabled = this.dead || this.deleting;
       any ||= show;
     }
-    this.holdBar.hidden = !any;
+    const fallback = Fallback.showSwitch({ cannotAnswer: this.fbCannot, pending: this.forwards.length });
+    this.fallbackLabel.hidden = !fallback;
+    this.fallbackSwitch.checked = this.fbApproval;
+    this.fallbackSwitch.disabled = this.dead || this.deleting;
+    this.holdBar.hidden = !(any || fallback);
   }
 
   /** A message of `kind` (child, parent, other, user): it waits in its list until you approve it. */
   hold(m, kind) {
     // main stamps arrivedAt once, so a reload or a replay keeps the time and the order (oldest on top)
-    HeldReplies.insertByArrival(this.held, { id: ++queueItemSeq, kind, from: m.from, text: m.text, prompt: m.prompt, fromCwd: m.fromCwd ?? null, human: m.human === true, deliveryId: m.deliveryId, arrivedAt: m.arrivedAt ?? Date.now() });
+    HeldReplies.insertByArrival(this.held, { id: ++queueItemSeq, kind, from: m.from, fromKey: m.fromKey ?? null, text: m.text, prompt: m.prompt, fromCwd: m.fromCwd ?? null, human: m.human === true, deliveryId: m.deliveryId, arrivedAt: m.arrivedAt ?? Date.now() });
     this.renderHeld();
     renderList();
   }
@@ -1374,7 +1392,7 @@ class SessionView {
     if (i < 0) return;
     this.held.splice(i, 1);
     if (item.typed) this.enqueue({ kind: "app", text: item.text, prompt: item.prompt, command: item.command });
-    else this.enqueue({ kind: "relay", text: item.text, prompt: HeldReplies.approvedPrompt(item.prompt, item.arrivedAt, Date.now(), item.kind), from: item.from, human: item.human === true, fromCwd: item.fromCwd, deliveryId: item.deliveryId, command: false });
+    else this.enqueue({ kind: "relay", text: item.text, prompt: HeldReplies.approvedPrompt(item.prompt, item.arrivedAt, Date.now(), item.kind), from: item.from, fromKey: item.fromKey ?? null, human: item.human === true, fromCwd: item.fromCwd, deliveryId: item.deliveryId, command: false });
     this.renderHeld();
     renderList();
   }
@@ -1601,7 +1619,8 @@ class SessionView {
     // set by the broker for messages typed by a person in the relay GUI; a broker older than this app doesn't send it,
     // then the reserved-for-people name decides. It only re-opens the relay budget: relay text never attaches files.
     const human = m.human ?? m.from === "user";
-    this.enqueue({ kind: "relay", text: m.text, prompt: m.prompt, from: m.from, human, fromCwd: m.fromCwd ?? null, deliveryId: m.deliveryId, command: false });
+    // fromKey: the sender's peer key, where the reply fallback forwards the answer (none for the broker's own notices)
+    this.enqueue({ kind: "relay", text: m.text, prompt: m.prompt, from: m.from, fromKey: m.fromKey ?? null, human, fromCwd: m.fromCwd ?? null, deliveryId: m.deliveryId, command: false });
   }
 
   /** End of a turn: the head item starts a new one; while an interrupted task waits it goes as an answer prompt
@@ -1612,7 +1631,7 @@ class SessionView {
     const item = this.queue.shift();
     this.renderQueue();
     const { el, source, delivery } = this.itemPrompt(item);
-    this.runPrompt(item.prompt, el, source, delivery, { answer: this.followUp.answerDue(), more: this.queue.length > 0 });
+    this.runPrompt(item.prompt, el, source, delivery, { answer: this.followUp.answerDue(), more: this.queue.length > 0, item });
   }
 
   /** A tool boundary with the queue head eligible: send it now, as a second prompt that interrupts the running one
@@ -1621,7 +1640,7 @@ class SessionView {
     const item = this.queue.shift();
     this.renderQueue();
     const { el, source, delivery } = this.itemPrompt(item);
-    this.runPrompt(item.prompt, el, source, delivery, { midTurn: true, more: this.queue.length > 0 }); // interrupts the task
+    this.runPrompt(item.prompt, el, source, delivery, { midTurn: true, more: this.queue.length > 0, item }); // interrupts the task
   }
 
   /** After the last answer to queued messages: the app's own prompt that resumes the interrupted task. It is a small
@@ -2929,7 +2948,8 @@ class SessionView {
     }
     if (this.historyOp) return;
     const { ordinal, matchText, ownText, draft } = this.edit;
-    const prefix = EditMessage.notesPrefix(MessageQueue.unwrap(matchText) ?? matchText, ownText);
+    // without the reply fallback's note: the edited prompt gets a fresh one (runPrompt) when it still needs it
+    const prefix = EditMessage.notesPrefix(Fallback.stripNote(MessageQueue.unwrap(matchText) ?? matchText), ownText);
     const { sessionId } = this;
     this.historyOp = Symbol("edit"); // the view is replaced below, so the flag never needs releasing
     this.setBusy(true);
@@ -2973,28 +2993,38 @@ class SessionView {
 
   /**
    * @param {"app"|"human"|"relay"} source who wrote the prompt (decides the relay budget and image attachments)
-   * @param {{ midTurn?: boolean, answer?: boolean, more?: boolean }} options midTurn: a queued item sent while a
-   *   prompt of this view runs; it interrupts the running prompt and continues its turn (one chain = one turn).
-   *   answer (default: midTurn): it goes out as an answer prompt (MessageQueue.wrap), more: other items are still
-   *   queued behind it (the agent is told not to go back to its task yet). A command is never wrapped.
+   * @param {{ midTurn?: boolean, answer?: boolean, more?: boolean, item?: object }} options midTurn: a queued item
+   *   sent while a prompt of this view runs; it interrupts the running prompt and continues its turn (one chain = one
+   *   turn). answer (default: midTurn): it goes out as an answer prompt (MessageQueue.wrap), more: other items are
+   *   still queued behind it (the agent is told not to go back to its task yet). A command is never wrapped.
+   *   item: the queue item sent (its sender is the reply fallback's origin).
    */
-  async runPrompt(text, bubble, source, delivery = null, { midTurn = false, answer = midTurn, more = false } = {}) {
+  async runPrompt(text, bubble, source, delivery = null, { midTurn = false, answer = midTurn, more = false, item = null } = {}) {
     this.flush();
     // CLI commands (/context ...) are not recorded in events.jsonl; compare the recorded count to tell
     const isCmd = SlashCommands.isCommandPrompt(text);
-    let sent = text;
+    const isContinue = MessageQueue.isContinuePrompt(text);
+    let body = text;
+    let notes = []; // the pending notes this prompt took
     // not on a command: text in front of it would turn it into an ordinary prompt, the notes wait for the next one;
     // nor on the continue prompt: it is recognised on replay by its exact text
-    if (this.pendingNotes.length && !isCmd && !MessageQueue.isContinuePrompt(text)) {
-      sent = this.pendingNotes.join("\n\n") + "\n\n" + text;
+    if (this.pendingNotes.length && !isCmd && !isContinue) {
+      notes = this.pendingNotes;
+      body = notes.join("\n\n") + "\n\n" + text;
       this.pendingNotes = [];
     }
-    if (answer && !isCmd) sent = MessageQueue.wrap(sent, { more });
-    if (sent !== text) {
+    const wrapped = (b) => (answer && !isCmd ? MessageQueue.wrap(b, { more }) : b);
+    let sent = wrapped(body);
+    // the reply fallback: the chain's meta for main; its first prompt may get a note (asked below, once busy; never
+    // with the default agent, whose prompts go out as before)
+    const fb = this.fallbackPrompt({ source, item, midTurn, answer, isCmd, isContinue });
+    if (sent !== text || fb.asksNote) {
       // history records what was sent, so fork/delete match that; the bubble and Left Shift+Up keep what you wrote.
-      // Before append: markTurn hands _matchText on to the turn's reply.
-      bubble._ownText = bubble._matchText;
-      bubble._matchText = () => sent;
+      // Before append: markTurn hands _matchText on to the turn's reply. Read when asked: the note comes after the
+      // append, and without one (sent === text) the bubble matches as it always did
+      const own = bubble._matchText;
+      bubble._ownText = own;
+      bubble._matchText = () => (sent !== text ? sent : own());
     }
     this.append(bubble);
     this.toBottom();
@@ -3005,12 +3035,34 @@ class SessionView {
     // a mid-turn send interrupts the task: it is continued after the answers (undone if the send never took over)
     const undoInterrupt = midTurn ? this.followUp.interrupted() : null;
     this.setBusy(true);
+    if (fb.asksNote) {
+      // after the pending notes, before the wrapper (MessageQueue.unwrap finds its exact ending); null: the session
+      // can answer with the relay tools, and the text stays as it was
+      const note = await api.fallbackNote(this.sessionId, fb.meta.origin).catch(() => null);
+      if (note) {
+        sent = wrapped(`${body}\n\n${note}`);
+        this.fbCannot = true; // the "fallback" switch shows from now on
+        this.renderHoldSwitches();
+      }
+      if (this.chain.stopping()) {
+        // Stop pressed while the note was asked: the prompt never goes out (nor into the history), and it ends as a
+        // stopped turn does (a relay message is taken, as a stopped one is); the notes it took go with the next
+        // prompt, in front of any that came meanwhile
+        this.pendingNotes = [...notes, ...this.pendingNotes];
+        delivery?.returned();
+        this.dropTurn(bubble);
+        const stopped = this.chain.returned(record, "cancelled");
+        if (stopped.showStopped) this.system("Stopped.");
+        if (stopped.ended) await this.chainEnded(null, bubble, stopped.dropped, stopped.stopped);
+        return;
+      }
+    }
     const before = isCmd ? await api.userMessages(this.sessionId).catch(() => null) : null;
     if (!midTurn) this.delivery = delivery;
     let end = null;
     let failed = false; // the chain ended with this prompt's error
     try {
-      const stop = await api.prompt(this.sessionId, sent, source);
+      const stop = await api.prompt(this.sessionId, sent, source, fb.meta ?? undefined);
       delivery?.returned(); // (a mid-turn one whose marker never came is acknowledged here)
       this.flush();
       // a prompt interrupted by a queued one answers "cancelled": that is not a Stop of yours
@@ -3040,7 +3092,7 @@ class SessionView {
     this.dismissPermissions({ all: false, stopped });
     // the view was closed or its session deleted meanwhile: nothing to update (a refresh would also replace the
     // delete's warning in the status line)
-    if (views.get(this.sessionId) !== this) return;
+    if (views.get(this.sessionId) !== this) return this.endFallbackChain();
     if (before !== null) {
       const after = await api.userMessages(this.sessionId).catch(() => null);
       if (after === before) this.dropTurn(bubble);
@@ -3051,7 +3103,28 @@ class SessionView {
     // after the last answer to queued messages the interrupted task goes on; "pump": the next queued item is answered
     // first (setBusy(false) has scheduled it)
     const { paused, dead, deleting } = this;
-    if (this.followUp.afterTurn({ stopped, failed, queued: this.queue.length, paused, dead, deleting }) === "continue") void this.sendContinue();
+    const next = this.followUp.afterTurn({ stopped, failed, queued: this.queue.length, paused, dead, deleting });
+    if (next === "continue") void this.sendContinue();
+    // the reply fallback's chain goes on with the continue prompt and with the answers still due (pumped, then the
+    // continue); otherwise it is over, and main hears it now: before the pump (a microtask) can start the next chain,
+    // whose first prompt would replace this one's state in main
+    if (Fallback.chainEnds({ afterTurn: next, answerDue: this.followUp.answerDue(), stopped, failed })) this.endFallbackChain();
+  }
+
+  /** The reply fallback's part of a prompt (Fallback.promptMeta): `meta` for main, whether to ask for the note. A
+   *  prompt that starts a chain ends the running one first (normally ended already by chainEnded). */
+  fallbackPrompt({ source, item, midTurn, answer, isCmd, isContinue }) {
+    const r = Fallback.promptMeta({ fbSeq: this.fbSeq, midTurn, isContinue, isCmd, answer, item, source, customAgent: Fallback.customAgent(this.agentOption), newId: () => crypto.randomUUID() });
+    if (r.starts) this.endFallbackChain();
+    this.fbSeq = r.fbSeq;
+    return r;
+  }
+
+  /** The chain's last prompt has returned: main forwards its last reply, or offers it in a card (relay:fallback). */
+  endFallbackChain() {
+    if (!this.fbSeq) return;
+    api.fallbackChainEnded(this.sessionId, this.fbSeq.id).catch(() => {});
+    this.fbSeq = null;
   }
 
   cancel() {
@@ -3081,6 +3154,105 @@ class SessionView {
       .catch(() => {}); // unreadable: the default (on) stays
   }
 
+  // --- the reply fallback: the forwards of this session's replies waiting for your approval, and their switch
+
+  /** The switch's value and the forwards main still keeps for this session (a view opened again shows them). */
+  loadFallback() {
+    api
+      .getFallbackApproval(this.sessionId)
+      .then((on) => {
+        if (this.fbTouched) return;
+        this.fbApproval = on !== false;
+        this.renderHoldSwitches();
+      })
+      .catch(() => {}); // unreadable: the default (on) stays
+    api
+      .fallbackList(this.sessionId)
+      .then((list) => {
+        for (const f of list ?? []) this.offerForward(f);
+      })
+      .catch(() => {});
+  }
+
+  /** A forward waits for Send or Don't send (relay:fallback, or listed on open); old / error: an earlier try did not
+   *  get through (a broker without the route, or no answer from it). The same id replaces its card. */
+  offerForward({ id, toName, kind, text, old, error }) {
+    const line = old ? Fallback.OLD_BROKER : error ? Fallback.notSentLine(error) : null;
+    const known = this.forwards.find((f) => f.id === id);
+    if (known) Object.assign(known, { toName, kind, text, line: line ?? known.line });
+    else this.forwards.push({ id, toName, kind, text: String(text ?? ""), line, busy: false });
+    this.renderForwards();
+  }
+
+  /** The cards of the waiting forwards, in the look of the held messages (their text expands on a click). */
+  renderForwards() {
+    this.fallbackEl.hidden = this.forwards.length === 0;
+    this.fallbackEl.replaceChildren(
+      ...this.forwards.map((f) => {
+        const first = f.text.split("\n")[0];
+        const textEl = h("span", { class: "held-text", title: f.text }, first);
+        textEl.onclick = () => {
+          const open = textEl.classList.toggle("expanded"); // the full text, as plain text
+          textEl.textContent = open ? f.text : first;
+        };
+        return h(
+          "div",
+          { class: "held-group fallback-card", "data-id": f.id },
+          h("div", { class: "held-head" }, h("span", {}, Fallback.cardText(f))),
+          h(
+            "div",
+            { class: "held-row" },
+            textEl,
+            h("button", { class: "fallback-send", title: `Send this reply to "${f.toName}"`, disabled: f.busy || this.dead || this.deleting, onclick: () => this.answerForward(f, true) }, "Send"),
+            h("button", { class: "fallback-drop", title: "Drop this reply: nothing is sent", disabled: f.busy, onclick: () => this.answerForward(f, false) }, "Don't send"),
+          ),
+          f.line && h("div", { class: "fallback-line" }, f.line),
+        );
+      }),
+    );
+    this.renderHoldSwitches();
+  }
+
+  /** Send or Don't send on a card. Main's relay:fallbackSent writes the line of a sent one; a refused or failed send
+   *  keeps the card (Send tries again). */
+  async answerForward(f, send) {
+    if (f.busy) return;
+    f.busy = true;
+    this.renderForwards();
+    let r;
+    try {
+      r = await api.fallbackAnswer(this.sessionId, f.id, send);
+    } catch (e) {
+      f.busy = false;
+      f.line = Fallback.notSentLine(e.message);
+      this.renderForwards();
+      return;
+    }
+    f.busy = false;
+    if (r?.old) {
+      f.line = Fallback.OLD_BROKER;
+      this.renderForwards();
+      return;
+    }
+    this.forwards = this.forwards.filter((x) => x !== f); // sent, dropped, or answered already (null)
+    if (r && !send) this.system(Fallback.droppedLine(f));
+    this.renderForwards();
+  }
+
+  /** The "fallback" switch: on, this session's forwards wait for your approval; off, main sends them at once. The
+   *  cards already shown stay. */
+  async setFallbackApproval(on) {
+    this.fbTouched = true;
+    try {
+      await api.setFallbackApproval(this.sessionId, on);
+    } catch (e) {
+      this.error(`Could not save the setting: ${e.message}`);
+      this.fallbackSwitch.checked = this.fbApproval; // the file was not written: the switch stays as it was
+      return;
+    }
+    this.fbApproval = on;
+  }
+
   /** A view that is dead after the open does not keep the broker messages handed to it: the broker delivers them again. Items without a delivery id stay. */
   heldComeBack() {
     const back = this.held.filter((item) => item.deliveryId);
@@ -3098,6 +3270,7 @@ class SessionView {
     this.clearEdit(); // the text stays in the box
     this.dismissPermissions();
     this.renderHeld(); // Approve is off in a dead view; Discard stays
+    this.renderForwards(); // Send too; Don't send stays
     this.error(`Copilot process exited (${code ?? signal}).${stderr ? "\n" + stderr : ""}\nClick the session in the list to resume it again.`);
     this.setBusy(false);
   }
@@ -4181,6 +4354,7 @@ async function openSettings() {
   renderStorage();
   $("#set-relay").checked = s.relay;
   $("#set-queue").checked = s.queueMidTurn;
+  $("#set-fallback").checked = s.approveFallback !== false;
   $("#set-keeper").checked = s.cacheKeeper?.enabled === true;
   $("#set-keeper-pings").value = s.cacheKeeper?.pings ?? "";
   $("#set-keeper-min").value = s.cacheKeeper ? s.cacheKeeper.minContext / 1000 : "";
@@ -4316,6 +4490,7 @@ $("#settings").addEventListener("close", async () => {
     relay: $("#set-relay").checked,
     contextTier: $("#set-context").value,
     queueMidTurn: $("#set-queue").checked,
+    approveFallback: $("#set-fallback").checked, // main saves a missing one as on
     cacheKeeper: CacheKeeper.settingsOfForm({ enabled: $("#set-keeper").checked, pings: $("#set-keeper-pings").value, minContextK: $("#set-keeper-min").value }),
     activityPanel: $("#set-activity").value,
     brokerRepo: $("#set-broker-repo").value.trim() === brokerRepoDefault ? "" : $("#set-broker-repo").value,
@@ -4366,6 +4541,9 @@ api.onRelayMessage((m) => {
   forView(m.sessionId, (v) => v.incoming(m));
 });
 api.onRelayStatus((s) => forView(s.sessionId, (v) => v.relayStatus(s)));
+// the reply fallback: a forward of the session's reply waits for your approval; one went out (the broker's answer)
+api.onRelayFallback((f) => forView(f.sessionId, (v) => v.offerForward(f)));
+api.onRelayFallbackSent((f) => forView(f.sessionId, (v) => v.system(Fallback.sentLine(f))));
 
 // delegated sessions: only the app's approval answers a request (see delegation:answer in main)
 api.onDelegationRequest((r) => {

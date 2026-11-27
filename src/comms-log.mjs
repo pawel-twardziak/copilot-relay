@@ -27,7 +27,7 @@ export class CommsLog {
   }
 
   /** Write a message line; returns the public event (preview and size, no text). */
-  append({ id, kind, fromKey, toKey, from, to, text, status }) {
+  append({ id, kind, fromKey, toKey, from, to, text, status, fallback }) {
     const full = String(text ?? "");
     const cut = full.length > TEXT_MAX ? `${full.slice(0, TEXT_MAX)}…` : full;
     const event = {
@@ -35,6 +35,7 @@ export class CommsLog {
       size: full.length,
       preview: full.length > PREVIEW_MAX ? `${full.slice(0, PREVIEW_MAX)}…` : full,
       status,
+      ...(fallback ? { fallback: true } : {}),
     };
     const { preview, ...rest } = event;
     this.#write(event, JSON.stringify({ ...rest, text: cut }));

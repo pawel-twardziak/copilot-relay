@@ -55,6 +55,10 @@ export function linksRoutes({ delegation, comms, registry, log = console.log }) 
     "POST /api/links/missing": forgetKeys("missing"),
     "POST /api/peer/task": withKey(({ key, task }) =>
       typeof task === "string" ? { status: 200, json: { ok: delegation.setTask(key, task) } } : bad("task must be a string")),
+    "POST /api/peer/fallback": withKey(({ key, to, text }) =>
+      isKey(to) && typeof text === "string" && text !== ""
+        ? { status: 200, json: { result: delegation.fallback(key, to, text) } }
+        : bad("to and text required")),
     "POST /api/peer/state": withKey(({ key, busy }) => (delegation.setBusy(key, busy), done)),
     "POST /api/peer/died": withKey(({ key }) => (delegation.died(key), done)),
     "POST /api/peer/reopen-answer": withKey(({ key, requestId, approved, reason }) =>

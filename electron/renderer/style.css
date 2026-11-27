@@ -677,6 +677,9 @@ span.img-chip.off { border: 1px dashed var(--border); }
 .held-text { cursor: pointer; }
 .held-text.expanded { white-space: pre-wrap; overflow: visible; text-overflow: clip; }
 .held-row:has(.held-text.expanded) { align-items: flex-start; }
+/* the reply fallback: this session's replies waiting to be forwarded (the held look, below the held lists) */
+.fallback-card .held-head { color: var(--text); }
+.fallback-line { margin-top: 2px; color: var(--warn); }
 
 .keeper-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 3px 9px; border-radius: 12px; color: var(--muted); border: 1px solid var(--border); white-space: nowrap; flex-shrink: 0; }
 .keeper-chip[hidden] { display: none; }
