@@ -2810,7 +2810,10 @@ class SessionView {
       if (!this.moreMenu.contains(e.target) && !this.moreBtn.contains(e.target)) this.toggleMore(false);
     };
     this.moreMenu.addEventListener("click", (e) => {
-      if (e.target.closest("button")) this.toggleMore(false);
+      if (!e.target.closest("button")) return;
+      this.toggleMore(false);
+      // the focus leaves the hidden item: back to the message box (a dialog an item opens takes it from there)
+      if (this.moreMenu.contains(document.activeElement) || document.activeElement === document.body) (this.dead ? this.moreBtn : this.input).focus();
     });
     // the focus leaving the menu and its button (Tab, a click elsewhere that takes focus) closes it; a click on the
     // menu's padding moves no focus out, and Esc / arrows keep working from the menu itself

@@ -14,7 +14,8 @@ models. The app still adds its own synthetic "Context" select (`context-tier.mjs
   of its values, the switch is live: `session/set_config_option` and no restart. The choice is still stored as the
   session's override, so the next Copilot start gets the same `--context` flag. Without a live path (the option is
   absent, e.g. a model without a long-context tier, or no value maps), the switch restarts Copilot as today.
-- The header becomes one row on a normal window width.
+- The header becomes one row on a normal window width (a plain session at 1280 px; a tree session with all its
+  buttons, or the keeper chip, may take two rows there).
 
 ## Design
 
@@ -42,7 +43,8 @@ models. The app still adds its own synthetic "Context" select (`context-tier.mjs
   restart is refused meanwhile. It has a 15 s deadline. A failed save or set leaves the override as it was and
   comes back as `{ refused, configOptions }`, carrying the options as they are now.
 - When Copilot changes its own option by itself (`followedTier`): a model change that resets it, or an answer that
-  lands after the deadline. Only a change of a tier Copilot already had is followed, and the stored override takes
+  lands after the deadline. Seen in a `config_option_update` (not during a load's replay), in the answer to another
+  option's set (a model change, a delegated child's setup), and in a late answer. Only a change of a tier Copilot already had is followed, and the stored override takes
   the tier Copilot now runs, so the select and the next start match it. A late answer also sends the window a
   `config_option_update`. An option that first shows up (a model with a long-context tier) leaves the stored choice
   alone.
@@ -64,7 +66,8 @@ Title ✎ · folder | relay chip | context meter | keeper chip | [selects…] | 
   Arrow keys move between its items.
 - The selects, buttons and chips get the same height and a smaller font and padding. A select is at most 130 px
   wide, and its title shows the option's full name.
-- On a narrow window the row still wraps: the selects go to a second row and the title keeps at least 100 px.
+- On a narrow window the row still wraps: the selects go to a second row, and wrap among themselves rather than
+  be clipped. The title keeps at least 100 px.
 - The relations row (Parent / Sub-sessions) stays as it is.
 
 ## Non-goals

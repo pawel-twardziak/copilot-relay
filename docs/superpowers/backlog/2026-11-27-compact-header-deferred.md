@@ -16,7 +16,11 @@ None of these blocked the merge. Line numbers were taken at the review and may d
 - The ⋯ menu now closes when its view is hidden, dropped or reopened, and on focus leaving it.
 - The arrow keys work from no focused item.
 - Tooltips are refreshed after a revert.
-- After a reset by Copilot or a late answer, the override follows Copilot's own change of its tier.
+- After a reset by Copilot or a late answer, the override follows Copilot's own change of its tier, including a reset
+  in the answer to a model change. It does not follow during a load's replay.
+- A live set whose answer has no options shows the new tier.
+- After a menu item, the focus goes back to the message box.
+- At a narrow width the selects wrap instead of being clipped.
 
 ## A. Worth doing first
 
@@ -75,10 +79,21 @@ None of these blocked the merge. Line numbers were taken at the review and may d
 11. **A native option with a `long_context` value is hidden even when its 200k value cannot be mapped** (e.g.
     "standard"). A 200k pick then takes the restart path. Acceptable until the real values are known (item 1).
 
+12. **One row only for a plain session at 1280 px.** With the keeper chip, or a tree session with a relay chip,
+    Activity and Communication (about 1110 px of controls), the header takes two rows, and the title takes the spare
+    width of row 1. One row would need a window of about 1435 px. This is still fewer rows than before.
+    - Where: `style.css` `.head` rules (~100-116).
+    - Proposal: a title basis of 100 px and tighter gaps; or Activity / Communication as icon buttons with titles.
+
 ## D. Tests and housekeeping
 
-12. **The restart path of the Context select has no UI check** (a session without Copilot's option: switch → the view
+13. **The restart path of the Context select has no UI check** (a session without Copilot's option: switch → the view
    reopens with `--context long_context`). This was missing before this branch too.
-13. **No UI check presses a real Tab in the ⋯ menu** (the driver has no Tab helper). Unit coverage exists only for
+14. **No UI check presses a real Tab in the ⋯ menu** (the driver has no Tab helper). Unit coverage exists only for
     `context-tier.mjs`. Nor are `followedTier` with a real late answer or a real reset after a model change.
-14. **Not run:** Windows and macOS (menu positioning, focus), and the corp PC (item 1).
+15. **`header-one-context` proves the live path only through the status text, the view and the process.** It does not
+    assert that the agent's `context_size` became `long_context`. It also does not cover the refused branch, the
+    timeout branch, or a model change that resets the option, in the window. Proposal: let the scripted agent write
+    its options to `.scripted-agent.json` and read them in the check. Add a scenario whose model set resets
+    `context_size`.
+16. **Not run:** Windows and macOS (menu positioning, focus), and the corp PC (item 1).

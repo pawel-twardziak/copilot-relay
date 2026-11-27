@@ -107,7 +107,7 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberat
 .title-rename { display: block; width: 100%; font-weight: bold; }
 .head .title a { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; cursor: pointer; text-decoration: none; }
 .head .title a:hover { text-decoration: underline; }
-.head .selects { display: flex; flex-wrap: nowrap; gap: 4px; flex-shrink: 0; }
+.head .selects { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; } /* a narrow window wraps them, not clips */
 /* one height for the header's controls and chips */
 .head select, .head button, .head .usage-chip, .head .keeper-chip { height: 26px; font-size: 12px; }
 .head select { max-width: 130px; padding: 0 4px 0 6px; text-overflow: ellipsis; }

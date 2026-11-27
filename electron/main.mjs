@@ -528,7 +528,7 @@ function attach(sessionId, conn, cwd, relay, link) {
       if (open.get(sessionId) === entry) usage.context(sessionId, { used: u.used, size: u.size });
     }
     if (u?.sessionUpdate === "config_option_update" && Array.isArray(u.configOptions)) {
-      followNativeTier(sessionId, entry.configOptions, u.configOptions);
+      if (!entry.replaying) followNativeTier(sessionId, entry.configOptions, u.configOptions); // a load's steps are not Copilot's change
       entry.configOptions = u.configOptions;
       u = { ...u, configOptions: viewConfig(sessionId, u.configOptions) };
     }
@@ -1169,6 +1169,15 @@ async function setConfigOption(sessionId, entry, configId, value) {
   return res?.configOptions ?? null;
 }
 
+/** setConfigOption for another option (a model, an agent): Copilot may reset its own context option in the answer,
+ *  and the stored override follows that (followNativeTier). Not for the live context switch: it stores its own. */
+async function setConfigFollowing(sessionId, entry, configId, value) {
+  const before = entry.configOptions;
+  const updated = await setConfigOption(sessionId, entry, configId, value);
+  if (updated) followNativeTier(sessionId, before, updated);
+  return updated;
+}
+
 /** Create the approved child and link it to its parent. Never throws; resolves to what the card is told:
  *  { outcome: "created" } or { outcome: "failed", text, retry }. With `retry` the child's Copilot never started, the
  *  parent has been told nothing and the request stays open; every other failure ends as an outcome for the parent.
@@ -1218,7 +1227,7 @@ async function createChild(req, own = "", command = undefined, fields) {
       if (open.get(parentSessionId) === parent) return { outcome: "failed", text: config.error, retry: true };
       return failed("invalid", config.error);
     }
-    for (const { configId, value } of config.sets) await withDeadline(setConfigOption(sessionId, entry, configId, value), deadline, SETUP_TIMEOUT_TEXT);
+    for (const { configId, value } of config.sets) await withDeadline(setConfigFollowing(sessionId, entry, configId, value), deadline, SETUP_TIMEOUT_TEXT);
 
     send("delegation:created", { sessionId, cwd: child.cwd, configOptions: viewConfig(sessionId, entry.configOptions), parentSessionId, title: name });
     announced = true;
@@ -1469,7 +1478,7 @@ handle("sessions:setConfig", async (sessionId, configId, value) => {
   await keeper.whenIdle(sessionId);
   const entry = getOpen(sessionId);
   keeper.activity(sessionId); // a new model or agent has no fresh cache entry: the keeper waits for a turn
-  const updated = await setConfigOption(sessionId, entry, configId, value);
+  const updated = await setConfigFollowing(sessionId, entry, configId, value);
   return updated && viewConfig(sessionId, updated);
 });
 
@@ -1526,6 +1535,8 @@ function liveTierSwitch(sessionId, value) {
         }, () => {});
         throw e;
       }));
+      // an answer without options: Copilot's option took the target (it did not throw), as the view must show
+      if (set && !updated) entry.configOptions = entry.configOptions.map((o) => (o?.id === native.id ? { ...o, currentValue: target } : o));
       return viewConfig(sessionId, updated ?? entry.configOptions);
     } finally {
       historyBusy.delete(sessionId);
