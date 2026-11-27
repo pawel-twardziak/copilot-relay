@@ -1491,9 +1491,9 @@ handle("fallback:list", (sessionId) => {
   try {
     sessionDir(sessionId);
   } catch (e) {
-    // deleted outside the app: its forwards cannot be sent any more (the folder is checked once more, so a passing
-    // lstat or realpath error never drops them)
-    gone = e.code === "ENOSESSION" && !existsSync(path.join(sessionStateDir(), sessionId));
+    // deleted outside the app: its forwards cannot be sent any more (the folder is checked once more, and the
+    // session-state root must be there, so a passing lstat/realpath error or an unreachable root never drops them)
+    gone = e.code === "ENOSESSION" && existsSync(sessionStateDir()) && !existsSync(path.join(sessionStateDir(), sessionId));
   }
   if (gone) {
     pendingForwards.drop(sessionId);

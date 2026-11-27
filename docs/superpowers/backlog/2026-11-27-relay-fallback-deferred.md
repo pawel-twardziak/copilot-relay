@@ -97,9 +97,14 @@ None of these blocked the merge. Line numbers were taken at the review and may d
 22. Synchronous full read of `events.jsonl` in main at chain start and end (custom-agent sessions only).
 23. `prompt()` clears the chain text at a mid-turn start; it relies on the continue prompt always following.
 
-24. `fallback:list` drops a session's forwards when `sessionDir` says ENOSESSION and `existsSync` is false; both are
-    also true when the session-state root is briefly missing or unreadable (EACCES), so a temporary outage can drop
-    them. Valid JSON that is not an object in `fallback-pending.json` reads as empty without a log.
+24. `fallback:list` drops a session's forwards when `sessionDir` says ENOSESSION, the session-state root exists and
+    the session folder does not; an unreadable folder (EACCES) still reads as missing. Valid JSON that is not an
+    object in `fallback-pending.json` reads as empty without a log, and a garbled file is overwritten without a copy.
+25. A forward released after a failed send, while its session's view was reopened during the send, shows no card
+    until the view is opened again (`fallback:answer` release paths; `fallback:list` hides claimed forwards). Fix:
+    emit `relay:fallback` after a release with a patch.
+26. A failed write of `fallback-pending.json` leaves older content on disk: a forward sent or dropped in memory can
+    come back after a restart and be sent again (a report is deduplicated by the broker, a message is not).
 
 ## D. Tests and housekeeping
 
