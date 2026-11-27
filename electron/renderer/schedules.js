@@ -107,7 +107,7 @@
   const ui = () => globalThis.AppUi;
   const api = () => globalThis.api;
   const root = () => document.getElementById("schedules");
-  const when = (iso) => (iso ? new Date(iso).toLocaleString() : "—");
+  const when = (iso) => (iso ? new Date(iso).toLocaleString("en-GB") : "—");
 
   // the page is a modal dialog: Close, hide() and Escape (the dialog's own close) all end in setVisible(false)
   function setVisible(on) {
@@ -275,7 +275,7 @@
       if (seq !== pseq) return;
       schedOk = res.ok;
       preview.classList.toggle("sch-error", !res.ok);
-      preview.textContent = res.ok ? `Next runs: ${res.next.map((t) => new Date(t).toLocaleString()).join(" · ")}` : res.error;
+      preview.textContent = res.ok ? `Next runs: ${res.next.map((t) => new Date(t).toLocaleString("en-GB")).join(" · ")}` : res.error;
       syncSave();
     }
     const select = (options, value, onchange) =>

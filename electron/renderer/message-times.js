@@ -10,9 +10,9 @@ function clock(ms) {
   return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
-/** The local date and time, for a time's tooltip. */
+/** The local date and time, for a time's tooltip: always en-GB (24-hour, day before month), whatever the system locale. */
 function full(ms) {
-  return new Date(ms).toLocaleString();
+  return new Date(ms).toLocaleString("en-GB");
 }
 
 /** The local calendar day, "YYYY-MM-DD". */
@@ -21,8 +21,8 @@ function dayKey(ms) {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 }
 
-/** The text of a date line, e.g. "Sat, 21 Nov 2026" (locale: the system's when not given). */
-function dayLabel(ms, locale) {
+/** The text of a date line, e.g. "Sat, 21 Nov 2026" (en-GB unless a locale is given). */
+function dayLabel(ms, locale = "en-GB") {
   return new Date(ms).toLocaleDateString(locale, { weekday: "short", day: "numeric", month: "short", year: "numeric" });
 }
 

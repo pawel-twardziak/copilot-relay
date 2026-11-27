@@ -30,6 +30,10 @@
   "build": {
     "appId": "io.github.pawel-twardziak.copilot-sessions",
     "productName": "Copilot Sessions",
+    "compression": "maximum",
+    "electronLanguages": [
+      "en-US"
+    ],
     "files": [
       "main.mjs",
       "acp.mjs",

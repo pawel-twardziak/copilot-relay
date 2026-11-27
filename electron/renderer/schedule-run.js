@@ -23,7 +23,7 @@
   }
 
   /** The status line's parts: icon + status, trigger, start, duration and (when there is one) the exit code. */
-  function runMeta(run, fmtDate = (iso) => new Date(iso).toLocaleString()) {
+  function runMeta(run, fmtDate = (iso) => new Date(iso).toLocaleString("en-GB")) {
     return [
       `${STATUS_ICON[run.status] ?? "?"} ${run.status}`,
       TRIGGER[run.trigger] ?? run.trigger,
@@ -89,7 +89,7 @@
         "button",
         { class: "item sch-run" + (r.id === run.id ? " active" : ""), title: r.summary ?? "", onclick: () => onOpenRun(r.id) },
         h("span", { class: "sch-icon" }, STATUS_ICON[r.status] ?? "?"),
-        h("span", { class: "sch-date" }, r.startedAt ? new Date(r.startedAt).toLocaleString() : "—"),
+        h("span", { class: "sch-date" }, r.startedAt ? new Date(r.startedAt).toLocaleString("en-GB") : "—"),
         h("span", { class: "sch-sum" }, r.summary ?? ""),
       );
 

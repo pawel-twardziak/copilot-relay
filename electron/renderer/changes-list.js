@@ -97,7 +97,7 @@ function render(data, { h, sel, isShut, isUnfolded, commitsOf, opened = [], on }
       if (!r.files.length && !r.note) body.push(note("No changes."));
       if (r.truncated) body.push(note("Only the first 2000 files are shown."));
     }
-    const since = r.at ? `\nSince ${new Date(r.at).toLocaleString()}` : "";
+    const since = r.at ? `\nSince ${new Date(r.at).toLocaleString("en-GB")}` : "";
     return group(r.root, r.name, r.root + since, r.root, body);
   }
 
