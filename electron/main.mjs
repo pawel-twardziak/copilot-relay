@@ -26,7 +26,7 @@ import { readLinksCache, writeLinksCache } from "./links-cache.mjs";
 import { listAllPages } from "./session-list.mjs";
 import { beginPrompt, endPrompt } from "./prompt-count.mjs";
 import { normalizePanelMode } from "./activity-panel.mjs";
-import { createTierStore, effectiveTier, normalizeTier, switchTier, tierArgs, withContextOption } from "./context-tier.mjs";
+import { createTierStore, effectiveTier, followedTier, nativeContextOption, nativeValueFor, normalizeTier, switchTier, tierArgs, withContextOption } from "./context-tier.mjs";
 import { saveSetup } from "./session-setup.mjs";
 import { CHILD_PART, DEFAULT_PART, applyPromptSettings, clearPromptDirs, composePrompt, createPromptStore, effectiveChildPart, effectiveDefaultPart, instructionsEnv, migratePromptDefault, normalizeTemplates, writePromptDir } from "./session-prompts.mjs";
 import { createRestarter, realEffects, reconnectClients } from "./broker-restart.mjs";
@@ -528,6 +528,7 @@ function attach(sessionId, conn, cwd, relay, link) {
       if (open.get(sessionId) === entry) usage.context(sessionId, { used: u.used, size: u.size });
     }
     if (u?.sessionUpdate === "config_option_update" && Array.isArray(u.configOptions)) {
+      if (!entry.replaying) followNativeTier(sessionId, entry.configOptions, u.configOptions); // a load's steps are not Copilot's change
       entry.configOptions = u.configOptions;
       u = { ...u, configOptions: viewConfig(sessionId, u.configOptions) };
     }
@@ -1168,6 +1169,15 @@ async function setConfigOption(sessionId, entry, configId, value) {
   return res?.configOptions ?? null;
 }
 
+/** setConfigOption for another option (a model, an agent): Copilot may reset its own context option in the answer,
+ *  and the stored override follows that (followNativeTier). Not for the live context switch: it stores its own. */
+async function setConfigFollowing(sessionId, entry, configId, value) {
+  const before = entry.configOptions;
+  const updated = await setConfigOption(sessionId, entry, configId, value);
+  if (updated) followNativeTier(sessionId, before, updated);
+  return updated;
+}
+
 /** Create the approved child and link it to its parent. Never throws; resolves to what the card is told:
  *  { outcome: "created" } or { outcome: "failed", text, retry }. With `retry` the child's Copilot never started, the
  *  parent has been told nothing and the request stays open; every other failure ends as an outcome for the parent.
@@ -1217,7 +1227,7 @@ async function createChild(req, own = "", command = undefined, fields) {
       if (open.get(parentSessionId) === parent) return { outcome: "failed", text: config.error, retry: true };
       return failed("invalid", config.error);
     }
-    for (const { configId, value } of config.sets) await withDeadline(setConfigOption(sessionId, entry, configId, value), deadline, SETUP_TIMEOUT_TEXT);
+    for (const { configId, value } of config.sets) await withDeadline(setConfigFollowing(sessionId, entry, configId, value), deadline, SETUP_TIMEOUT_TEXT);
 
     send("delegation:created", { sessionId, cwd: child.cwd, configOptions: viewConfig(sessionId, entry.configOptions), parentSessionId, title: name });
     announced = true;
@@ -1468,18 +1478,71 @@ handle("sessions:setConfig", async (sessionId, configId, value) => {
   await keeper.whenIdle(sessionId);
   const entry = getOpen(sessionId);
   keeper.activity(sessionId); // a new model or agent has no fresh cache entry: the keeper waits for a turn
-  const updated = await setConfigOption(sessionId, entry, configId, value);
+  const updated = await setConfigFollowing(sessionId, entry, configId, value);
   return updated && viewConfig(sessionId, updated);
 });
 
-// a new context window takes a new Copilot process: the session is closed here and the renderer reopens it
-// (sessions:open starts Copilot with the new flag and replays the history). Refusals come back as { refused }
-// with the session untouched: the window must not close and reopen it (a delegated child may still be set up).
+// a new context window: live through Copilot's own context option when the open session has one that takes the tier
+// ({ configOptions }: no restart); otherwise it takes a new Copilot process: the session is closed here and the
+// renderer reopens it (sessions:open starts Copilot with the new flag and replays the history). Refusals come back as
+// { refused } with the session untouched: the window must not close and reopen it (a delegated child may still be
+// set up).
 handle("sessions:setContextTier", async (sessionId, value) => {
   if (!isSessionId(sessionId)) return { refused: `Invalid session id: ${sessionId}` };
   await keeper.whenIdle(sessionId);
-  return switchTier({ sessionId, value, tiers, ...restartGuards(sessionId) });
+  const res = await switchTier({ sessionId, value, tiers, ...restartGuards(sessionId), live: liveTierSwitch(sessionId, value) });
+  // a refusal carries the open session's options as they are now: an update during a failed live set may have shown
+  // the new tier already
+  const entry = open.get(sessionId);
+  return res.refused && entry?.configOptions.length ? { ...res, configOptions: viewConfig(sessionId, entry.configOptions) } : res;
 });
+
+const LIVE_TIER_TIMEOUT_MS = 15_000;
+const LIVE_TIER_TIMEOUT_TEXT = "Copilot did not answer in time. If it switches later, the header follows it.";
+
+/** Copilot changed its own context option by itself (a model change, a late answer): the stored override follows the
+ *  tier it runs now, so the select and the next start match it. Only a change of a value Copilot already had: an
+ *  option that first shows up (a model with a long-context tier) leaves the stored choice alone. */
+function followNativeTier(sessionId, before, after) {
+  const now = followedTier(before, after, sessionTier(sessionId));
+  if (!now) return;
+  try {
+    tiers.set(sessionId, now);
+  } catch (e) {
+    console.error(`[context] could not store the context window of ${sessionId}: ${e.message}`);
+  }
+}
+
+/** How the open session switches to the tier `value` stands for without a restart, or null: through Copilot's own
+ *  context option, when it has one with a value for that tier. */
+function liveTierSwitch(sessionId, value) {
+  const entry = open.get(sessionId);
+  const native = nativeContextOption(entry?.configOptions);
+  const target = nativeValueFor(native, effectiveTier(value, loadSettings().contextTier));
+  if (!entry || target == null) return null;
+  return async () => {
+    keeper.activity(sessionId); // another context window has no fresh cache entry: the keeper waits for a turn
+    historyBusy.add(sessionId); // as a restart: a delete or another restart is refused meanwhile
+    try {
+      const before = entry.configOptions;
+      const set = target === native.currentValue ? null : setConfigOption(sessionId, entry, native.id, target);
+      const updated = set && (await withDeadline(set, Date.now() + LIVE_TIER_TIMEOUT_MS, LIVE_TIER_TIMEOUT_TEXT).catch((e) => {
+        // a late answer still changes Copilot: the override follows it and the window gets the options
+        set.then((late) => {
+          if (!late || open.get(sessionId) !== entry) return;
+          followNativeTier(sessionId, before, late);
+          send("acp:update", { sessionId, update: { sessionUpdate: "config_option_update", configOptions: viewConfig(sessionId, late) } });
+        }, () => {});
+        throw e;
+      }));
+      // an answer without options: Copilot's option took the target (it did not throw), as the view must show
+      if (set && !updated) entry.configOptions = entry.configOptions.map((o) => (o?.id === native.id ? { ...o, currentValue: target } : o));
+      return viewConfig(sessionId, updated ?? entry.configOptions);
+    } finally {
+      historyBusy.delete(sessionId);
+    }
+  };
+}
 
 /** What sessions:setContextTier and sessions:setPrompt share: the refusals that leave the session untouched, and the
  *  close (marked as a history op while it runs, so a delete or another restart is refused meanwhile). */
