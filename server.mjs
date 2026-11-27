@@ -1,4 +1,5 @@
 // copilot-relay broker: registry + router for Copilot sessions, GUI, MCP endpoint and extension API.
+import { execFileSync } from "node:child_process";
 import http from "node:http";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
@@ -10,9 +11,40 @@ import { Delegation } from "./src/delegation.mjs";
 import { DelegationStore } from "./src/delegation-store.mjs";
 import { CommsLog } from "./src/comms-log.mjs";
 import { linksRoutes } from "./src/links-api.mjs";
-import { NameStore, randomName } from "./src/name-store.mjs";
+import { NameStore, randomName, stateFile } from "./src/name-store.mjs";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
+
+// The broker's log file (COPILOT_RELAY_LOG_FILE, "" for none; default broker.log in the state folder): a broker that
+// the app or the extension starts has no console (its output is ignored). The module is the app's (electron/); a copy
+// of the broker without that folder runs without the file.
+const LOG_FILE = process.env.COPILOT_RELAY_LOG_FILE ?? stateFile("broker.log");
+const fileLog = LOG_FILE
+  ? await import("./electron/main-log.mjs").then(
+      ({ createFileLog, teeConsole }) => {
+        const log = createFileLog(LOG_FILE);
+        teeConsole(log);
+        return log;
+      },
+      () => null,
+    )
+  : null;
+if (fileLog) process.on("uncaughtExceptionMonitor", (err, origin) => fileLog.write("error", [`[broker] ${origin}:`, err]));
+
+/** Which broker this is, for the log and the app's log (registered): `git describe` of its folder, or null. */
+const BUILD = (() => {
+  try {
+    return execFileSync("git", ["describe", "--tags", "--always", "--dirty"], { cwd: ROOT, encoding: "utf8", timeout: 3000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] }).trim() || null;
+  } catch {
+    return null;
+  }
+})();
+/** The ids an event carries, for a trace line (never its text). */
+const idsOf = (data) => {
+  const id = data?.deliveryId ?? data?.requestId ?? data?.event?.id ?? data?.id;
+  return id ? ` ${id}` : "";
+};
+let streamSeq = 0;
 const configPath = process.argv[2] ?? path.join(ROOT, "relay.config.json");
 const config = JSON.parse(await readFile(configPath, "utf8").catch(() => "{}"));
 
@@ -358,18 +390,30 @@ const server = http.createServer(async (req, res) => {
         // only the desktop app registers with an app:<uuid> alias; it alone can show reopen cards
         const app = /^app:/.test(q.get("alias") ?? "");
         sse(res);
+        // every stream has a number in the log: a session's reconnects show as separate streams
+        const sid = `s${++streamSeq}`;
+        const trace = (text) => console.info(`[stream ${sid}] ${text}`);
+        trace(`open ${key}${q.get("alias") ? ` alias=${q.get("alias")}` : ""}${q.get("caps") ? ` caps=${q.get("caps")}` : ""}${q.get("parent") ? ` parent=${q.get("parent")}` : ""}`);
         // true once the event is handed to the stream. res.write() answers false when its buffer is over the limit
         // (16 KiB on Windows): the event is sent all the same, so that is not "not delivered" (Registry would keep a
         // second copy in the inbox and send it again on the session's next registration)
         const write = (event, data) => {
-          if (res.destroyed) return false;
+          if (res.destroyed) {
+            trace(`${event}${idsOf(data)} for ${key} not sent: the stream is closed`);
+            return false;
+          }
           res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+          trace(`→ ${event}${idsOf(data)} ${key}`);
           return true;
         };
         // unlike `write`, `control` must throw on a dead stream: Delegation treats only a throw as "not delivered"
         const control = (event, data) => {
-          if (res.destroyed) throw new Error("stream closed");
+          if (res.destroyed) {
+            trace(`${event}${idsOf(data)} for ${key} not sent: the stream is closed`);
+            throw new Error("stream closed");
+          }
           res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+          trace(`→ ${event}${idsOf(data)} ${key}`);
         };
         const linkCards = (q.get("caps") ?? "").split(",").includes("links");
         const parent = q.get("parent");
@@ -399,7 +443,7 @@ const server = http.createServer(async (req, res) => {
           }
         }
         persist(peer);
-        write("registered", { name: peer.name, parentKey: peer.parentKey ?? null, reported: delegationStore.isReported(key), adopted: delegationStore.isAdopted(key) });
+        write("registered", { name: peer.name, parentKey: peer.parentKey ?? null, reported: delegationStore.isReported(key), adopted: delegationStore.isAdopted(key), broker: BUILD });
         delegation.attached(key);
         const ping = setInterval(() => res.write(": ping\n\n"), 25_000);
         req.on("close", () => {
@@ -407,14 +451,18 @@ const server = http.createServer(async (req, res) => {
           registry.off("peer_renamed", onRenamed);
           // only this stream's own session: a newer stream of the same key (a reconnect whose old request closes
           // only now) keeps the session online
-          if (registry.get(key)?.control === control) registry.disconnect(key);
+          const current = registry.get(key)?.control === control;
+          trace(`closed ${key}${current ? "" : " (an older stream: the session's newer one stays)"}`);
+          if (current) registry.disconnect(key);
         });
         return;
       }
 
       case "POST /api/peer/send": {
         const { key, to, text } = (await readBody(req)) ?? {};
-        return json(res, 200, { result: registry.send(key, to, text) });
+        const result = registry.send(key, to, text);
+        console.info(`[api] send from ${key} to ${to}: ${String(result).split("\n")[0].slice(0, 200)}`);
+        return json(res, 200, { result });
       }
 
       case "POST /api/peer/rename": {
@@ -466,6 +514,7 @@ server.on("error", (e) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`copilot-relay broker: http://${HOST}:${PORT}  (MCP: /mcp, default cwd: ${DEFAULT_CWD})`);
+  console.info(`[broker] ${BUILD ?? "unknown build"} (pid ${process.pid}, Node ${process.version}, ${process.platform}); log: ${fileLog ? LOG_FILE : "none"}`);
   for (const s of config.startupSessions ?? []) {
     createAcpSession(s, { stableKey: true }).then(
       () => console.log(`  ✓ ${s.name}`),

@@ -4258,7 +4258,12 @@ function flushEarly(v) {
   for (const fn of early.get(v.sessionId) ?? []) fn(v);
   early.delete(v.sessionId);
 }
-api.onRelayMessage((m) => forView(m.sessionId, (v) => v.incoming(m)));
+api.onRelayMessage((m) => {
+  // a message with no view is not on screen: said in the log (main.log takes the window's warnings)
+  if (!views.has(m.sessionId))
+    console.warn(`[relay] message ${m.deliveryId ?? "(no id)"} from ${m.from}: no view for session ${m.sessionId}${deletedIds.has(m.sessionId) ? " (deleted, dropped)" : " (kept until it opens)"}`);
+  forView(m.sessionId, (v) => v.incoming(m));
+});
 api.onRelayStatus((s) => forView(s.sessionId, (v) => v.relayStatus(s)));
 
 // delegated sessions: only the app's approval answers a request (see delegation:answer in main)

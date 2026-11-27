@@ -39,6 +39,7 @@ export function linksRoutes({ delegation, comms, registry, log = console.log }) 
       const peers = {};
       for (const k of new Set([...keys, ...events.flatMap((e) => [e.fromKey, e.toKey])]))
         if (isKey(k) && (k !== key || events.length || delegation.store.linkOf(k) || registry?.get(k))) peers[k] = peerInfo(k);
+      log(`[api] comms for ${key}: ${events.length} event(s) of ${keys.length} session(s)${comms ? "" : " (no communication log)"}`);
       return { status: 200, json: { root: keys.includes(root) ? root : key, keys, events, peers } };
     },
     "GET /api/comms/text": ({ id } = {}) => {

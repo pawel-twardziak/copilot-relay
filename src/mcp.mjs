@@ -12,6 +12,12 @@ import { z } from "zod";
 import { childCommandArgs } from "./child-command.mjs";
 
 const text = (t) => ({ content: [{ type: "text", text: t }] });
+/** A relay tool's answer, also as a line in the broker's log: who called it and what it answered (never what was sent). */
+const traced = (tool, key, answer) => {
+  const first = String(answer).split("\n")[0];
+  console.info(`[mcp] ${tool} from ${key ?? "(unregistered)"}: ${first.length > 200 ? `${first.slice(0, 200)}…` : first}`);
+  return text(answer);
+};
 const IDLE_MS = 30 * 60_000;
 const FOLDER_MAX = 4096;
 const PROMPT_MAX = 20000;
@@ -94,7 +100,7 @@ function buildServer(registry, getKey, { mailbox, delegation = null, fixedKey = 
         text: z.string().describe("Message content"),
       },
     },
-    async ({ to, text: t }) => text(registry.send(getKey(), to, t)),
+    async ({ to, text: t }) => traced("send_message", getKey(), registry.send(getKey(), to, t)),
   );
 
   if (delegation && delegationToolsAllowed(fixedKey)) {
@@ -132,10 +138,10 @@ function buildServer(registry, getKey, { mailbox, delegation = null, fixedKey = 
       },
       async (input) => {
         const key = getKey();
-        if (!key) return text("You are not registered with the relay broker.");
+        if (!key) return traced("create_session", key, "You are not registered with the relay broker.");
         const { request, refused } = createSessionInput(input);
-        if (refused) return text(refused);
-        return text(delegation.requestCreate(key, request));
+        if (refused) return traced("create_session", key, refused);
+        return traced("create_session", key, delegation.requestCreate(key, request));
       },
     );
     server.registerTool(
@@ -150,7 +156,7 @@ function buildServer(registry, getKey, { mailbox, delegation = null, fixedKey = 
       async ({ name }) => {
         const key = getKey();
         if (!key) return text("You are not registered with the relay broker.");
-        return text(delegation.requestLink(key, "adopt", name));
+        return traced("adopt_session", key, delegation.requestLink(key, "adopt", name));
       },
     );
     server.registerTool(
@@ -165,7 +171,7 @@ function buildServer(registry, getKey, { mailbox, delegation = null, fixedKey = 
       async ({ name }) => {
         const key = getKey();
         if (!key) return text("You are not registered with the relay broker.");
-        return text(delegation.requestLink(key, "release", name));
+        return traced("release_session", key, delegation.requestLink(key, "release", name));
       },
     );
     server.registerTool(
@@ -178,7 +184,7 @@ function buildServer(registry, getKey, { mailbox, delegation = null, fixedKey = 
       async ({ text: t }) => {
         const key = getKey();
         if (!key) return text("You are not registered with the relay broker.");
-        return text(delegation.report(key, t));
+        return traced("report_result", key, delegation.report(key, t));
       },
     );
   }

@@ -3,6 +3,9 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { RelayClient } from "../../extension/copilot-relay/relay-client.mjs";
 import { startBroker, until } from "./broker-helper.mjs";
 
 // One event over the stream's write buffer on every platform (16 KiB on Windows, 64 KiB elsewhere): the broker
@@ -99,4 +102,43 @@ test("an older stream of a session that closes after a newer one registered does
   assert.match(answer, / delivered\./);
   await until(() => newer.got.some((m) => m.text === "after the old close"), "the message on the newer stream");
   assert.deepEqual(texts(older.got), []);
+});
+
+test("the broker's log traces streams and events by id, never a message's text; the client traces what it got", async (t) => {
+  const b = await startBroker(t);
+  const sender = await b.connect(newKey(), { name: "sender" });
+  const key = newKey();
+  const lines = [];
+  const client = new RelayClient({ url: b.url, key, cwd: b.tmp, name: "traced", onMessage: () => {}, trace: (l) => lines.push(l) });
+  t.after(() => client.stop());
+  client.start();
+  await until(() => lines.some((l) => l.startsWith("← registered as traced")), "the client's registration");
+  assert.match(await sender.client.send(client.name, "secret words"), / delivered\./);
+  await until(() => lines.some((l) => l.startsWith("← message")), "the message on the client");
+  client.stop();
+  const log = () => readFileSync(path.join(b.tmp, "broker.log"), "utf8");
+  await until(() => log().includes(`closed ${key}`), "the stream's close in the log");
+  const text = log();
+  assert.match(text, /\[broker\] .* \(pid \d+, Node v/);
+  assert.match(text, new RegExp(`\\[stream s\\d+\\] open ${key}`));
+  assert.match(text, new RegExp(`\\[stream s\\d+\\] → message (\\S+ )?${key}`));
+  assert.match(text, /\[api\] send from cli:\S+ to traced\S*: Message to traced\S* delivered\./);
+  assert.ok(!text.includes("secret words"), "no message text in the log");
+  assert.ok(lines[0].startsWith(`connecting to ${b.url} as ${key}`));
+  assert.ok(lines.includes("stream open"));
+  assert.match(lines.find((l) => l.startsWith("← registered")), /\(broker (\S+|of an unknown build)\)$/);
+});
+
+test("the broker's log traces create_session from the tool call to the stream event", async (t) => {
+  const b = await startBroker(t);
+  const alias = `app:${randomUUID()}`;
+  const parent = await b.connect(newKey(), { name: "parent", alias });
+  const answer = await b.tool(alias, "create_session", { name: "child", task: "secret task" });
+  const requestId = answer.match(/^Request (\S+) sent/)?.[1];
+  assert.ok(requestId, answer);
+  const text = readFileSync(path.join(b.tmp, "broker.log"), "utf8");
+  assert.match(text, new RegExp(`\\[mcp\\] create_session from ${parent.key}: Request ${requestId} sent`));
+  assert.match(text, new RegExp(`\\[stream s\\d+\\] → session_request ${requestId} ${parent.key}`));
+  assert.match(text, new RegExp(`\\[stream s\\d+\\] open ${parent.key} alias=${alias}`));
+  assert.ok(!text.includes("secret task"));
 });
