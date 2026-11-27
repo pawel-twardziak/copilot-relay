@@ -156,7 +156,7 @@ function buildServer(registry, getKey, { mailbox, delegation = null, fixedKey = 
       },
       async ({ name }) => {
         const key = getKey();
-        if (!key) return text("You are not registered with the relay broker.");
+        if (!key) return traced("adopt_session", key, "You are not registered with the relay broker.");
         return traced("adopt_session", key, delegation.requestLink(key, "adopt", name));
       },
     );
@@ -171,7 +171,7 @@ function buildServer(registry, getKey, { mailbox, delegation = null, fixedKey = 
       },
       async ({ name }) => {
         const key = getKey();
-        if (!key) return text("You are not registered with the relay broker.");
+        if (!key) return traced("release_session", key, "You are not registered with the relay broker.");
         return traced("release_session", key, delegation.requestLink(key, "release", name));
       },
     );
@@ -184,7 +184,7 @@ function buildServer(registry, getKey, { mailbox, delegation = null, fixedKey = 
       },
       async ({ text: t }) => {
         const key = getKey();
-        if (!key) return text("You are not registered with the relay broker.");
+        if (!key) return traced("report_result", key, "You are not registered with the relay broker.");
         return traced("report_result", key, delegation.report(key, t));
       },
     );

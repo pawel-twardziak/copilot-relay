@@ -489,7 +489,7 @@ const server = http.createServer(async (req, res) => {
       case "POST /api/peer/send": {
         const { key, to, text } = (await readBody(req)) ?? {};
         const result = registry.send(key, to, text);
-        console.info(`[api] send from ${key} to ${to}: ${String(result).split("\n")[0].slice(0, 200)}`);
+        console.info(`[api] send from ${key} to ${String(to).split("\n")[0].slice(0, 80)}: ${String(result).split("\n")[0].slice(0, 200)}`);
         return json(res, 200, { result });
       }
 
@@ -508,7 +508,9 @@ const server = http.createServer(async (req, res) => {
 
       case "POST /api/peer/ack": {
         const { key, id, outcome } = (await readBody(req)) ?? {};
-        return json(res, 200, { ok: delegation.ack(key, id, outcome === "discarded" ? "discarded" : "taken") });
+        const ok = delegation.ack(key, id, outcome === "discarded" ? "discarded" : "taken");
+        console.info(`[api] ack ${id} from ${key}: ${outcome === "discarded" ? "discarded" : "taken"}${ok ? "" : " (not pending)"}`);
+        return json(res, 200, { ok });
       }
 
       // The app reports what happened to a session request. Deliberately no endpoint approves a request.

@@ -97,7 +97,8 @@ test("an older stream of a session that closes after a newer one registered does
   const older = await b.connect(newKey(), { name: "receiver" });
   const newer = await b.connect(older.key); // e.g. a reconnect whose old request the broker sees closing only now
   older.client.stop();
-  await new Promise((r) => setTimeout(r, 300)); // the broker handles the older stream's close
+  // the broker has handled the older stream's close (else the test would pass without the case)
+  await until(() => readFileSync(path.join(b.tmp, "broker.log"), "utf8").includes(`closed ${older.key} (an older stream`), "the older stream's close in the log");
   const answer = await sender.client.send(older.client.name, "after the old close");
   assert.match(answer, / delivered\./);
   await until(() => newer.got.some((m) => m.text === "after the old close"), "the message on the newer stream");

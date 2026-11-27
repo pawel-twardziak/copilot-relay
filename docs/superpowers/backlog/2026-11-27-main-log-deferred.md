@@ -1,8 +1,8 @@
 # Main process log file: deferred findings
 
 **Sources:** the final whole-branch review (Fable 5.2, medium) of the first part of `feat/main-log` (main.log), the
-re-review of its fix round (Opus 5.5, high), and the task review (Opus 5.5, high) of the second part (the broker's
-stream-close race and the relay trace). Execution was inline.
+re-review of its fix round (Opus 5.5, high), the task review (Opus 5.5, high) of the second part (the broker's
+stream-close race and the relay trace), and the final whole-branch review (Fable 5.2, medium). Execution was inline.
 
 Why the branch exists: on the corp PC (Windows, portable build) a parent's `create_session` returned
 `Request … sent; the user must approve it`, but no approval card appeared, the window's console was clean and the
@@ -28,6 +28,11 @@ None of these blocked the merge. Line numbers were taken at the review and may d
 - A `→` line says when the bytes did not leave at once (`buffered N bytes`): a stream that is dead but not closed grows.
 - `comms` and `links_changed` are not traced per stream (they repeated N times per message, N = open app sessions).
 - A refused `create_session` command is not echoed into the log (the refusal quotes a word of the model's command).
+- `[api] send` cuts the model-written `to` (first line, 80 characters); acks are traced (`[api] ack <id> from <key>:
+  taken|discarded`), so "shown and taken" can be told from "reached the window, never taken"; main says when a message
+  was handed to the window; every relay tool's "not registered" answer is traced.
+- The stream-close race test waits for the broker's "older stream" line instead of a fixed 300 ms (it could pass
+  without the case).
 
 ## A. Worth doing first
 
@@ -46,6 +51,12 @@ None of these blocked the merge. Line numbers were taken at the review and may d
      broker process that kept running old code across updates of the app and the checkout, a dead stream, or the race
      above; a restart clears all three. Next time: the `← registered … (broker <build>)` line in main.log shows which
      broker the sessions talk to, and broker.log the path of each event.
+   - Hypothesis (final review, not verified): a second client registering the same `cli:<sessionId>` key, e.g. the
+     copilot-relay extension loaded inside the app's Copilot on the corp PC. `upsert` gives the session that stream's
+     `control`; that client has no `onSessionRequest` (and injects messages into a Copilot the app does not show), so
+     "sent" is true and nothing reaches the window. In broker.log: two `open cli:<id>` lines with no `closed` between them,
+     the later one without `alias=app:…`, and `→ session_request` on a stream number other than the one in main.log's
+     `← registered … on stream sN`. Check on the corp PC whether the extension loads under the app.
    - Proposal: if the stream is the cause, the broker should treat a `control` write as delivered only after the app
      acknowledges it (or the app should re-register on a stalled stream), and `requestCreate` should say "not delivered"
      instead of "sent". Decide after the log of one real case.
@@ -89,6 +100,9 @@ None of these blocked the merge. Line numbers were taken at the review and may d
 5. **`git describe` delays the broker's start by up to 3 s** (`BUILD`, `server.mjs`), before `listen`. Acceptable with
    the clients' retry delays and broker-restart's 15 s health wait.
 
+7. **`GET /health` does not carry the broker's build**, and no README mentions `broker.log` or
+   `COPILOT_RELAY_LOG_FILE`: the path is found only through main.log's `← registered … its log: …` line.
+
 6. **The broker's log module lives in `electron/`.** `server.mjs` imports `./electron/main-log.mjs` dynamically; a copy
    of the broker without that folder (the broker-restart e2e test's copy) runs without broker.log. The canonical place
    would be `src/`, but the packaged app cannot import from it (only `electron/` is packaged).
@@ -105,4 +119,8 @@ None of these blocked the merge. Line numbers were taken at the review and may d
 3. **Volume (estimate):** about 2 + N broker.log lines per message to an app session (N open app sessions) since
    comms and links_changed are no longer traced; 5 MB rotates after thousands of messages. Each line is a synchronous
    append: 0.1–1 ms under real-time antivirus on Windows (not measured).
-4. **No UI check for Show Log File.** The menu item calls `shell`, which the UI-check driver cannot observe.
+4. **No UI check for Show Log File.**
+5. **`its log: \S+\)$` in `broker-stream.test.mjs`** fails on a temp path with a space (a Windows user name with one), if
+   these tests ever run there.
+6. **Not verified on Windows:** `safe.directory=${ROOT}` with backslashes (Git for Windows may match only the
+   forward-slash form); the `.git/HEAD` fallback covers a refusal. The menu item calls `shell`, which the UI-check driver cannot observe.

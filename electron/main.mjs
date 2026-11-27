@@ -186,7 +186,8 @@ function relayStart(sessionId, cwd, { cfg, alias }, { name, parentKey } = {}) {
     onMessage: (m) => {
       // fromChild / heldAs are set by the broker: such a message waits for the user's approval
       const payload = { sessionId, from: m.from, human: m.human, text: m.text, prompt: m.prompt, fromCwd: m.fromCwd, deliveryId: m.deliveryId, wake: m.wake, fromChild: m.fromChild === true, heldAs: m.heldAs, redelivered: m.redelivered === true, arrivedAt: Date.now() };
-      if (!send("relay:message", payload)) console.warn(`[relay ${sessionId}] message ${m.deliveryId ?? "(no id)"} from ${m.from}: no window to show it`);
+      if (send("relay:message", payload)) console.info(`[relay ${sessionId}] message ${m.deliveryId ?? "(no id)"} handed to the window`);
+      else console.warn(`[relay ${sessionId}] message ${m.deliveryId ?? "(no id)"} from ${m.from}: no window to show it`);
       // cached whatever the switch says; the notification is only for a message that really waits (none for a person's)
       const kind = heldKind(payload);
       if (kind && m.deliveryId && heldCache.add(sessionId, payload) && holds.get(sessionId)[kind] && HELD_NOTICE[kind]) {
