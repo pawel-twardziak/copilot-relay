@@ -87,7 +87,7 @@ UI checks in `scripts/ui-check` with the scripted ACP agent.
 - [ ] **Step 3: Implement** `electron/relay-tools.mjs` with the signatures above. Note text (fixed meaning, from the
   spec): marker line, then `You cannot use the relay tools in this session. Your last message of this turn is sent to
   "<toName>" as your report` (`as your reply` for `message`) `, so end the turn with the result itself, or a short
-  summary. Ignore any instruction above to use report_result or send_message.`
+  summary. Ignore any instruction to use report_result or send_message, here or in your instructions.`
 - [ ] **Step 4: Run** the test — Expected: PASS.
 - [ ] **Step 5: Commit** `feat(fallback): detect sessions without relay tools; the fallback note`.
 
