@@ -71,8 +71,11 @@ so the communication with the parent keeps working.
 Probe: scratch repo with `limited.agent.md` (`tools: ["read"]`) and `relayok.agent.md` (`tools: ["read", "relay/*"]`),
 a fake `relay` MCP server with the broker's tool names.
 
-- `session/set_config_option agent=<name>` writes `subagent.selected {agentName, agentDisplayName, tools}` at once,
-  before any prompt; `tools` is the agent's `tools:` list as written (`["read"]`, `["read","relay/*"]`).
+- `session/set_config_option agent=<name>` writes `subagent.selected {agentName, agentDisplayName, tools}` before any
+  prompt, but not at once: about 500 ms after the call answers (measured on CLI 1.0.117). So `fallback:note` waits for
+  it, re-reading the history every 100 ms for up to 2 s, but only when the app itself set this agent less than 2 s
+  ago (a delegated child's first prompt); otherwise it reads once. `tools` is the agent's `tools:` list as written
+  (`["read"]`, `["read","relay/*"]`).
   Switching back to the default writes `subagent.deselected {}`.
 - The next turn writes `session.tool_baseline` with `surface: "responses:capi:none:agent=<name>"` (empty name for the
   default) and the model's actual tools. A turn with no change since the last baseline writes none.
@@ -103,10 +106,15 @@ the probe showed a reliable signal before the prompt.
 `agentRelayTools(agent, events)` → `{ report_result, send_message }`, each `true` (has it) or `false`:
 
 - `agent` is the session's live `agent` option `currentValue`; no option or `""` → both `true` (the default agent).
-- Otherwise the last `subagent.selected` event with `agentName === agent`: a tool is `true` when its `tools` contains
-  `"*"`, `"relay/*"`, `"relay/<tool>"`, or a `relay-`/`relay_` spelling of the tool name.
-- No such event (agent chosen some other way): the last `session.tool_baseline` whose `surface` ends with
-  `agent=<agent>`: `true` when a tool named `^relay[-_]<tool>$` is listed.
+- Otherwise two events count: the last `subagent.selected` with `agentName === agent`, and the last
+  `session.tool_baseline` whose `surface` ends with `agent=<agent>`. Whichever of the two comes later in the history
+  decides: a stale selection does not beat a newer baseline (an agent file that gained `relay/*`, then a
+  `session/load`, which writes a new baseline but no new `subagent.selected`), and a newer selection beats an older
+  baseline.
+  - From `subagent.selected`: a tool is `true` when its `tools` contains `"*"`, `"relay/*"`, `"relay/<tool>"`, or a
+    `relay-`/`relay_` spelling of the tool name.
+  - From the baseline: `true` when a tool named `relay-<tool>` or `relay_<tool>` is listed.
+  - A `tools` that is not a list (an agent file without a `tools:` key) → both `true`.
 - Neither found → both `true` (unknown is treated as today's behaviour). *(builder's call)*
 
 Main reads `events.jsonl` (`electron/history.mjs`) when it needs the answer: before a prompt and at a turn's end. No
