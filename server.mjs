@@ -1,5 +1,6 @@
 // copilot-relay broker: registry + router for Copilot sessions, GUI, MCP endpoint and extension API.
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import http from "node:http";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
@@ -31,14 +32,38 @@ const fileLog = LOG_FILE
   : null;
 if (fileLog) process.on("uncaughtExceptionMonitor", (err, origin) => fileLog.write("error", [`[broker] ${origin}:`, err]));
 
-/** Which broker this is, for the log and the app's log (registered): `git describe` of its folder, or null. */
+/** Which broker this is, for the log and the app's log (registered): `git describe` of its own folder (never of a
+ *  repository above it; no index lock taken; a checkout owned by another user is read all the same), else the commit
+ *  .git/HEAD names, else null. */
 const BUILD = (() => {
   try {
-    return execFileSync("git", ["describe", "--tags", "--always", "--dirty"], { cwd: ROOT, encoding: "utf8", timeout: 3000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] }).trim() || null;
+    const out = execFileSync("git", ["--no-optional-locks", "-c", `safe.directory=${ROOT}`, "describe", "--tags", "--always", "--dirty"], {
+      cwd: ROOT,
+      encoding: "utf8",
+      timeout: 3000,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "ignore"],
+      env: { ...process.env, GIT_CEILING_DIRECTORIES: path.dirname(ROOT) },
+    }).trim();
+    if (out) return out;
+  } catch {
+    /* no git, or not a checkout: read HEAD */
+  }
+  try {
+    const head = readFileSync(path.join(ROOT, ".git", "HEAD"), "utf8").trim();
+    const ref = head.match(/^ref: (.+)$/)?.[1];
+    if (!ref) return head.slice(0, 12) || null;
+    try {
+      return `${ref.replace(/^refs\/heads\//, "")}@${readFileSync(path.join(ROOT, ".git", ref), "utf8").trim().slice(0, 12)}`;
+    } catch {
+      return ref.replace(/^refs\/heads\//, ""); // a packed ref: the branch at least
+    }
   } catch {
     return null;
   }
 })();
+// events every app stream gets for any change (live panel updates): not traced per stream, they would repeat N times
+const UNTRACED = new Set(["comms", "links_changed"]);
 /** The ids an event carries, for a trace line (never its text). */
 const idsOf = (data) => {
   const id = data?.deliveryId ?? data?.requestId ?? data?.event?.id ?? data?.id;
@@ -397,13 +422,17 @@ const server = http.createServer(async (req, res) => {
         // true once the event is handed to the stream. res.write() answers false when its buffer is over the limit
         // (16 KiB on Windows): the event is sent all the same, so that is not "not delivered" (Registry would keep a
         // second copy in the inbox and send it again on the session's next registration)
+        // "→" says the event was handed to the stream; "buffered" counts bytes the client has not taken yet, which
+        // keeps growing on a stream that is dead but not closed
+        const sent = (event, data, flushed) => {
+          if (!UNTRACED.has(event)) trace(`→ ${event}${idsOf(data)} ${key}${flushed ? "" : ` (buffered ${res.writableLength} bytes)`}`);
+        };
         const write = (event, data) => {
           if (res.destroyed) {
             trace(`${event}${idsOf(data)} for ${key} not sent: the stream is closed`);
             return false;
           }
-          res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-          trace(`→ ${event}${idsOf(data)} ${key}`);
+          sent(event, data, res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
           return true;
         };
         // unlike `write`, `control` must throw on a dead stream: Delegation treats only a throw as "not delivered"
@@ -412,8 +441,7 @@ const server = http.createServer(async (req, res) => {
             trace(`${event}${idsOf(data)} for ${key} not sent: the stream is closed`);
             throw new Error("stream closed");
           }
-          res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-          trace(`→ ${event}${idsOf(data)} ${key}`);
+          sent(event, data, res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
         };
         const linkCards = (q.get("caps") ?? "").split(",").includes("links");
         const parent = q.get("parent");
@@ -443,7 +471,7 @@ const server = http.createServer(async (req, res) => {
           }
         }
         persist(peer);
-        write("registered", { name: peer.name, parentKey: peer.parentKey ?? null, reported: delegationStore.isReported(key), adopted: delegationStore.isAdopted(key), broker: BUILD });
+        write("registered", { name: peer.name, parentKey: peer.parentKey ?? null, reported: delegationStore.isReported(key), adopted: delegationStore.isAdopted(key), broker: BUILD, stream: sid, brokerLog: fileLog ? LOG_FILE : null });
         delegation.attached(key);
         const ping = setInterval(() => res.write(": ping\n\n"), 25_000);
         req.on("close", () => {

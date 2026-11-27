@@ -13,8 +13,8 @@ import { childCommandArgs } from "./child-command.mjs";
 
 const text = (t) => ({ content: [{ type: "text", text: t }] });
 /** A relay tool's answer, also as a line in the broker's log: who called it and what it answered (never what was sent). */
-const traced = (tool, key, answer) => {
-  const first = String(answer).split("\n")[0];
+const traced = (tool, key, answer, logged = answer) => {
+  const first = String(logged).split("\n")[0];
   console.info(`[mcp] ${tool} from ${key ?? "(unregistered)"}: ${first.length > 200 ? `${first.slice(0, 200)}…` : first}`);
   return text(answer);
 };
@@ -140,7 +140,8 @@ function buildServer(registry, getKey, { mailbox, delegation = null, fixedKey = 
         const key = getKey();
         if (!key) return traced("create_session", key, "You are not registered with the relay broker.");
         const { request, refused } = createSessionInput(input);
-        if (refused) return traced("create_session", key, refused);
+        // a refusal can quote the model's words (a part of its command): the log says only that it was refused
+        if (refused) return traced("create_session", key, refused, "Not sent: the request was refused (its text is not logged)");
         return traced("create_session", key, delegation.requestCreate(key, request));
       },
     );

@@ -281,11 +281,10 @@ export class RelayClient {
         if (!data) continue;
         const payload = JSON.parse(data);
         const id = payload?.deliveryId ?? payload?.requestId ?? payload?.event?.id ?? payload?.id;
-        this.trace(
-          event === "registered"
-            ? `← registered as ${payload.name} (broker ${payload.broker ?? "of an unknown build"})`
-            : `← ${event}${id ? ` ${id}` : ""}`,
-        );
+        // comms and links_changed come for every change anywhere (live panel updates): not traced
+        if (event === "registered")
+          this.trace(`← registered as ${payload.name} on stream ${payload.stream ?? "?"} (broker ${payload.broker ?? "of an unknown build"}, its log: ${payload.brokerLog ?? "none"})`);
+        else if (event !== "comms" && event !== "links_changed") this.trace(`← ${event}${id ? ` ${id}` : ""}`);
         if (event === "registered") {
           this.name = payload.name;
           this.requestedName = null;

@@ -126,7 +126,7 @@ test("the broker's log traces streams and events by id, never a message's text; 
   assert.ok(!text.includes("secret words"), "no message text in the log");
   assert.ok(lines[0].startsWith(`connecting to ${b.url} as ${key}`));
   assert.ok(lines.includes("stream open"));
-  assert.match(lines.find((l) => l.startsWith("← registered")), /\(broker (\S+|of an unknown build)\)$/);
+  assert.match(lines.find((l) => l.startsWith("← registered")), /on stream s\d+ \(broker (\S+|of an unknown build), its log: \S+\)$/);
 });
 
 test("the broker's log traces create_session from the tool call to the stream event", async (t) => {
