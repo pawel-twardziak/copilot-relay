@@ -1,6 +1,6 @@
 // The reply fallback in main: what a chain of prompts said, whether its last reply is forwarded, and the forwards
 // that wait for the owner's approval. No Electron imports (see docs/superpowers/specs/2026-11-27-relay-fallback-design.md).
-import { isRelayCall, neededTool } from "./relay-tools.mjs";
+import { agentRelayTools, isRelayCall, neededTool } from "./relay-tools.mjs";
 
 const ABORT_TEXT = "Info: Operation cancelled by user"; // the chunk Copilot writes for a cancelled turn
 const topLevel = (u) => !u?._meta?.["github.com/copilot"]?.agentId; // a subagent's updates carry its agentId
@@ -12,6 +12,22 @@ export function originOf(o) {
     return { kind: "relay", fromKey: o.fromKey, fromName: typeof o.fromName === "string" ? o.fromName : "" };
   }
   return null;
+}
+
+/**
+ * The relay tools of the session's current agent. `readEvents` reads the session's history as history.mjs's
+ * readEvents does ({ events, lines }); it is called only for a custom agent, and a read that fails means the tools
+ * are unknown, treated as present.
+ */
+export function relayToolsFor({ agent, readEvents }) {
+  if (!agent) return agentRelayTools(agent, null);
+  let events = null;
+  try {
+    events = readEvents().events;
+  } catch {
+    /* no readable history */
+  }
+  return agentRelayTools(agent, events);
 }
 
 /**

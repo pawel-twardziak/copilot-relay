@@ -21,9 +21,9 @@ import { createKeeperOptOut, createKeeperRunner } from "./cache-keeper-runner.mj
 import { JobScheduler } from "./scheduler.mjs";
 import { scheduleInfo } from "./jobs.mjs";
 import { PendingRequests, answerFields, cardStart, childPrompt, createdText, findModelOption, folderState, isRelayTool, linkCardOf, reloadWarning, resolveConfig, unreportedChildren, withDeadline } from "./delegation.mjs";
-import { createChainState, createPending, decideForward, originOf } from "./fallback.mjs";
+import { createChainState, createPending, decideForward, originOf, relayToolsFor } from "./fallback.mjs";
 import { createFallbackStore } from "./fallback-store.mjs";
-import { agentRelayTools, fallbackNote, neededTool } from "./relay-tools.mjs";
+import { fallbackNote, neededTool } from "./relay-tools.mjs";
 import { createHeldCache, createHoldStore, HELD_KINDS, heldKind } from "./held-replies.mjs";
 import { readLinksCache, writeLinksCache } from "./links-cache.mjs";
 import { listAllPages } from "./session-list.mjs";
@@ -1365,15 +1365,7 @@ const parentKeyOf = (entry) => (entry.parentSessionId ? `cli:${entry.parentSessi
 /** The relay tools of the session's current agent, read now: no cache an agent change could leave stale. */
 function relayToolsOf(sessionId, entry) {
   const agent = entry.configOptions?.find((o) => o.id === "agent")?.currentValue;
-  let events = null;
-  if (agent) {
-    try {
-      events = readEvents(sessionDir(sessionId));
-    } catch {
-      /* no readable history: the agent's tools are unknown, treated as having them */
-    }
-  }
-  return agentRelayTools(agent, events);
+  return relayToolsFor({ agent, readEvents: () => readEvents(sessionDir(sessionId)) });
 }
 
 /** The recipient's name for the note and the card: the sender's, else the parent's relay name, else its id. */

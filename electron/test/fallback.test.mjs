@@ -1,7 +1,11 @@
 // The reply fallback's chain state, its turn-end decision and the pending forwards (electron/fallback.mjs).
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createChainState, createPending, decideForward, originOf } from "../fallback.mjs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { createChainState, createPending, decideForward, originOf, relayToolsFor } from "../fallback.mjs";
+import { readEvents } from "../history.mjs";
 
 const chunk = (text, agentId) => ({
   sessionUpdate: "agent_message_chunk",
@@ -167,6 +171,35 @@ test("pending: add, take, list, drop", () => {
   p.drop("s");
   assert.deepEqual(p.list("s"), []);
   assert.equal(p.list("t").length, 1);
+});
+
+test("relayToolsFor reads the agent's tools from the real readEvents shape", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "fallback-events-"));
+  try {
+    const events = [
+      { type: "session.start", data: {} },
+      { type: "subagent.selected", data: { agentName: "limited", agentDisplayName: "limited", tools: ["read"] } },
+      { type: "subagent.selected", data: { agentName: "relayok", agentDisplayName: "relayok", tools: ["read", "relay/*"] } },
+    ];
+    writeFileSync(path.join(dir, "events.jsonl"), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
+    const read = () => readEvents(dir); // { events, lines }
+    assert.deepEqual(relayToolsFor({ agent: "limited", readEvents: read }), none);
+    assert.deepEqual(relayToolsFor({ agent: "relayok", readEvents: read }), both);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("relayToolsFor: a reader that throws means both tools; the default agent reads nothing", () => {
+  const throwing = () => {
+    throw new Error("no history");
+  };
+  assert.deepEqual(relayToolsFor({ agent: "limited", readEvents: throwing }), both);
+  let reads = 0;
+  const reader = () => (reads++, { events: [], lines: [] });
+  assert.deepEqual(relayToolsFor({ agent: "", readEvents: reader }), both);
+  assert.deepEqual(relayToolsFor({ agent: undefined, readEvents: reader }), both);
+  assert.equal(reads, 0);
 });
 
 test("pending: a taken forward put back keeps its id", () => {
