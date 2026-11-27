@@ -13,7 +13,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { AcpConnection } from "./acp.mjs";
 import { createCommsForward } from "./comms-forward.mjs";
 import { copilotEnv, isNotFoundExit, normalizeCommand, resolveCommand, shellLine, startFailureText } from "./copilot-command.mjs";
-import { countUserMessages, deleteSession, describeCut, forkSession, isSessionId, messageTimes, purgeDeleted, readEvents, sessionCreatedAt, sessionDir, truncateSession } from "./history.mjs";
+import { countUserMessages, deleteSession, describeCut, forkSession, isSessionId, messageTimes, purgeDeleted, readEvents, sessionCreatedAt, sessionDir, sessionStateDir, truncateSession } from "./history.mjs";
 import { createContentSearch } from "./content-search.mjs";
 import { createLastActivity } from "./last-activity.mjs";
 import { createCopilotRuntime } from "./copilot-runtime.mjs";
@@ -1412,7 +1412,7 @@ function chainPrompt(entry, meta) {
 
 /** A forward waiting for the owner: kept per session, shown as a card in the session's view. */
 function offerForward(sessionId, f, extra = {}) {
-  const id = pendingForwards.add(sessionId, f);
+  const id = pendingForwards.add(sessionId, { ...f, ...extra });
   send("relay:fallback", { sessionId, id, toName: f.toName, kind: f.kind, text: f.text, ...extra });
 }
 
@@ -1461,26 +1461,27 @@ handle("fallback:chainEnded", async (sessionId, seq) => {
 // arrive (an error) stays pending; null when it was answered already. Don't send drops the forward also in a view
 // whose session is no longer open (its process exited); Send needs the open session.
 handle("fallback:answer", async (sessionId, id, approved) => {
-  const f = pendingForwards.take(checkedSessionId(sessionId), id);
+  checkedSessionId(sessionId);
+  if (approved !== true) return pendingForwards.take(sessionId, id) ? {} : null;
+  const f = pendingForwards.claim(sessionId, id); // stays on disk until the send went through
   if (!f) return null;
-  if (approved !== true) return {};
   const entry = open.get(sessionId);
   if (!entry) {
-    pendingForwards.add(sessionId, f); // not sent: the card stays, Send tries again once the session is open
+    pendingForwards.release(sessionId, id); // not sent: the card stays, Send tries again once the session is open
     throw new Error("This session is not open.");
   }
-  const keep = () => open.get(sessionId) === entry && pendingForwards.add(sessionId, f);
   let r;
   try {
     r = await sendForward(sessionId, entry, f);
   } catch (e) {
-    keep();
+    pendingForwards.release(sessionId, id, { old: undefined, error: friendly(e) });
     throw e;
   }
   if (r.old) {
-    keep();
+    pendingForwards.release(sessionId, id, { old: true, error: undefined });
     return { old: true };
   }
+  pendingForwards.settle(sessionId, id);
   return { result: r.result };
 });
 // the session's pending forwards, for its view when it opens again
@@ -1490,7 +1491,9 @@ handle("fallback:list", (sessionId) => {
   try {
     sessionDir(sessionId);
   } catch (e) {
-    gone = e.code === "ENOSESSION"; // deleted outside the app: its forwards cannot be sent any more
+    // deleted outside the app: its forwards cannot be sent any more (the folder is checked once more, so a passing
+    // lstat or realpath error never drops them)
+    gone = e.code === "ENOSESSION" && !existsSync(path.join(sessionStateDir(), sessionId));
   }
   if (gone) {
     pendingForwards.drop(sessionId);

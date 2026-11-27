@@ -382,3 +382,63 @@ test("file-backed pending: a garbled file reads as empty, an unwritable one keep
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("file-backed pending: a claimed forward stays on disk until it is settled; a second claim gets null", () => {
+  const dir = tmp();
+  const file = path.join(dir, "fallback-pending.json");
+  try {
+    const p = createPending({ file });
+    const a = p.add("s", fwd("one"));
+    const f = p.claim("s", a);
+    assert.equal(f.text, "one");
+    assert.equal(p.claim("s", a), null, "a second answer during the send");
+    assert.equal(p.take("s", a), null);
+    assert.deepEqual(p.list("s"), [], "not offered while it is being sent");
+    p.add("s", fwd("two")); // another write meanwhile must keep the claimed one on disk
+    assert.deepEqual(createPending({ file }).list("s").map((x) => x.text), ["one", "two"], "a quit mid-send keeps it");
+    p.settle("s", a);
+    assert.deepEqual(createPending({ file }).list("s").map((x) => x.text), ["two"]);
+    assert.equal(p.claim("s", a), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("file-backed pending: release puts a claimed forward back with its flags; a drop meanwhile wins", () => {
+  const dir = tmp();
+  const file = path.join(dir, "fallback-pending.json");
+  try {
+    const p = createPending({ file });
+    const a = p.add("s", fwd("one", { old: true }));
+    p.claim("s", a);
+    p.release("s", a, { old: undefined, error: "no answer" });
+    assert.deepEqual(createPending({ file }).list("s"), [{ id: a, toKey: "cli:p", toName: "boss", kind: "report", text: "one", error: "no answer" }]);
+    p.claim("s", a);
+    p.drop("s");
+    p.release("s", a, { old: true });
+    assert.deepEqual(p.list("s"), []);
+    assert.deepEqual(createPending({ file }).list("s"), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("file-backed pending: a garbled file is logged once", () => {
+  const dir = tmp();
+  try {
+    const file = path.join(dir, "garbled.json");
+    writeFileSync(file, "{ not json");
+    const warn = console.warn;
+    const warned = [];
+    console.warn = (m) => warned.push(m);
+    try {
+      createPending({ file });
+      createPending({ file: path.join(dir, "missing.json") }); // a missing file is no news
+    } finally {
+      console.warn = warn;
+    }
+    assert.equal(warned.length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

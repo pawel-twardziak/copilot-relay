@@ -72,6 +72,9 @@ None of these blocked the merge. Line numbers were taken at the review and may d
 7. A failed `fallbackNote` IPC is swallowed (`.catch(() => null)` in `runPrompt`) without a trace.
 8. A Stop during the note request acknowledges a relay message Copilot never saw (`runPrompt`, app.js ~3046).
 9. A custom-agent session before its `agent` option arrives gets no note; main may still forward.
+9a. Stored pending records are checked only for a string `id` (`createPending`, `electron/fallback.mjs`); a hand-edited or damaged record with other fields missing reaches the card as is.
+9b. Forwards of a session that is never opened again stay in `fallback-pending.json`; they are dropped only when the session is listed (`fallback:list`), not at start-up.
+9c. The `old` / `error` flags of a forward are covered by the UI check `fallback-restart-flags` only through an edited file; no check makes the broker refuse a forward (no 404 or failing post can be provoked), so the store of the flags in `offerForward` and the release in `fallback:answer` are unverified by a live run.
 10. After a Stop that pauses the queue and a later ▶, the resumed answers and the continue are not forwarded (ruling:
     a Stop is the owner taking over).
 11. A failed mid-turn send (before its switch point) suppresses the forward of a task that finished

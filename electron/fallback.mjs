@@ -2,6 +2,7 @@
 // that wait for the owner's approval. No Electron imports (see docs/superpowers/specs/2026-11-27-relay-fallback-design.md).
 import { agentRelayTools, isRelayCall, neededTool } from "./relay-tools.mjs";
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { jsonFileMap } from "./json-file-map.mjs";
 
 const ABORT_TEXT = "Info: Operation cancelled by user"; // the chunk Copilot writes for a cancelled turn
@@ -126,7 +127,20 @@ export function createPending({ file } = {}) {
   let n = 0;
   const store = file ? jsonFileMap(file, "fallback") : null;
   let warned = false;
+  const inflight = new Set(); // "sessionId\0id" of the forwards being sent: still in the map and on disk
+  const key = (sessionId, id) => `${sessionId}\0${id}`;
   if (store) {
+    let raw = null;
+    try {
+      raw = readFileSync(file, "utf8");
+    } catch {} // no file yet
+    if (raw !== null) {
+      try {
+        JSON.parse(raw);
+      } catch (e) {
+        console.warn(`[fallback] ${file} is not readable (${e.message}); starting with no pending forwards`);
+      }
+    }
     for (const [sessionId, list] of Object.entries(store.read())) {
       if (!Array.isArray(list)) continue;
       const m = new Map();
@@ -154,6 +168,7 @@ export function createPending({ file } = {}) {
     take(sessionId, id) {
       const m = bySession.get(sessionId);
       const f = m?.get(id) ?? null;
+      if (f && inflight.has(key(sessionId, id))) return null;
       if (f) {
         m.delete(id);
         if (!m.size) bySession.delete(sessionId);
@@ -161,8 +176,32 @@ export function createPending({ file } = {}) {
       }
       return f;
     },
-    list: (sessionId) => [...(bySession.get(sessionId)?.values() ?? [])],
+    /** Like take, but the forward stays in the map and on disk until settle (sent) or release (not sent): a quit
+     *  while it is being sent loses nothing. A second claim or take of it gets null; list does not show it. */
+    claim(sessionId, id) {
+      const f = bySession.get(sessionId)?.get(id) ?? null;
+      if (!f || inflight.has(key(sessionId, id))) return null;
+      inflight.add(key(sessionId, id));
+      return f;
+    },
+    /** The claimed forward went through: gone. */
+    settle(sessionId, id) {
+      inflight.delete(key(sessionId, id));
+      this.take(sessionId, id);
+    },
+    /** The claimed forward did not go: back in the list, with `patch` merged in (an undefined value removes a key). A
+     *  drop meanwhile wins. */
+    release(sessionId, id, patch = {}) {
+      inflight.delete(key(sessionId, id));
+      const f = bySession.get(sessionId)?.get(id);
+      if (!f) return;
+      for (const [k, v] of Object.entries(patch)) if (v === undefined) delete f[k];
+      else f[k] = v;
+      save();
+    },
+    list: (sessionId) => [...(bySession.get(sessionId)?.values() ?? [])].filter((f) => !inflight.has(key(sessionId, f.id))),
     drop(sessionId) {
+      for (const f of bySession.get(sessionId)?.values() ?? []) inflight.delete(key(sessionId, f.id));
       if (bySession.delete(sessionId)) save();
     },
   };
