@@ -15,6 +15,8 @@ None of these blocked the merge. Line numbers were taken at the review and may d
 - A chain runs through pumped answers to queued messages; no note request (and no await) for the default agent; a
   Stop during the note request skips the prompt.
 - Pending forwards survive a close and are dropped by a delete or a cut of the history.
+- `fallback:list` returns the `old` / `error` flags, so the "broker too old" line comes back after a reopen (v0.38.1).
+- Pending forwards are kept on disk (`fallback-pending.json`) and survive an app restart (v0.38.1).
 - The note waits up to 2 s for `subagent.selected` after the app set the agent (Copilot writes it ~500 ms late).
 - Don't send works in a dead view; no collecting between chains; a newer tool baseline beats an older agent
   selection; a Stop during the note request keeps the pending notes.
@@ -63,7 +65,6 @@ None of these blocked the merge. Line numbers were taken at the review and may d
    boolean, `electron/main.mjs`).
 3. `approveFallback` is always written by the settings save (`s.approveFallback !== false`); a form that omits it
    resets it to true. "Only when sent" (like `cacheKeeper`) would be more robust.
-4. `fallback:list` drops the `old` / `error` flags, so the "broker too old" line disappears after a reopen.
 5. `keep()` re-adds a failed forward only while `open.get(sessionId) === entry`: a send failing during a close,
    restart or truncate is lost silently.
 6. A cut of the history drops every pending forward of the session, also those whose reply survives the cut. Unknown

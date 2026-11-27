@@ -1,6 +1,8 @@
 // The reply fallback in main: what a chain of prompts said, whether its last reply is forwarded, and the forwards
 // that wait for the owner's approval. No Electron imports (see docs/superpowers/specs/2026-11-27-relay-fallback-design.md).
 import { agentRelayTools, isRelayCall, neededTool } from "./relay-tools.mjs";
+import { randomUUID } from "node:crypto";
+import { jsonFileMap } from "./json-file-map.mjs";
 
 const ABORT_TEXT = "Info: Operation cancelled by user"; // the chunk Copilot writes for a cancelled turn
 const topLevel = (u) => !u?._meta?.["github.com/copilot"]?.agentId; // a subagent's updates carry its agentId
@@ -115,24 +117,53 @@ export function decideForward({ snapshot, tools, parentKey, reported } = {}) {
   return { toKey: snapshot.origin.kind === "owner" ? parentKey : snapshot.origin.fromKey, kind: tool === "report_result" ? "report" : "message" };
 }
 
-/** Forwards waiting for approval, per session, in main memory. A taken forward added again keeps its id. */
-export function createPending() {
+/** Forwards waiting for approval, per session. Kept in main memory; with `file` they are also kept on disk
+ *  ({ [sessionId]: Forward[] }, in arrival order) and read once at the start, so they survive a restart. A write that
+ *  fails is logged once and never thrown (memory stays the source of truth); an unreadable file reads as empty. A taken
+ *  forward added again keeps its id; the ids of a file-backed set are UUIDs, unique across restarts. */
+export function createPending({ file } = {}) {
   const bySession = new Map(); // sessionId -> Map<id, forward>
   let n = 0;
+  const store = file ? jsonFileMap(file, "fallback") : null;
+  let warned = false;
+  if (store) {
+    for (const [sessionId, list] of Object.entries(store.read())) {
+      if (!Array.isArray(list)) continue;
+      const m = new Map();
+      for (const f of list) if (f && typeof f === "object" && typeof f.id === "string") m.set(f.id, f);
+      if (m.size) bySession.set(sessionId, m);
+    }
+  }
+  const save = () => {
+    if (!store) return;
+    try {
+      store.write(Object.fromEntries([...bySession].map(([sessionId, m]) => [sessionId, [...m.values()]])));
+    } catch (e) {
+      if (!warned) console.warn(`[fallback] could not write ${file}: ${e.message}`);
+      warned = true;
+    }
+  };
   return {
     add(sessionId, f) {
-      const id = f.id ?? `fb${++n}`;
+      const id = f.id ?? (store ? randomUUID() : `fb${++n}`);
       if (!bySession.has(sessionId)) bySession.set(sessionId, new Map());
       bySession.get(sessionId).set(id, { ...f, id });
+      save();
       return id;
     },
     take(sessionId, id) {
       const m = bySession.get(sessionId);
       const f = m?.get(id) ?? null;
-      if (f) m.delete(id);
+      if (f) {
+        m.delete(id);
+        if (!m.size) bySession.delete(sessionId);
+        save();
+      }
       return f;
     },
     list: (sessionId) => [...(bySession.get(sessionId)?.values() ?? [])],
-    drop: (sessionId) => void bySession.delete(sessionId),
+    drop(sessionId) {
+      if (bySession.delete(sessionId)) save();
+    },
   };
 }

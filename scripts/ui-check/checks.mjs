@@ -1494,6 +1494,38 @@ const fallbackChecks = [
     },
   },
   {
+    // the app quits with a card pending: kept in fallback-pending.json, listed by main after the relaunch, the card
+    // is back when the child opens, and Send still forwards the reply to the parent
+    name: "fallback-restart",
+    modes: ["off"],
+    scenario: FALLBACK_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      const { child, parent, parentName } = await fallbackChild(app);
+      await app.check(`!${VC(child)}.busy && ${VC(child)}.el.querySelectorAll(".fallback-card").length === 1`, "the card in the child");
+      const file = path.join(app.dir, "config", "copilot-relay-desktop", "fallback-pending.json");
+      assert.deepEqual(Object.keys(JSON.parse(readFileSync(file, "utf8"))), [child], "the forward on disk");
+      const dir = app.dir;
+      await app.close({ keep: true });
+      const again = await launch({ scenario: FALLBACK_SCENARIO, dir, broker: true });
+      try {
+        const listed = await again.ev(`api.fallbackList(${J(child)})`);
+        assert.deepEqual(listed.map((f) => [f.toName, f.kind, f.text]), [[parentName, "report", FB.RESULT]], "main lists the forward after the restart");
+        await again.ev(`openSession({ sessionId: ${J(parent)}, cwd: ${J(path.join(dir, parent))} })`, "the parent to reopen");
+        await again.check(`!!${VC(parent)} && ${relayConnected(parent)} && !${VC(parent)}.busy && !${VC(parent)}.resuming`, "the reopened parent");
+        await again.ev(`openSession({ sessionId: ${J(child)}, cwd: ${J(path.join(dir, child))} })`, "the child to reopen");
+        await again.check(`!!${VC(child)} && ${relayConnected(child)} && !${VC(child)}.busy && !${VC(child)}.resuming && ${VC(child)}.el.querySelectorAll(".fallback-card").length === 1`, "the card again");
+        assert.deepEqual(await forwardCards(again, child), [{ head: askedCard(parentName), text: FB.RESULT, line: null }]);
+        await sendForward(again, { parent, child, parentName }, FB.RESULT);
+        assert.deepEqual(await again.ev(`api.fallbackList(${J(child)})`), [], "nothing pending in main");
+        assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), {}, "nothing left on disk");
+      } finally {
+        await again.close();
+      }
+    },
+  },
+  {
     // "Delete this reply" under a pending card: the cut history no longer holds the reply, so the reopened view shows
     // no card (and main keeps no forward to send)
     name: "fallback-truncate",

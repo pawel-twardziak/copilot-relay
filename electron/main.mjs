@@ -102,10 +102,11 @@ const holds = createHoldStore(path.join(app.getPath("userData"), "held-replies.j
 const fallbackSwitches = createFallbackStore(path.join(app.getPath("userData"), "fallback-approval.json"));
 /** Does the forward of this session's reply wait for approval: its own switch, else the Settings default (on). */
 const fallbackApproval = (sessionId) => fallbackSwitches.get(sessionId) ?? loadSettings().approveFallback !== false;
-// forwarded replies waiting for that approval, per session; lost when the app quits (see fallback.mjs). Kept while the
-// session is closed (its view reopened, a restart, a process that ended): the reopened view shows them again. A cut of
-// the history (delete from a message, an edit) and a delete of the session drop them.
-const pendingForwards = createPending();
+// forwarded replies waiting for that approval, per session; kept on disk (fallback-pending.json), so a restart does not
+// lose them (see fallback.mjs). Kept while the session is closed (its view reopened, a restart, a process that ended):
+// the reopened view shows them again. A cut of the history (delete from a message, an edit), a delete of the session
+// and a session no longer in Copilot's state (fallback:list) drop them.
+const pendingForwards = createPending({ file: path.join(app.getPath("userData"), "fallback-pending.json") });
 const heldCache = createHeldCache();
 const HELD_NOTICE = { child: "A sub-session replied", parent: "Your parent session sent a message", other: "Another session sent a message" };
 const sessionTier = (sessionId) => effectiveTier(tiers.get(sessionId), loadSettings().contextTier);
@@ -1483,7 +1484,20 @@ handle("fallback:answer", async (sessionId, id, approved) => {
   return { result: r.result };
 });
 // the session's pending forwards, for its view when it opens again
-handle("fallback:list", (sessionId) => pendingForwards.list(checkedSessionId(sessionId)).map(({ id, toName, kind, text }) => ({ id, toName, kind, text })));
+handle("fallback:list", (sessionId) => {
+  checkedSessionId(sessionId);
+  let gone = false;
+  try {
+    sessionDir(sessionId);
+  } catch (e) {
+    gone = e.code === "ENOSESSION"; // deleted outside the app: its forwards cannot be sent any more
+  }
+  if (gone) {
+    pendingForwards.drop(sessionId);
+    return [];
+  }
+  return pendingForwards.list(sessionId).map(({ id, toName, kind, text, old, error }) => ({ id, toName, kind, text, ...(old ? { old } : {}), ...(error ? { error } : {}) }));
+});
 
 // the cache keeper, from the window: the queue or message box holds text, Not now, the per-session switch
 handle("keeper:held", (sessionId, held) => keeper.setHeld(checkedSessionId(sessionId), held === true));

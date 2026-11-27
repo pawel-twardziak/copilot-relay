@@ -283,8 +283,8 @@ an ordinary session: it appears in the list, you can open it, read what it did, 
   answer, so it should end the turn with the result. After such a turn a card under the reply asks
   **This session has no relay tools. Send this reply to "<S>" as its report?** (as a message, for a reply that is
   not a report): **Send** forwards it, to the parent as the child's report the first time and as a message after
-  that, to any other session as a message; **Don't send** drops it. Waiting cards come back when the session reopens,
-  but are lost when the app quits. The **Forwarded replies** switch after **Approve:** (shown for such a session, and
+  that, to any other session as a message; **Don't send** drops it. Waiting cards come back when the session reopens and after a restart of the app (they are kept in
+  `fallback-pending.json` in the app's data folder). The **Forwarded replies** switch after **Approve:** (shown for such a session, and
   while a forward waits) turns the card off for that session, and the reply then goes at once; the default for all
   sessions is **Approve forwarded replies of sessions without relay tools** in Settings → Sessions (on). It needs the
   broker of this version. Sessions with the default agent, or an agent that lists the relay tools, are unchanged.
