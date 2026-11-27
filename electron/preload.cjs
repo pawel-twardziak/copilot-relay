@@ -61,6 +61,8 @@ contextBridge.exposeInMainWorld("api", {
   getLinks: () => call("links:get"),
   // the per-session approval switch for replies from sub-sessions
   getHoldReplies: (sessionId) => call("held:get", sessionId),
+  getFallbackApproval: (sessionId) => call("fallback:getApproval", sessionId),
+  setFallbackApproval: (sessionId, on) => call("fallback:setApproval", sessionId, on),
   setHoldReplies: (sessionId, kind, on) => call("held:set", sessionId, kind, on),
   // keys are "cli:<sessionId>": removed from the tree by the user / no longer in Copilot's session list
   forgetLinks: (keys) => call("links:forget", keys),

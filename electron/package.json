@@ -42,6 +42,7 @@
       "delegation.mjs",
       "prompt-count.mjs",
       "links-cache.mjs",
+      "fallback-store.mjs",
       "held-replies.mjs",
       "json-file-map.mjs",
       "repo-git.mjs",

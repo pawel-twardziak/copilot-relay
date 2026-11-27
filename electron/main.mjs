@@ -21,6 +21,7 @@ import { createKeeperOptOut, createKeeperRunner } from "./cache-keeper-runner.mj
 import { JobScheduler } from "./scheduler.mjs";
 import { scheduleInfo } from "./jobs.mjs";
 import { PendingRequests, answerFields, cardStart, childPrompt, createdText, findModelOption, folderState, isRelayTool, linkCardOf, reloadWarning, resolveConfig, unreportedChildren, withDeadline } from "./delegation.mjs";
+import { createFallbackStore } from "./fallback-store.mjs";
 import { createHeldCache, createHoldStore, HELD_KINDS, heldKind } from "./held-replies.mjs";
 import { readLinksCache, writeLinksCache } from "./links-cache.mjs";
 import { listAllPages } from "./session-list.mjs";
@@ -94,6 +95,9 @@ const settingsCommand = () => resolveCommand({ settings: loadSettings().copilotC
 // Context window per session (200k / 1M): an override per session, else the Settings default (see context-tier.mjs)
 const tiers = createTierStore(path.join(app.getPath("userData"), "context-tiers.json"));
 const holds = createHoldStore(path.join(app.getPath("userData"), "held-replies.json"));
+const fallbackSwitches = createFallbackStore(path.join(app.getPath("userData"), "fallback-approval.json"));
+/** Does the forward of this session's reply wait for approval: its own switch, else the Settings default (on). */
+const fallbackApproval = (sessionId) => fallbackSwitches.get(sessionId) ?? loadSettings().approveFallback !== false;
 const heldCache = createHeldCache();
 const HELD_NOTICE = { child: "A sub-session replied", parent: "Your parent session sent a message", other: "Another session sent a message" };
 const sessionTier = (sessionId) => effectiveTier(tiers.get(sessionId), loadSettings().contextTier);
@@ -1331,6 +1335,10 @@ handle("held:set", (sessionId, kind, on) => {
   if (!HELD_KINDS.includes(kind)) throw new Error(`unknown held kind: ${kind}`);
   holds.set(checkedSessionId(sessionId), kind, on !== false);
 });
+handle("fallback:getApproval", (sessionId) => fallbackApproval(checkedSessionId(sessionId)));
+handle("fallback:setApproval", (sessionId, on) => {
+  fallbackSwitches.set(checkedSessionId(sessionId), on !== false);
+});
 
 // the cache keeper, from the window: the queue or message box holds text, Not now, the per-session switch
 handle("keeper:held", (sessionId, held) => keeper.setHeld(checkedSessionId(sessionId), held === true));
@@ -1417,6 +1425,7 @@ handle("sessions:fork", async (sessionId, target) => {
   refuseWhileDeleting(sessionId);
   const res = forkSession(sessionId, target);
   holds.copy(sessionId, res.sessionId);
+  fallbackSwitches.copy(sessionId, res.sessionId);
   keeperOptOut.copy(sessionId, res.sessionId);
   tiers.copy(sessionId, res.sessionId); // a long history must not land in a smaller window
   prompts.copy(sessionId, res.sessionId);
@@ -1461,6 +1470,7 @@ handle("sessions:delete", async (sessionId) => {
     // missingOk: a session that never wrote its dir (or is already gone) just has its store rows removed
     const res = await deleteSession(sessionId, { missingOk: true });
     holds.delete(sessionId);
+    fallbackSwitches.delete(sessionId);
     keeperOptOut.delete(sessionId);
     tiers.delete(sessionId);
     prompts.delete(sessionId);
@@ -1611,6 +1621,7 @@ handle("settings:get", async () => ({
   relayUrl: relayConfig().url,
   contextTier: normalizeTier(loadSettings().contextTier) ?? "default",
   queueMidTurn: loadSettings().queueMidTurn === true,
+  approveFallback: loadSettings().approveFallback !== false,
   activityPanel: normalizePanelMode(loadSettings().activityPanel),
   brokerRepo: loadSettings().brokerRepo ?? "",
   brokerRepoDefault: defaultBrokerRepo(),
@@ -1626,7 +1637,7 @@ handle("settings:set", async (s) => {
   // a refused command keeps the stored one; the rest of the form is still saved
   const typed = normalizeCommand(s.copilotCommand ?? "");
   if (typed.refused) console.warn(`[settings] the Copilot command was not saved: ${typed.refused}`);
-  const next = { ...loadSettings(), ...(typed.refused ? {} : { copilotCommand: typed.command }), relay: s.relay !== false, contextTier: normalizeTier(s.contextTier) ?? "default", queueMidTurn: s.queueMidTurn === true, activityPanel: normalizePanelMode(s.activityPanel), brokerRepo: String(s.brokerRepo ?? "").trim() };
+  const next = { ...loadSettings(), ...(typed.refused ? {} : { copilotCommand: typed.command }), relay: s.relay !== false, contextTier: normalizeTier(s.contextTier) ?? "default", queueMidTurn: s.queueMidTurn === true, approveFallback: s.approveFallback !== false, activityPanel: normalizePanelMode(s.activityPanel), brokerRepo: String(s.brokerRepo ?? "").trim() };
   // the keeper's settings only when sent, as the prompt parts
   if (s.cacheKeeper !== undefined) next.cacheKeeper = normalizeKeeperSettings(s.cacheKeeper);
   // the prompt parts only when sent (a form without them keeps them); null: back to the built-in text
