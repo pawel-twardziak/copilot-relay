@@ -180,9 +180,10 @@ A forward is prepared when all hold:
   ("as a message" for a non-report). Send → forward; Don't send → drop; a system line says which.
 - Switch off: forward at once; a system line `Sent this reply to "<S>" (no relay tools).`
 - Several pending forwards each have their own card.
-- Pending forwards live in main memory per session and are shown again when the session's view reopens (like the held
-  cache); they are lost when the app quits. A lost report leaves the existing "ended without reporting" notice path in
-  place. *(builder's call)* Pending forwards are dropped when the session's history is cut (delete from a message,
+- Pending forwards live in main memory per session, kept on disk (`fallback-pending.json` in the app's data folder) and
+  shown again when the session's view reopens, also after a restart (like the held
+  cache). A lost report leaves the existing "ended without reporting" notice path in
+  place. *(builder's call)* Pending forwards are dropped by an answer, when the session's history is cut (delete from a message,
   an edit) or the session is deleted.
 
 ### Switches

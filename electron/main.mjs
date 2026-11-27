@@ -13,7 +13,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { AcpConnection } from "./acp.mjs";
 import { createCommsForward } from "./comms-forward.mjs";
 import { copilotEnv, isNotFoundExit, normalizeCommand, resolveCommand, shellLine, startFailureText } from "./copilot-command.mjs";
-import { countUserMessages, deleteSession, describeCut, forkSession, isSessionId, messageTimes, purgeDeleted, readEvents, sessionCreatedAt, sessionDir, truncateSession } from "./history.mjs";
+import { countUserMessages, deleteSession, describeCut, forkSession, isSessionId, messageTimes, purgeDeleted, readEvents, sessionCreatedAt, sessionDir, sessionStateDir, truncateSession } from "./history.mjs";
 import { createContentSearch } from "./content-search.mjs";
 import { createLastActivity } from "./last-activity.mjs";
 import { createCopilotRuntime } from "./copilot-runtime.mjs";
@@ -102,10 +102,11 @@ const holds = createHoldStore(path.join(app.getPath("userData"), "held-replies.j
 const fallbackSwitches = createFallbackStore(path.join(app.getPath("userData"), "fallback-approval.json"));
 /** Does the forward of this session's reply wait for approval: its own switch, else the Settings default (on). */
 const fallbackApproval = (sessionId) => fallbackSwitches.get(sessionId) ?? loadSettings().approveFallback !== false;
-// forwarded replies waiting for that approval, per session; lost when the app quits (see fallback.mjs). Kept while the
-// session is closed (its view reopened, a restart, a process that ended): the reopened view shows them again. A cut of
-// the history (delete from a message, an edit) and a delete of the session drop them.
-const pendingForwards = createPending();
+// forwarded replies waiting for that approval, per session; kept on disk (fallback-pending.json), so a restart does not
+// lose them (see fallback.mjs). Kept while the session is closed (its view reopened, a restart, a process that ended):
+// the reopened view shows them again. A cut of the history (delete from a message, an edit), a delete of the session
+// and a session no longer in Copilot's state (fallback:list) drop them.
+const pendingForwards = createPending({ file: path.join(app.getPath("userData"), "fallback-pending.json") });
 const heldCache = createHeldCache();
 const HELD_NOTICE = { child: "A sub-session replied", parent: "Your parent session sent a message", other: "Another session sent a message" };
 const sessionTier = (sessionId) => effectiveTier(tiers.get(sessionId), loadSettings().contextTier);
@@ -1411,7 +1412,7 @@ function chainPrompt(entry, meta) {
 
 /** A forward waiting for the owner: kept per session, shown as a card in the session's view. */
 function offerForward(sessionId, f, extra = {}) {
-  const id = pendingForwards.add(sessionId, f);
+  const id = pendingForwards.add(sessionId, { ...f, ...extra });
   send("relay:fallback", { sessionId, id, toName: f.toName, kind: f.kind, text: f.text, ...extra });
 }
 
@@ -1460,30 +1461,46 @@ handle("fallback:chainEnded", async (sessionId, seq) => {
 // arrive (an error) stays pending; null when it was answered already. Don't send drops the forward also in a view
 // whose session is no longer open (its process exited); Send needs the open session.
 handle("fallback:answer", async (sessionId, id, approved) => {
-  const f = pendingForwards.take(checkedSessionId(sessionId), id);
+  checkedSessionId(sessionId);
+  if (approved !== true) return pendingForwards.take(sessionId, id) ? {} : null;
+  const f = pendingForwards.claim(sessionId, id); // stays on disk until the send went through
   if (!f) return null;
-  if (approved !== true) return {};
   const entry = open.get(sessionId);
   if (!entry) {
-    pendingForwards.add(sessionId, f); // not sent: the card stays, Send tries again once the session is open
+    pendingForwards.release(sessionId, id); // not sent: the card stays, Send tries again once the session is open
     throw new Error("This session is not open.");
   }
-  const keep = () => open.get(sessionId) === entry && pendingForwards.add(sessionId, f);
   let r;
   try {
     r = await sendForward(sessionId, entry, f);
   } catch (e) {
-    keep();
+    pendingForwards.release(sessionId, id, { old: undefined, error: friendly(e) });
     throw e;
   }
   if (r.old) {
-    keep();
+    pendingForwards.release(sessionId, id, { old: true, error: undefined });
     return { old: true };
   }
+  pendingForwards.settle(sessionId, id);
   return { result: r.result };
 });
 // the session's pending forwards, for its view when it opens again
-handle("fallback:list", (sessionId) => pendingForwards.list(checkedSessionId(sessionId)).map(({ id, toName, kind, text }) => ({ id, toName, kind, text })));
+handle("fallback:list", (sessionId) => {
+  checkedSessionId(sessionId);
+  let gone = false;
+  try {
+    sessionDir(sessionId);
+  } catch (e) {
+    // deleted outside the app: its forwards cannot be sent any more (the folder is checked once more, and the
+    // session-state root must be there, so a passing lstat/realpath error or an unreachable root never drops them)
+    gone = e.code === "ENOSESSION" && existsSync(sessionStateDir()) && !existsSync(path.join(sessionStateDir(), sessionId));
+  }
+  if (gone) {
+    pendingForwards.drop(sessionId);
+    return [];
+  }
+  return pendingForwards.list(sessionId).map(({ id, toName, kind, text, old, error }) => ({ id, toName, kind, text, ...(old ? { old } : {}), ...(error ? { error } : {}) }));
+});
 
 // the cache keeper, from the window: the queue or message box holds text, Not now, the per-session switch
 handle("keeper:held", (sessionId, held) => keeper.setHeld(checkedSessionId(sessionId), held === true));

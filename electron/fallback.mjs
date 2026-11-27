@@ -1,6 +1,9 @@
 // The reply fallback in main: what a chain of prompts said, whether its last reply is forwarded, and the forwards
 // that wait for the owner's approval. No Electron imports (see docs/superpowers/specs/2026-11-27-relay-fallback-design.md).
 import { agentRelayTools, isRelayCall, neededTool } from "./relay-tools.mjs";
+import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { jsonFileMap } from "./json-file-map.mjs";
 
 const ABORT_TEXT = "Info: Operation cancelled by user"; // the chunk Copilot writes for a cancelled turn
 const topLevel = (u) => !u?._meta?.["github.com/copilot"]?.agentId; // a subagent's updates carry its agentId
@@ -115,24 +118,91 @@ export function decideForward({ snapshot, tools, parentKey, reported } = {}) {
   return { toKey: snapshot.origin.kind === "owner" ? parentKey : snapshot.origin.fromKey, kind: tool === "report_result" ? "report" : "message" };
 }
 
-/** Forwards waiting for approval, per session, in main memory. A taken forward added again keeps its id. */
-export function createPending() {
+/** Forwards waiting for approval, per session. Kept in main memory; with `file` they are also kept on disk
+ *  ({ [sessionId]: Forward[] }, in arrival order) and read once at the start, so they survive a restart. A write that
+ *  fails is logged once and never thrown (memory stays the source of truth); an unreadable file reads as empty. A taken
+ *  forward added again keeps its id; the ids of a file-backed set are UUIDs, unique across restarts. */
+export function createPending({ file } = {}) {
   const bySession = new Map(); // sessionId -> Map<id, forward>
   let n = 0;
+  const store = file ? jsonFileMap(file, "fallback") : null;
+  let warned = false;
+  const inflight = new Set(); // "sessionId\0id" of the forwards being sent: still in the map and on disk
+  const key = (sessionId, id) => `${sessionId}\0${id}`;
+  if (store) {
+    let raw = null;
+    try {
+      raw = readFileSync(file, "utf8");
+    } catch {} // no file yet
+    if (raw !== null) {
+      try {
+        JSON.parse(raw);
+      } catch (e) {
+        console.warn(`[fallback] ${file} is not readable (${e.message}); starting with no pending forwards`);
+      }
+    }
+    for (const [sessionId, list] of Object.entries(store.read())) {
+      if (!Array.isArray(list)) continue;
+      const m = new Map();
+      for (const f of list) if (f && typeof f === "object" && typeof f.id === "string") m.set(f.id, f);
+      if (m.size) bySession.set(sessionId, m);
+    }
+  }
+  const save = () => {
+    if (!store) return;
+    try {
+      store.write(Object.fromEntries([...bySession].map(([sessionId, m]) => [sessionId, [...m.values()]])));
+    } catch (e) {
+      if (!warned) console.warn(`[fallback] could not write ${file}: ${e.message}`);
+      warned = true;
+    }
+  };
   return {
     add(sessionId, f) {
-      const id = f.id ?? `fb${++n}`;
+      const id = f.id ?? (store ? randomUUID() : `fb${++n}`);
       if (!bySession.has(sessionId)) bySession.set(sessionId, new Map());
       bySession.get(sessionId).set(id, { ...f, id });
+      save();
       return id;
     },
     take(sessionId, id) {
       const m = bySession.get(sessionId);
       const f = m?.get(id) ?? null;
-      if (f) m.delete(id);
+      if (f && inflight.has(key(sessionId, id))) return null;
+      if (f) {
+        m.delete(id);
+        if (!m.size) bySession.delete(sessionId);
+        save();
+      }
       return f;
     },
-    list: (sessionId) => [...(bySession.get(sessionId)?.values() ?? [])],
-    drop: (sessionId) => void bySession.delete(sessionId),
+    /** Like take, but the forward stays in the map and on disk until settle (sent) or release (not sent): a quit
+     *  while it is being sent loses nothing. A second claim or take of it gets null; list does not show it. */
+    claim(sessionId, id) {
+      const f = bySession.get(sessionId)?.get(id) ?? null;
+      if (!f || inflight.has(key(sessionId, id))) return null;
+      inflight.add(key(sessionId, id));
+      return f;
+    },
+    /** The claimed forward went through: gone. */
+    settle(sessionId, id) {
+      inflight.delete(key(sessionId, id));
+      this.take(sessionId, id);
+    },
+    /** The claimed forward did not go: back in the list, with `patch` merged in (an undefined value removes a key). A
+     *  drop meanwhile wins. */
+    release(sessionId, id, patch = {}) {
+      inflight.delete(key(sessionId, id));
+      const f = bySession.get(sessionId)?.get(id);
+      if (!f) return;
+      for (const [k, v] of Object.entries(patch)) if (v === undefined) delete f[k];
+      else f[k] = v;
+      save();
+    },
+    list: (sessionId) => [...(bySession.get(sessionId)?.values() ?? [])].filter((f) => !inflight.has(key(sessionId, f.id))),
+    drop(sessionId) {
+      for (const f of bySession.get(sessionId)?.values() ?? []) inflight.delete(key(sessionId, f.id));
+      if (bySession.delete(sessionId)) save();
+    },
   };
 }

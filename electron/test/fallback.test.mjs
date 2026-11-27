@@ -297,3 +297,148 @@ test("relayToolsAfterSet: a reader that throws counts as no event yet", async ()
   assert.deepEqual(tools, none);
   assert.equal(reads, 3);
 });
+
+const tmp = () => mkdtempSync(path.join(os.tmpdir(), "fallback-pending-"));
+const fwd = (text, over = {}) => ({ toKey: "cli:p", toName: "boss", kind: "report", text, ...over });
+
+test("file-backed pending: a new instance on the same file lists what was added, with its flags", () => {
+  const dir = tmp();
+  const file = path.join(dir, "fallback-pending.json");
+  try {
+    const p = createPending({ file });
+    const a = p.add("s", fwd("one", { old: true }));
+    const b = p.add("s", fwd("two", { kind: "message", error: "no answer" }));
+    const again = createPending({ file });
+    assert.deepEqual(again.list("s"), [
+      { id: a, toKey: "cli:p", toName: "boss", kind: "report", text: "one", old: true },
+      { id: b, toKey: "cli:p", toName: "boss", kind: "message", text: "two", error: "no answer" },
+    ]);
+    assert.deepEqual(again.list("t"), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("file-backed pending: take and drop write through; a taken forward added again keeps its id", () => {
+  const dir = tmp();
+  const file = path.join(dir, "fallback-pending.json");
+  try {
+    const p = createPending({ file });
+    const a = p.add("s", fwd("one"));
+    const b = p.add("s", fwd("two"));
+    p.add("t", fwd("other"));
+    const f = p.take("s", a);
+    assert.deepEqual(createPending({ file }).list("s").map((x) => x.id), [b]);
+    assert.equal(p.add("s", f), a);
+    assert.deepEqual(createPending({ file }).list("s").map((x) => x.id), [b, a]);
+    p.drop("s");
+    const after = createPending({ file });
+    assert.deepEqual(after.list("s"), []);
+    assert.equal(after.list("t").length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("file-backed pending: ids are unique across instances", () => {
+  const dir = tmp();
+  const file = path.join(dir, "fallback-pending.json");
+  try {
+    const first = createPending({ file }).add("s", fwd("one"));
+    const second = createPending({ file }).add("s", fwd("two"));
+    const third = createPending({ file }).add("s", fwd("three"));
+    assert.equal(new Set([first, second, third]).size, 3);
+    assert.equal(createPending({ file }).list("s").length, 3);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("file-backed pending: a garbled file reads as empty, an unwritable one keeps working in memory", () => {
+  const dir = tmp();
+  try {
+    const garbled = path.join(dir, "garbled.json");
+    writeFileSync(garbled, "{ not json");
+    const p = createPending({ file: garbled });
+    assert.deepEqual(p.list("s"), []);
+    const id = p.add("s", fwd("one"));
+    assert.deepEqual(p.list("s").map((x) => x.id), [id]);
+    // a file whose parent is a regular file: every write fails
+    const blocker = path.join(dir, "blocker");
+    writeFileSync(blocker, "x");
+    const q = createPending({ file: path.join(blocker, "pending.json") });
+    const warn = console.warn;
+    const warned = [];
+    console.warn = (m) => warned.push(m);
+    try {
+      const qid = q.add("s", fwd("two"));
+      assert.deepEqual(q.list("s").map((x) => x.id), [qid]);
+      assert.equal(q.take("s", qid).text, "two");
+    } finally {
+      console.warn = warn;
+    }
+    assert.equal(warned.length, 1, "logged once");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("file-backed pending: a claimed forward stays on disk until it is settled; a second claim gets null", () => {
+  const dir = tmp();
+  const file = path.join(dir, "fallback-pending.json");
+  try {
+    const p = createPending({ file });
+    const a = p.add("s", fwd("one"));
+    const f = p.claim("s", a);
+    assert.equal(f.text, "one");
+    assert.equal(p.claim("s", a), null, "a second answer during the send");
+    assert.equal(p.take("s", a), null);
+    assert.deepEqual(p.list("s"), [], "not offered while it is being sent");
+    p.add("s", fwd("two")); // another write meanwhile must keep the claimed one on disk
+    assert.deepEqual(createPending({ file }).list("s").map((x) => x.text), ["one", "two"], "a quit mid-send keeps it");
+    p.settle("s", a);
+    assert.deepEqual(createPending({ file }).list("s").map((x) => x.text), ["two"]);
+    assert.equal(p.claim("s", a), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("file-backed pending: release puts a claimed forward back with its flags; a drop meanwhile wins", () => {
+  const dir = tmp();
+  const file = path.join(dir, "fallback-pending.json");
+  try {
+    const p = createPending({ file });
+    const a = p.add("s", fwd("one", { old: true }));
+    p.claim("s", a);
+    p.release("s", a, { old: undefined, error: "no answer" });
+    assert.deepEqual(createPending({ file }).list("s"), [{ id: a, toKey: "cli:p", toName: "boss", kind: "report", text: "one", error: "no answer" }]);
+    p.claim("s", a);
+    p.drop("s");
+    p.release("s", a, { old: true });
+    assert.deepEqual(p.list("s"), []);
+    assert.deepEqual(createPending({ file }).list("s"), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("file-backed pending: a garbled file is logged once", () => {
+  const dir = tmp();
+  try {
+    const file = path.join(dir, "garbled.json");
+    writeFileSync(file, "{ not json");
+    const warn = console.warn;
+    const warned = [];
+    console.warn = (m) => warned.push(m);
+    try {
+      createPending({ file });
+      createPending({ file: path.join(dir, "missing.json") }); // a missing file is no news
+    } finally {
+      console.warn = warn;
+    }
+    assert.equal(warned.length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

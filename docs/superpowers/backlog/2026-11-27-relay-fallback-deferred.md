@@ -15,6 +15,9 @@ None of these blocked the merge. Line numbers were taken at the review and may d
 - A chain runs through pumped answers to queued messages; no note request (and no await) for the default agent; a
   Stop during the note request skips the prompt.
 - Pending forwards survive a close and are dropped by a delete or a cut of the history.
+- `fallback:list` returns the `old` / `error` flags, so the "broker too old" line comes back after a reopen (v0.38.1).
+- Pending forwards are kept on disk (`fallback-pending.json`) and survive an app restart; a forward stays on disk
+  until its send succeeded, and a send failing during a close or restart keeps it (v0.38.1).
 - The note waits up to 2 s for `subagent.selected` after the app set the agent (Copilot writes it ~500 ms late).
 - Don't send works in a dead view; no collecting between chains; a newer tool baseline beats an older agent
   selection; a Stop during the note request keeps the pending notes.
@@ -40,6 +43,8 @@ None of these blocked the merge. Line numbers were taken at the review and may d
    - Where: `fallback:chainEnded` / `sendForward` (`electron/main.mjs`).
    - A timeout or reset on the way back keeps the forward with `error`; Send posts it again. A report is deduplicated
      by the broker, a message is not.
+   - The same at-least-once gap since v0.38.1: a quit between the broker accepting a forward and its `settle`
+     leaves it on disk, and Send after the restart posts it again.
    - Proposal: an id per forward that the broker remembers for a while (idempotent `/api/peer/fallback`).
 4. **A blocked pump can leave a chain open.**
    - Where: `chainEnded` / `Fallback.chainEnds` (`electron/renderer/app.js`, `electron/renderer/fallback.js`).
@@ -63,34 +68,43 @@ None of these blocked the merge. Line numbers were taken at the review and may d
    boolean, `electron/main.mjs`).
 3. `approveFallback` is always written by the settings save (`s.approveFallback !== false`); a form that omits it
    resets it to true. "Only when sent" (like `cacheKeeper`) would be more robust.
-4. `fallback:list` drops the `old` / `error` flags, so the "broker too old" line disappears after a reopen.
-5. `keep()` re-adds a failed forward only while `open.get(sessionId) === entry`: a send failing during a close,
-   restart or truncate is lost silently.
-6. A cut of the history drops every pending forward of the session, also those whose reply survives the cut. Unknown
+4. A cut of the history drops every pending forward of the session, also those whose reply survives the cut. Unknown
    whether a dropped report leads to the parent's "ended without reporting" notice.
-7. A failed `fallbackNote` IPC is swallowed (`.catch(() => null)` in `runPrompt`) without a trace.
-8. A Stop during the note request acknowledges a relay message Copilot never saw (`runPrompt`, app.js ~3046).
-9. A custom-agent session before its `agent` option arrives gets no note; main may still forward.
-10. After a Stop that pauses the queue and a later ▶, the resumed answers and the continue are not forwarded (ruling:
+5. A failed `fallbackNote` IPC is swallowed (`.catch(() => null)` in `runPrompt`) without a trace.
+6. A Stop during the note request acknowledges a relay message Copilot never saw (`runPrompt`, app.js ~3046).
+7. A custom-agent session before its `agent` option arrives gets no note; main may still forward.
+8. Stored pending records are checked only for a string `id` (`createPending`, `electron/fallback.mjs`); a hand-edited or damaged record with other fields missing reaches the card as is.
+9. Forwards of a session that is never opened again stay in `fallback-pending.json`; they are dropped only when the session is listed (`fallback:list`), not at start-up.
+10. The `old` / `error` flags of a forward are covered by the UI check `fallback-restart-flags` only through an edited file; no check makes the broker refuse a forward (no 404 or failing post can be provoked), so the store of the flags in `offerForward` and the release in `fallback:answer` are unverified by a live run.
+11. After a Stop that pauses the queue and a later ▶, the resumed answers and the continue are not forwarded (ruling:
     a Stop is the owner taking over).
-11. A failed mid-turn send (before its switch point) suppresses the forward of a task that finished
+12. A failed mid-turn send (before its switch point) suppresses the forward of a task that finished
     (`stopped("failed", n)` in `createChainState`).
-12. A relay message delivered mid-turn into an owner-started turn is never answered by a forward (spec: mid-turn
+13. A relay message delivered mid-turn into an owner-started turn is never answered by a forward (spec: mid-turn
     senders get no forward of their own).
-13. A mid-turn delivery could overtake the first prompt during the note request (`toolBoundary` /
+14. A mid-turn delivery could overtake the first prompt during the note request (`toolBoundary` /
     `canDeliverMidTurn`), only with a background subagent tool update inside that window.
-14. A Stop racing a natural `end_turn` still offers a card (or sends at once with approval off).
-15. A command answered inside a follow-up carries the chain's meta (harmless while the continue follows).
-16. The wait in `relayToolsAfterSet` stops at any `subagent.selected` of the agent, including an old one (X → default
+15. A Stop racing a natural `end_turn` still offers a card (or sends at once with approval off).
+16. A command answered inside a follow-up carries the chain's meta (harmless while the continue follows).
+17. The wait in `relayToolsAfterSet` stops at any `subagent.selected` of the agent, including an old one (X → default
     → X); no worse than before, both are stale for ~500 ms.
-17. Agent changes through Copilot's own `/agent` get no 2 s wait (only app-set ones): the note can be missing, the
+18. Agent changes through Copilot's own `/agent` get no 2 s wait (only app-set ones): the note can be missing, the
     card still appears.
-18. Only `relay/*` is a wildcard, not `relay-*` / `relay_*`; a bare `relay` entry in `tools:` reads as "cannot answer"
+19. Only `relay/*` is a wildcard, not `relay-*` / `relay_*`; a bare `relay` entry in `tools:` reads as "cannot answer"
     (unverified whether Copilot grants the server's tools for it).
-19. The message path of `Delegation.fallback` resolves the key to a name; a reused name could reach another peer.
-20. The budget-blocked line in `messageClosed` has no `fallback: true` flag (`src/delegation.mjs` ~381).
-21. Synchronous full read of `events.jsonl` in main at chain start and end (custom-agent sessions only).
-22. `prompt()` clears the chain text at a mid-turn start; it relies on the continue prompt always following.
+20. The message path of `Delegation.fallback` resolves the key to a name; a reused name could reach another peer.
+21. The budget-blocked line in `messageClosed` has no `fallback: true` flag (`src/delegation.mjs` ~381).
+22. Synchronous full read of `events.jsonl` in main at chain start and end (custom-agent sessions only).
+23. `prompt()` clears the chain text at a mid-turn start; it relies on the continue prompt always following.
+
+24. `fallback:list` drops a session's forwards when `sessionDir` says ENOSESSION, the session-state root exists and
+    the session folder does not; an unreadable folder (EACCES) still reads as missing. Valid JSON that is not an
+    object in `fallback-pending.json` reads as empty without a log, and a garbled file is overwritten without a copy.
+25. A forward released after a failed send, while its session's view was reopened during the send, shows no card
+    until the view is opened again (`fallback:answer` release paths; `fallback:list` hides claimed forwards). Fix:
+    emit `relay:fallback` after a release with a patch.
+26. A failed write of `fallback-pending.json` leaves older content on disk: a forward sent or dropped in memory can
+    come back after a restart and be sent again (a report is deduplicated by the broker, a message is not).
 
 ## D. Tests and housekeeping
 
@@ -108,7 +122,8 @@ None of these blocked the merge. Line numbers were taken at the review and may d
    the non-array rule in `relay-tools.mjs`; `relay-tools.mjs` `stripNote` is used only by tests (the renderer copy is
    the live one); the renderer load test swallows `ReferenceError` per script.
 8. `scripts/ui-check/driver.mjs` `launch()` leaves its broker running if it throws before its try block.
-9. A live check with the real `COPILOT_HOME` must set `COPILOT_RELAY_URL`: the extension's `config.json` url beats
+9. `settle` in `createPending` calls `this.take(...)` (breaks if the object is destructured).
+10. A live check with the real `COPILOT_HOME` must set `COPILOT_RELAY_URL`: the extension's `config.json` url beats
    `COPILOT_RELAY_PORT`.
 
 ### Manual checks still open
