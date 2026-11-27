@@ -109,6 +109,11 @@ None of these blocked the merge. Line numbers were taken at the review and may d
 26. A failed write of `fallback-pending.json` leaves older content on disk: a forward sent or dropped in memory can
     come back after a restart and be sent again (a report is deduplicated by the broker, a message is not).
 
+27. The name / file-style-name match of a baseline ignores order and switches: if another agent's file name equals
+    this agent's slug (agent "Reviewer" in `strict.agent.md`, another agent in `reviewer.agent.md`), the other one's
+    baseline counts for "Reviewer" while it is later than Reviewer's own selection (in practice only in the ~500 ms
+    lag). `agentSlug` turns letters NFD does not split (ø, ß, đ) into `-`; only `ł`/`Ł` are mapped.
+
 ## D. Tests and housekeeping
 
 1. No automated test of main's wiring (`chainPrompt`, `fallback:chainEnded`, `fallback:answer`) beyond the UI checks.
@@ -130,6 +135,12 @@ None of these blocked the merge. Line numbers were taken at the review and may d
    `COPILOT_RELAY_PORT`.
 
 ### Manual checks still open
+
+- Whether Copilot writes `subagent.selected` / `deselected` for an agent chosen with `/agent` in the prompt, a CLI
+  `--agent` flag, or a resume that falls back to the default after the agent file was deleted: since v0.38.2 a
+  baseline counts for the agent selected last with no switch since, so a switch without an event would let another
+  agent's baseline count. Also whether sub-agents write `session.tool_baseline` (their events with `agentId` are
+  skipped since v0.38.2).
 
 - A delegated `limited` child with a model whose first prompt goes out at once, after the 2 s wait fix (verified only
   with a no-prompt probe: the note came after 102 ms).

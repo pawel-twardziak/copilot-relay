@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   agentRelayTools,
+  agentSlug,
   fallbackNote,
   isRelayCall,
   neededTool,
@@ -100,9 +101,32 @@ test("a baseline after another agent's selection does not count for this one", (
   assert.deepEqual(agentRelayTools(POET, events), none);
 });
 
+test("a sub-agent's events (agentId on the envelope) never count", () => {
+  const sub = { ...relayBase("explore", ["relay-report_result", "relay-send_message"]), agentId: "task-1" };
+  assert.deepEqual(agentRelayTools(POET, [selected(POET, ["edit"]), sub]), none);
+  const subSel = { ...selected(POET, ["*"]), agentId: "task-1" };
+  assert.deepEqual(agentRelayTools(POET, [selected(POET, ["edit"]), subSel]), none);
+});
+
+test("a name without Latin letters or digits matches no default-agent baseline", () => {
+  const events = [
+    selected("Поэт", ["edit"]),
+    relayBase("poet", ["view"]),
+    { type: "subagent.deselected", data: {} },
+    relayBase("", ["relay-report_result", "relay-send_message"]),
+  ];
+  assert.deepEqual(agentRelayTools("Поэт", events), none);
+  assert.equal(agentSlug("Поэт"), "");
+});
+
+test("after a switch back to the default, a later baseline is not the agent's", () => {
+  const events = [selected(POET, ["edit"]), { type: "subagent.deselected", data: {} }, relayBase("other", ["relay-send_message"])];
+  assert.deepEqual(agentRelayTools(POET, events), none);
+});
+
 test("a baseline is matched by the agent's name or by its file-style name", () => {
-  const events = [relayBase("poeta-wspomnien", ["relay-report_result", "relay-send_message"])];
-  assert.deepEqual(agentRelayTools(POET, events), both);
+  assert.deepEqual(agentRelayTools(POET, [relayBase("poeta-wspomnien", ["view"])]), none);
+  assert.deepEqual(agentRelayTools(POET, [relayBase("Poeta wspomnień", ["view"])]), none);
   assert.deepEqual(agentRelayTools("Poeta sensu życia", [relayBase("poeta-sensu-zycia", ["view"])]), none);
   assert.deepEqual(agentRelayTools("Łąka Ćma", [relayBase("laka-cma", ["view"])]), none);
 });

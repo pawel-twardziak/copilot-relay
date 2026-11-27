@@ -253,6 +253,20 @@ test("relayToolsAfterSet: the event appears 300 ms after the app set the agent: 
   assert.equal(h.reads(), 4); // at 0, 100, 200, 300 ms
 });
 
+test("relayToolsAfterSet: A → B → A waits for A's new selection, not the old one", async () => {
+  let t = 10_000;
+  let reads = 0;
+  const OPEN = { type: "subagent.selected", data: { agentName: "open", tools: ["*"] } };
+  const base = [{ type: "session.start", data: {} }, { type: "subagent.selected", data: { agentName: "limited", tools: ["*"] } }, OPEN];
+  const readEvents = () => {
+    reads++;
+    return { events: t >= 10_300 ? [...base, LIMITED] : base, lines: [] };
+  };
+  const r = await relayToolsAfterSet({ agent: "limited", readEvents, agentSetAt: { value: "limited", at: t }, now: () => t, sleep: async (ms) => { t += ms; } });
+  assert.deepEqual(r, none); // the new selection (["read"]), not the old one (["*"])
+  assert.equal(reads, 4);
+});
+
 test("relayToolsAfterSet: the event never appears: gives up 2 s after the set, with today's answer", async () => {
   const h = slowHistory();
   assert.deepEqual(await afterSet(h, "limited", { value: "limited", at: h.now() - 500 }), both);

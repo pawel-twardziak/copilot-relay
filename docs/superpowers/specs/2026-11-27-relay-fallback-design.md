@@ -112,7 +112,9 @@ the probe showed a reliable signal before the prompt.
   1.0.117, 2026-11-27). So a baseline is the agent's when it comes after the agent's own `subagent.selected` with no
   other `subagent.selected`/`deselected` since (and its surface does not end in an empty `agent=`), or when its
   surface ends with `agent=<agent>` or `agent=<file-style name>` (`agentSlug`: lower case, no diacritics, other
-  characters as `-`) (v0.38.2). Whichever of the two comes later in the history
+  characters as `-`; an empty slug is never used) (v0.38.2). A sub-agent's events (`agentId` on the envelope) never
+  count. The order rule trusts that every agent switch writes `subagent.selected` or `deselected` (unverified for
+  `/agent` typed in the prompt and a CLI `--agent` flag). Whichever of the two comes later in the history
   decides: a stale selection does not beat a newer baseline (an agent file that gained `relay/*`, then a
   `session/load`, which writes a new baseline but no new `subagent.selected`), and a newer selection beats an older
   baseline.

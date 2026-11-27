@@ -26,6 +26,16 @@ export const agentSlug = (name) =>
 
 const isSwitch = (e) => e?.type === "subagent.selected" || e?.type === "subagent.deselected";
 
+/** The session's own events: a sub-agent's (task tool) events carry `agentId` on the envelope. */
+const ownEvents = (events) => (events ?? []).filter((e) => !e?.agentId);
+
+/** Is the agent's own subagent.selected the last switch in the session (no other agent selected, no default since)? */
+export const agentIsLastSelected = (agent, events) => {
+  const list = ownEvents(events);
+  const at = list.findLastIndex(isSwitch);
+  return at >= 0 && list[at].type === "subagent.selected" && list[at].data?.agentName === agent;
+};
+
 /** Relay tools the agent can call, from events.jsonl. The default agent ("" or undefined) and unknown ones have both.
  *  Of the agent's last subagent.selected and its last tool baseline, the later one in the list counts: a reload after
  *  the agent file changed writes a new baseline but no new subagent.selected. A baseline is the agent's when it was
@@ -33,15 +43,17 @@ const isSwitch = (e) => e?.type === "subagent.selected" || e?.type === "subagent
  *  from the agent's `name:`), or when its surface ends with `agent=<name>` or `agent=<file-style name>`. */
 export function agentRelayTools(agent, events) {
   if (!agent) return both();
-  const list = events ?? [];
+  const list = ownEvents(events);
   const selAt = list.findLastIndex((e) => e?.type === "subagent.selected" && e.data?.agentName === agent);
   const ownFrom = selAt >= 0 && list.findLastIndex(isSwitch) === selAt ? selAt : Infinity;
-  const names = new Set([`agent=${agent}`, `agent=${agentSlug(agent)}`]);
+  // never a bare "agent=": that is the default agent's surface (a name without Latin letters has an empty slug)
+  const slug = agentSlug(agent);
+  const names = [`agent=${agent}`, ...(slug ? [`agent=${slug}`] : [])];
   const baseAt = list.findLastIndex((e, i) => {
     if (e?.type !== "session.tool_baseline") return false;
     const surface = String(e.data?.surface ?? "");
     if (i > ownFrom && !surface.endsWith("agent=")) return true; // a default-agent baseline is never this agent's
-    return [...names].some((n) => surface.endsWith(n));
+    return names.some((n) => surface.endsWith(n));
   });
   if (selAt < 0 && baseAt < 0) return both();
   // A missing tools list means all tools (an agent file without a `tools:` key).
