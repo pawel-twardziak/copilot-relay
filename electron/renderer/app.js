@@ -273,7 +273,7 @@ let queueMidTurn = false; // setting: deliver queued messages while a turn runs
 let activityPanel = "off"; // setting: where activity group details open (off | subagents | all)
 /** Text of a replayed user message as the user sees it: a queued message comes back wrapped, the app's continue
  *  prompt as its label. */
-const { shownUserText } = MessageText;
+const shownUserText = (raw) => MessageText.shownUserText(raw);
 /** The text of a replayed user message that is yours (Edit, Left Shift+Up/Down): none for the continue prompt. */
 const ownUserText = (raw) => (MessageQueue.isContinuePrompt(raw) ? "" : shownUserText(raw));
 let queueItemSeq = 0; // ids of queued items (MessageQueue item shape)

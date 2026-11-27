@@ -32,13 +32,20 @@ test("makeSnippet cuts at whitespace", () => {
   const s = makeSnippet(text, start, start + 3);
   assert.ok(s.before.length <= 41);
   assert.ok(s.before.startsWith("…"));
-  assert.equal(s.match, text.slice(start, start + 3));
-  assert.ok(!/\n/.test(s.before + s.after));
+  assert.equal(s.match, text.slice(start, start + 3).replace(/\n/g, " "));
+  assert.ok(!/\n/.test(s.before + s.match + s.after));
   assert.ok(s.after.endsWith("…"));
 });
 
 test("makeSnippet at the text edges has no ellipsis", () => {
   assert.deepEqual(makeSnippet("hello world", 0, 5), { before: "", match: "hello", after: " world" });
+});
+
+test("pickTarget ignores the cut marks on one side", () => {
+  const view = [{ before: "xabcdefghij klmnopqrstuvwxyz0123 ", after: "tail" }];
+  assert.deepEqual(pickTarget(view, { k: 0, before: "…abcdefghij klmnopqrstuvwxyz0123 ", after: "tail" }), { index: 0, exact: true });
+  const view2 = [{ before: "b", after: " abcdefghij klmnopqrstuvwxyz0123x" }];
+  assert.deepEqual(pickTarget(view2, { k: 0, before: "b", after: " abcdefghij klmnopqrstuvwxyz0123…" }), { index: 0, exact: true });
 });
 
 test("pickTarget", () => {

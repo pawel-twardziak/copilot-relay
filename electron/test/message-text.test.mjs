@@ -23,3 +23,21 @@ test("shownUserText keeps the relay header", () => {
   assert.equal(shownUserText(MessageQueue.wrap("[from a]\nhi")), "[from a]\nhi");
   assert.equal(shownUserText("plain"), "plain");
 });
+
+test("the renderer scripts share one global scope without clashing", async () => {
+  const fs = await import("node:fs");
+  const vm = await import("node:vm");
+  const dir = new URL("../renderer/", import.meta.url);
+  const ctx = vm.createContext({});
+  ctx.globalThis = ctx;
+  const load = (f) => vm.runInContext(fs.readFileSync(new URL(f, dir), "utf8"), ctx, { filename: f });
+  load("file-links.js");
+  load("message-queue.js");
+  const before = new Set(Object.keys(ctx));
+  load("message-text.js");
+  load("find-text.js");
+  // the new scripts leak only their own global
+  assert.deepEqual(Object.keys(ctx).filter((k) => !before.has(k)).sort(), ["FindText", "MessageText"]);
+  // what app.js declares at top level must not clash with them
+  vm.runInContext("const shownUserText = (raw) => MessageText.shownUserText(raw);", ctx);
+});
