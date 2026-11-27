@@ -34,6 +34,8 @@
       "main.mjs",
       "acp.mjs",
       "history.mjs",
+      "content-search.mjs",
+      "search-worker.mjs",
       "cache-keeper.mjs",
       "cache-keeper-runner.mjs",
       "usage.mjs",

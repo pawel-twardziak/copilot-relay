@@ -11,6 +11,7 @@ import { LATE_TEXT } from "../../electron/test/fixtures/acp/late-group-scenario.
 import { PARTS } from "../../electron/test/fixtures/acp/panel-scroll-scenario.mjs";
 import { RUNNING_TITLE } from "../../electron/test/fixtures/acp/tool-split-scenario.mjs";
 import { SLOW } from "../../electron/test/fixtures/acp/comms-scenario.mjs";
+import { ANSWER_MARKDOWN } from "../../electron/test/fixtures/acp/markdown-scenario.mjs";
 import { CHILD_PART, DEFAULT_PART } from "../../electron/session-prompts.mjs";
 import { REMINDER } from "../../electron/delegation.mjs";
 import { KEEPALIVE_MARKER } from "../../electron/cache-keeper.mjs";
@@ -216,6 +217,23 @@ async function firstTurn(app) {
   await app.send("Look around.");
   await app.idle();
 }
+/** How often word occurs (case-insensitive) in the bodies of view's main-thread bubbles (the log's own .msg.user,
+ *  .msg.relay and .msg.agent), counted from the DOM text. */
+const mainCount = (app, view, word) =>
+  app.ev(`[...${view}.log.children].filter((e) => e.matches(".msg.user, .msg.relay, .msg.agent"))
+    .map((e) => e.querySelector(":scope > .body, :scope > .md").textContent.toLowerCase())
+    .reduce((n, t) => n + t.split(${JSON.stringify(word)}).length - 1, 0)`);
+/** Ctrl+F on the page, as a key press does. */
+const openFind = (app, view) =>
+  app.ev(`(document.dispatchEvent(new KeyboardEvent("keydown", { key: "f", code: "KeyF", ctrlKey: true, bubbles: true, cancelable: true })), !${view}.findBar.el.hidden)`);
+/** Types text into the view's find bar. */
+const typeFind = (app, view, text) =>
+  app.ev(`(() => { const i = ${view}.findBar.input; i.value = ${JSON.stringify(text)}; i.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+/** A key pressed in the view's find bar input. */
+const findKey = (app, view, key, mods = {}) =>
+  app.ev(`(${view}.findBar.input.dispatchEvent(new KeyboardEvent("keydown", { key: ${JSON.stringify(key)}, bubbles: true, cancelable: true, ...${JSON.stringify(mods)} })), true)`);
+/** The find bar of a view: hidden, its counter text. */
+const findState = (view) => `(() => { const b = ${view}.findBar; return { hidden: b.el.hidden, counter: b.el.querySelector(".find-count").textContent }; })()`;
 /** A second session (in the launch's folder) that has played panel-scenario's first prompt; it is the active view. */
 async function secondView(app) {
   await app.startSession(app.dir); // the parent folder of the scenario's session
@@ -226,6 +244,27 @@ async function secondView(app) {
   await app.check(`(() => { const v = ${v}; return !v.busy && !!v.panelBody.firstElementChild && Date.now() - (v.lastUpdate ?? 0) > 300; })()`, "the second view's turn");
   await frames(app);
   return { id, v };
+}
+/** Types text into the sidebar's filter field. */
+const typeSearch = (app, text) => app.ev(`(() => { const i = document.querySelector("#search"); i.value = ${JSON.stringify(text)}; i.dispatchEvent(new Event("input")); })()`);
+const untilHits = (app) => app.check(`document.querySelectorAll("#session-list .content-hit").length >= 2`, "the message hits");
+/** Plays the scenario in HISTORY_ID's session, writes its events.jsonl from the real texts of the main-thread bubbles
+ *  (the replay shows the same texts) and reloads (or runs reload instead). */
+async function seedHistory(app, v, reload = () => app.reload()) {
+  await playScenario(app);
+  const texts = await app.ev(`[...${v}.log.children].filter((e) => e.matches(".msg.user, .msg.agent"))
+    .map((e) => [e.classList.contains("user") ? "user.message" : "assistant.message", e.querySelector(":scope > .body, :scope > .md").textContent])`);
+  const at = new Date().toISOString();
+  const events = texts.map(([type, content], i) => ({ type, data: type === "user.message" ? { content } : { messageId: `m${i}`, content }, timestamp: at }));
+  const dir = path.join(app.dir, "copilot-home", "session-state", HISTORY_ID);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(dir, "events.jsonl"), [{ type: "session.start", data: {}, timestamp: at }, ...events].map((e) => JSON.stringify(e)).join("\n") + "\n");
+  await reload();
+}
+/** Closes the view of HISTORY_ID and lists its session (the scripted agent lists none), so a click opens it again. */
+async function closeAndList(app, id) {
+  await app.ev(`(async () => { const v = views.get(${id}); sessions = [{ sessionId: ${id}, cwd: v.cwd, title: "history" }]; await closeView(${id}); renderList(); })()`);
+  await app.check(`!views.has(${id})`, "the view to close");
 }
 const activate = async (app, id) => {
   await app.ev(`activate(${JSON.stringify(id)})`);
@@ -4605,6 +4644,295 @@ export const checks = [
       await app.ev(`[...${V}.moreMenu.querySelectorAll("button")].find((b) => b.textContent === "Copy thread").click()`);
       assert.equal(await open(), false, "an item closes it");
       await app.check(`${V}.statusEl.textContent === "Thread copied to the clipboard as Markdown."`, "the copy note");
+    },
+  },
+  {
+    // message hits under the title/folder list: the filter field also searches the sessions' histories
+    name: "content-search-sidebar",
+    modes: ["off"],
+    sessionId: HISTORY_ID,
+    async run(app) {
+      await playScenario(app);
+      const dir = path.join(app.dir, "copilot-home", "session-state", HISTORY_ID);
+      mkdirSync(dir, { recursive: true });
+      const events = [
+        { type: "session.start", data: {}, timestamp: new Date().toISOString() },
+        { type: "user.message", data: { content: "alpha <b> one" }, timestamp: new Date().toISOString() },
+        { type: "user.message", data: { content: "[from api-1]\nalpha two" }, timestamp: new Date().toISOString() },
+        { type: "assistant.message", data: { messageId: "m1", content: "Alpha three" }, timestamp: new Date().toISOString() },
+      ];
+      writeFileSync(path.join(dir, "events.jsonl"), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
+      await app.reload();
+      const type = (text) => app.ev(`(() => { const i = document.querySelector("#search"); i.value = ${JSON.stringify(text)}; i.dispatchEvent(new Event("input")); })()`);
+      const section = `document.querySelector("#session-list .content-results")`;
+      await type("alpha");
+      let r;
+      await until(async () => {
+        r = await app.ev(`(() => {
+          const s = ${section};
+          if (!s || !s.querySelector(".content-hit")) return null;
+          const hits = [...s.querySelectorAll(".content-hit")];
+          return {
+            header: s.querySelector(".group-title").textContent.trim(),
+            marks: hits.map((e) => e.querySelector("mark")?.textContent),
+            firstText: hits[0].textContent,
+            bElements: hits[0].querySelectorAll("b").length,
+            props: hits.map((e) => e._hit?.sessionId),
+          };
+        })()`);
+        return r;
+      }, "the content section");
+      assert.equal(r.header, "In messages (3 in 1 sessions)", JSON.stringify(r));
+      assert.deepEqual(r.marks, ["alpha", "alpha", "Alpha"]);
+      assert.ok(r.firstText.includes("<b>"), r.firstText);
+      assert.equal(r.bElements, 0);
+      assert.deepEqual(r.props, [HISTORY_ID, HISTORY_ID, HISTORY_ID]);
+      await type("api-1"); // a sender header is not searchable
+      await new Promise((res) => setTimeout(res, 800));
+      assert.equal(await app.ev(`!!${section}`), false);
+      await type("a"); // below two characters
+      await new Promise((res) => setTimeout(res, 800));
+      assert.equal(await app.ev(`!!${section}`), false);
+    },
+  },
+  {
+    // Ctrl+F: the find bar counts and highlights the word in the main-thread bubbles only, steps with wrap-around,
+    // Esc clears the highlights
+    name: "find-bar",
+    modes: ["off"],
+    async run(app) {
+      await playScenario(app);
+      const WORD = "look"; // "Look around." and "I'll look around first."
+      const n = await mainCount(app, V, WORD);
+      assert.ok(n >= 2, `the word in the main thread: ${n}`);
+      assert.equal(await openFind(app, V), true, "Ctrl+F opens the bar");
+      assert.equal(await app.ev(`document.activeElement === ${V}.findBar.input`), true, "the input has the focus");
+      await typeFind(app, V, WORD);
+      await app.check(`${findState(V)}.counter === "1/${n}"`, `the counter 1/${n}`);
+      assert.equal(await app.ev(`CSS.highlights.get("find-match")?.size`), n);
+      assert.equal(await app.ev(`CSS.highlights.get("find-current")?.size`), 1);
+      assert.equal(await app.ev(`[...CSS.highlights.get("find-match")].every((r) => r.toString().toLowerCase() === ${JSON.stringify(WORD)})`), true);
+      await findKey(app, V, "Enter");
+      assert.equal((await app.ev(findState(V))).counter, `2/${n}`);
+      await findKey(app, V, "Enter", { shiftKey: true });
+      await findKey(app, V, "Enter", { shiftKey: true });
+      assert.equal((await app.ev(findState(V))).counter, `${n}/${n}`, "Shift+Enter wraps to the last");
+      await findKey(app, V, "ArrowDown");
+      assert.equal((await app.ev(findState(V))).counter, `1/${n}`, "↓ wraps to the first");
+      await findKey(app, V, "Escape");
+      const closed = await app.ev(findState(V));
+      assert.equal(closed.hidden, true, "Esc hides the bar");
+      assert.equal(await app.ev(`CSS.highlights.get("find-match")?.size ?? 0`), 0, "Esc clears the highlights");
+      assert.equal(await app.ev(`document.activeElement === ${V}.input`), true, "Esc gives the message box the focus");
+      // a word only inside a tool group's output is not searched
+      assert.equal(await app.ev(`${V}.log.textContent.includes("hello")`), true, "the tool output is in the log");
+      await openFind(app, V);
+      await typeFind(app, V, "hello");
+      await app.check(`${findState(V)}.counter === "0/0"`, "the counter 0/0");
+      assert.equal(await app.ev(`CSS.highlights.get("find-match")?.size ?? 0`), 0);
+      // what of a bubble is text: a replayed relay message's sender header, the buttons and the time are not; a match
+      // across elements is one range; a match in a closed <details> of an answer opens it
+      const probe = await app.ev(`(() => {
+        const log = document.createElement("div");
+        const user = document.createElement("div");
+        user.className = "msg user";
+        user.innerHTML = '<div class="body">[from api-1]\\n[folder "/w"]\\nsay api-1</div><div class="acts"><button class="act">Fork</button><button class="copy">Copy</button></div><span class="time">12:34</span>';
+        const agent = document.createElement("div");
+        agent.className = "msg agent";
+        agent.innerHTML = '<div class="md"><p>al<b>ph</b>a</p><details><summary>More</summary>alpha inside</details></div>';
+        const group = document.createElement("details");
+        group.className = "group work";
+        group.textContent = "alpha in a tool";
+        log.append(user, agent, group);
+        const bar = new FindBar(log);
+        const found = (q) => (bar.open(q), bar.matches.map((m) => m.range.toString()));
+        const r = { header: found("api-1"), folder: found("folder"), fork: found("fork"), time: found("12:34"), alpha: found("alpha") };
+        r.exact = bar.goTo({ k: 1, before: "", after: " inside" }).exact;
+        r.counter = bar.count.textContent;
+        r.open = agent.querySelector("details").open;
+        bar.close();
+        return r;
+      })()`);
+      assert.deepEqual(probe, { header: ["api-1"], folder: [], fork: [], time: [], alpha: ["alpha", "alpha"], exact: true, counter: "2/2", open: true });
+    },
+  },
+  {
+    // only the active view's bar highlights; a closed view leaves no ranges and throws nothing
+    name: "find-bar-switch",
+    modes: ["off"],
+    async run(app) {
+      await firstTurn(app);
+      const WORD = "look";
+      const n = await mainCount(app, V, WORD);
+      await openFind(app, V);
+      await typeFind(app, V, WORD);
+      await app.check(`${findState(V)}.counter === "1/${n}"`, `the counter 1/${n}`);
+      // live: a new message with the word counts, the current match stays
+      await findKey(app, V, "Enter");
+      await app.send("Look at both checks.");
+      await app.answerPermission();
+      await app.idle();
+      await app.check(`${findState(V)}.counter === "2/${n + 1}"`, `the counter 2/${n + 1}`);
+      assert.equal(await app.ev(`CSS.highlights.get("find-match")?.size`), n + 1);
+      await app.startSession(app.dir); // a second session, in the launch's folder: the active view
+      const id = await app.ev(`[...views.keys()].find((id) => id !== "scripted-work") ?? null`);
+      assert.ok(id, "a second view");
+      const other = `views.get(${JSON.stringify(id)})`;
+      await app.ev(`(() => { const v = ${other}; v.input.value = "Look around."; v.input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); })()`);
+      await app.check(`(() => { const v = ${other}; return !v.busy && Date.now() - (v.lastUpdate ?? 0) > 300; })()`, "the second view's turn");
+      assert.ok((await mainCount(app, other, WORD)) > 0, "the word is in the second view too");
+      const rangesIn = (v) => app.ev(`[...(CSS.highlights.get("find-match") ?? [])].filter((r) => ${v}.log.contains(r.startContainer)).length`);
+      assert.equal(await rangesIn(other), 0, "no ranges in the second view");
+      assert.equal(await app.ev(`CSS.highlights.get("find-match")?.size ?? 0`), 0, "the hidden view's ranges are not shown");
+      await app.ev(`activate("scripted-work")`);
+      assert.equal(await rangesIn(V), n + 1, "the ranges are back");
+      assert.equal(await app.ev(`CSS.highlights.get("find-current")?.size`), 1);
+      await app.ev(`(window.__errors = [], addEventListener("error", (e) => __errors.push(e.message)), addEventListener("unhandledrejection", (e) => __errors.push(String(e.reason))), true)`);
+      await app.ev(`closeView("scripted-work")`);
+      await app.check(`!views.has("scripted-work")`, "the view to close");
+      await frames(app);
+      assert.deepEqual(await app.ev(`__errors`), []);
+      assert.equal(await app.ev(`CSS.highlights.get("find-match")?.size ?? 0`), 0, "no ranges left");
+      assert.equal(await app.ev(`CSS.highlights.get("find-current")?.size ?? 0`), 0);
+    },
+  },
+  {
+    // a sidebar hit opens the session and lands the find bar on that hit; a hit no match agrees with says so
+    name: "content-jump",
+    modes: ["off"],
+    sessionId: HISTORY_ID,
+    async run(app) {
+      const id = JSON.stringify(HISTORY_ID);
+      const v = `views.get(${id})`;
+      await seedHistory(app, v);
+      const WORD = "look";
+      const n = await mainCount(app, v, WORD);
+      assert.ok(n >= 2, `the word in the main thread: ${n}`);
+      await typeSearch(app, WORD);
+      await untilHits(app);
+      await closeAndList(app, id);
+      await app.ev(`document.querySelectorAll("#session-list .content-hit")[1].click()`);
+      await app.check(`!!${v}`, "the session to open");
+      await app.check(`${findState(v)}.counter === "2/${n}"`, `the counter 2/${n}`);
+      const r = await app.ev(`(() => {
+        const b = ${v}.findBar;
+        const cur = [...CSS.highlights.get("find-current")];
+        const rect = cur[0].getBoundingClientRect();
+        const box = ${v}.log.getBoundingClientRect();
+        return { open: b.isOpen, input: b.input.value, text: cur.map((x) => x.toString().toLowerCase()), inView: rect.top >= box.top - 1 && rect.bottom <= box.bottom + 1, note: b.note.hidden, active: activeId };
+      })()`);
+      assert.deepEqual(r, { open: true, input: WORD, text: [WORD], inView: true, note: true, active: HISTORY_ID });
+      // a jump with no hit (the session row) opens the bar on the first match
+      await app.ev(`document.querySelector("#session-list .content-title").click()`);
+      await app.check(`${findState(v)}.counter === "1/${n}"`, `the counter 1/${n}`);
+    },
+  },
+  {
+    // a snippet clicked while its session is still resuming (after the row's own click): the bar lands after the
+    // replay, on that hit, with no note
+    name: "content-jump-resuming",
+    modes: ["off"],
+    sessionId: HISTORY_ID,
+    scenario: path.join(FIXTURES, "slow-load-scenario.mjs"),
+    async run(app) {
+      const id = JSON.stringify(HISTORY_ID);
+      const v = `views.get(${id})`;
+      await seedHistory(app, v, async () => { await app.reload(); await app.check(`${v} && !${v}.resuming`, "the reload to settle"); });
+      const n = await mainCount(app, v, "look");
+      await typeSearch(app, "look");
+      await untilHits(app);
+      await closeAndList(app, id);
+      await app.ev(`document.querySelector("#session-list .content-title").click()`);
+      await app.check(`${v}?.resuming`, "the session to be resuming");
+      await app.ev(`document.querySelectorAll("#session-list .content-hit")[1].click()`);
+      await app.check(`${findState(v)}.counter === "2/${n}"`, `the counter 2/${n}`);
+      await frames(app);
+      const r = await app.ev(`(() => {
+        const b = ${v}.findBar;
+        const cur = [...CSS.highlights.get("find-current")];
+        const rect = cur[0].getBoundingClientRect();
+        const box = ${v}.log.getBoundingClientRect();
+        return { resuming: ${v}.resuming, counter: b.count.textContent, text: cur.map((x) => x.toString().toLowerCase()), inView: rect.top >= box.top - 1 && rect.bottom <= box.bottom + 1, note: b.note.hidden };
+      })()`);
+      assert.deepEqual(r, { resuming: false, counter: `2/${n}`, text: ["look"], inView: true, note: true });
+    },
+  },
+  {
+    // a hit the view does not agree with, and a session whose open fails: the note, no unhandled rejection
+    name: "content-jump-dead",
+    modes: ["off"],
+    sessionId: HISTORY_ID,
+    async run(app) {
+      const id = JSON.stringify(HISTORY_ID);
+      const v = `views.get(${id})`;
+      await seedHistory(app, v);
+      await typeSearch(app, "look");
+      await untilHits(app);
+      await app.ev(`(() => { const e = document.querySelectorAll("#session-list .content-hit")[1]; e._hit = { ...e._hit, k: 99, before: "zzzzzz", after: "zzzzzz" }; e.click(); })()`);
+      await app.check(`${v}.findBar.isOpen && !${v}.findBar.note.hidden`, "the note");
+      assert.equal(await app.ev(`${v}.findBar.note.textContent`), "This hit was not found in the loaded view");
+      // the next search clears it
+      await typeFind(app, v, "look around");
+      await app.check(`${v}.findBar.note.hidden`, "the note gone");
+      await app.ev(`${v}.findBar.close()`);
+      assert.equal(await app.ev(`${v}.findBar.note.hidden`), true);
+    },
+  },
+  {
+    name: "content-jump-failed-open",
+    modes: ["off"],
+    sessionId: HISTORY_ID,
+    scenario: path.join(FIXTURES, "failing-load-scenario.mjs"),
+    async run(app) {
+      const id = JSON.stringify(HISTORY_ID);
+      const v = `views.get(${id})`;
+      await seedHistory(app, v, async () => { await app.reload(); await app.check(`${v} && ${v}.dead && !${v}.resuming`, "the dead view"); });
+      await typeSearch(app, "look");
+      await untilHits(app);
+      await app.ev(`(window.__errors = [], addEventListener("error", (e) => __errors.push(e.message)), addEventListener("unhandledrejection", (e) => __errors.push(String(e.reason))), true)`);
+      await app.ev(`document.querySelectorAll("#session-list .content-hit")[1].click()`);
+      await app.check(`${v} && ${v}.dead && !${v}.resuming && ${v}.findBar.isOpen`, "the bar open over the dead view");
+      await frames(app);
+      assert.deepEqual(await app.ev(`__errors`), []);
+      assert.equal(await app.ev(`${v}.findBar.matches.length > 0`), true, "the replayed text is searched");
+    },
+  },
+  {
+    // the history holds raw Markdown, the view shows it rendered: the jump still agrees on the hit (no note)
+    name: "content-jump-markdown",
+    modes: ["off"],
+    sessionId: HISTORY_ID,
+    scenario: path.join(FIXTURES, "markdown-scenario.mjs"),
+    async run(app) {
+      const id = JSON.stringify(HISTORY_ID);
+      const v = `views.get(${id})`;
+      await app.newSession();
+      await app.send("Go.");
+      await app.idle();
+      const at = new Date().toISOString();
+      const events = [
+        { type: "session.start", data: {}, timestamp: at },
+        { type: "user.message", data: { content: "Go." }, timestamp: at },
+        { type: "assistant.message", data: { messageId: "md1", content: ANSWER_MARKDOWN }, timestamp: at },
+      ];
+      const dir = path.join(app.dir, "copilot-home", "session-state", HISTORY_ID);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(path.join(dir, "events.jsonl"), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
+      await app.reload();
+      for (const [word, near] of [["folder", "electron"], ["second", "item with link text"]]) {
+        await typeSearch(app, word);
+        await app.check(`document.querySelectorAll("#session-list .content-hit").length >= 1`, "the message hit");
+        await closeAndList(app, id);
+        await app.ev(`document.querySelectorAll("#session-list .content-hit")[0].click()`);
+        await app.check(`${findState(v)}.counter === "1/1"`, `the counter 1/1 for ${word}`);
+        await frames(app);
+        const r = await app.ev(`(() => {
+          const b = ${v}.findBar;
+          return { note: b.note.hidden, text: [...CSS.highlights.get("find-current")].map((x) => x.toString().toLowerCase()), around: b.matches[b.current].text.includes(${JSON.stringify(near)}) };
+        })()`);
+        assert.deepEqual(r, { note: true, text: [word], around: true }, word);
+        await app.ev(`${v}.findBar.close()`);
+      }
     },
   },
   ...commsChecks,
