@@ -3003,10 +3003,12 @@ class SessionView {
     const isCmd = SlashCommands.isCommandPrompt(text);
     const isContinue = MessageQueue.isContinuePrompt(text);
     let body = text;
+    let notes = []; // the pending notes this prompt took
     // not on a command: text in front of it would turn it into an ordinary prompt, the notes wait for the next one;
     // nor on the continue prompt: it is recognised on replay by its exact text
     if (this.pendingNotes.length && !isCmd && !isContinue) {
-      body = this.pendingNotes.join("\n\n") + "\n\n" + text;
+      notes = this.pendingNotes;
+      body = notes.join("\n\n") + "\n\n" + text;
       this.pendingNotes = [];
     }
     const wrapped = (b) => (answer && !isCmd ? MessageQueue.wrap(b, { more }) : b);
@@ -3042,7 +3044,9 @@ class SessionView {
       }
       if (this.chain.stopping()) {
         // Stop pressed while the note was asked: the prompt never goes out (nor into the history), and it ends as a
-        // stopped turn does (a relay message is taken, as a stopped one is)
+        // stopped turn does (a relay message is taken, as a stopped one is); the notes it took go with the next
+        // prompt, in front of any that came meanwhile
+        this.pendingNotes = [...notes, ...this.pendingNotes];
         delivery?.returned();
         this.dropTurn(bubble);
         const stopped = this.chain.returned(record, "cancelled");

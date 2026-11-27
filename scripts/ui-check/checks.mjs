@@ -285,10 +285,10 @@ async function stubEditCount(app) {
   })()`);
   assert.equal(ok, true, "startEdit calls api.countFrom once");
 }
-/** The pids of the scripted agents running in the launch's work folder (the session's Copilot processes). Only the
- *  agent itself (`node …/scripted-agent.mjs`) counts, not the shell that started it (`sh -c '…scripted-agent.mjs' …`). */
-function agentPids(app) {
-  const work = path.join(app.dir, "work");
+/** The pids of the scripted agents running in the launch's work folder, or in `work` (the session's Copilot
+ *  processes). Only the agent itself (`node …/scripted-agent.mjs`) counts, not the shell that started it
+ *  (`sh -c '…scripted-agent.mjs' …`). */
+function agentPids(app, work = path.join(app.dir, "work")) {
   return readdirSync("/proc")
     .filter((p) => /^\d+$/.test(p))
     .filter((p) => {
@@ -1317,6 +1317,69 @@ const fallbackChecks = [
       assert.ok(!(await app.ev(`${VC(parent)}.log.textContent`)).includes(FB.RESULT), "nor its chat");
       assert.ok(!(await systemLines(app, child)).some((t) => t.startsWith("Sent this reply")), "no sent line");
       assert.deepEqual(await app.ev(`api.fallbackList(${J(child)})`), [], "nothing pending in main");
+    },
+  },
+  {
+    // Don't send in a dead view (the child's process exited): the card goes, main keeps nothing, nothing is sent
+    name: "fallback-dead-dont",
+    modes: ["off"],
+    scenario: FALLBACK_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      const { child, childDir, parent, parentName } = await fallbackChild(app);
+      await app.check(`!${VC(child)}.busy && ${VC(child)}.el.querySelectorAll(".fallback-card").length === 1`, "the card in the child");
+      const pids = agentPids(app, childDir);
+      assert.equal(pids.length, 1, "one agent process for the child");
+      process.kill(pids[0], "SIGKILL");
+      await app.check(`${VC(child)}.dead`, "the child's view to be dead");
+      assert.equal(await app.ev(`${VC(child)}.el.querySelectorAll(".fallback-card").length`), 1, "the card stays in the dead view");
+      await app.ev(`${VC(child)}.el.querySelector(".fallback-card .fallback-drop").click()`);
+      await app.check(`${VC(child)}.el.querySelectorAll(".fallback-card").length === 0`, "the card to go");
+      await until(async () => (await systemLines(app, child)).includes(`Did not send this reply to "${parentName}".`), "the line in the child");
+      assert.ok(!(await systemLines(app, child)).some((t) => t.startsWith("Not sent")), "no Not sent line");
+      assert.deepEqual(await app.ev(`api.fallbackList(${J(child)})`), [], "nothing pending in main");
+      await settle();
+      assert.ok(!(await childReplies(app, parent)).some((t) => t.includes(FB.RESULT)), "the reply did not reach the parent");
+    },
+  },
+  {
+    // Stop while the note is asked: the prompt never goes out, and the pending notes it took (a notice for the model)
+    // go with the next prompt, as they would without the fallback
+    name: "fallback-stop-notes",
+    modes: ["off"],
+    scenario: FALLBACK_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      const { child, childDir } = await fallbackChild(app);
+      await app.check(`!${VC(child)}.busy && ${VC(child)}.el.querySelectorAll(".fallback-card").length === 1`, "the child's turn to end");
+      const sentBefore = promptsIn(childDir).length;
+      // window.api is frozen: runPrompt is rebuilt with its note request held until the check lets it go
+      const ok = await app.ev(`(() => {
+        const src = SessionView.prototype.runPrompt.toString();
+        if (src.split("api.fallbackNote(").length !== 2) return false;
+        window.__noteGate = new Promise((r) => { window.__openNote = r; });
+        window.__fallbackNote = (...a) => window.__noteGate.then(() => api.fallbackNote(...a));
+        SessionView.prototype.runPrompt = (0, eval)("({ " + src.replace("api.fallbackNote(", "__fallbackNote(") + " })").runPrompt;
+        return true;
+      })()`);
+      assert.equal(ok, true, "runPrompt asks api.fallbackNote once");
+      await app.ev(`${VC(child)}.pendingNotes.push("NOTICE: kid2 was adopted.")`);
+      const enter = (text) => app.ev(`(() => { const v = ${VC(child)}; v.input.value = ${J(text)}; v.input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); })()`);
+      await enter("first try");
+      await app.check(`${VC(child)}.busy`, "the prompt waiting for its note");
+      await app.ev(`${VC(child)}.stopBtn.click()`);
+      await app.ev(`__openNote()`);
+      await app.check(`!${VC(child)}.busy`, "the stopped turn to end");
+      await settle();
+      assert.equal(promptsIn(childDir).length, sentBefore, "the stopped prompt never went out");
+      assert.deepEqual(await app.ev(`${VC(child)}.pendingNotes`), ["NOTICE: kid2 was adopted."], "the notes wait for the next prompt");
+      await enter("second try");
+      await until(async () => promptsIn(childDir).length === sentBefore + 1, "the next prompt to go out");
+      const last = promptsIn(childDir).at(-1);
+      assert.ok(last.startsWith("NOTICE: kid2 was adopted.\n\nsecond try"), last);
+      assert.deepEqual(await app.ev(`${VC(child)}.pendingNotes`), [], "taken by the prompt that went out");
     },
   },
   {

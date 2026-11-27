@@ -1433,12 +1433,17 @@ handle("fallback:chainEnded", async (sessionId, seq) => {
   }
 });
 // Send (approved = true) or Don't send on a card. A forward an older broker refused ({ old: true }) or one that did not
-// arrive (an error) stays pending; null when it was answered already.
+// arrive (an error) stays pending; null when it was answered already. Don't send drops the forward also in a view
+// whose session is no longer open (its process exited); Send needs the open session.
 handle("fallback:answer", async (sessionId, id, approved) => {
-  const entry = getOpen(checkedSessionId(sessionId));
-  const f = pendingForwards.take(sessionId, id);
+  const f = pendingForwards.take(checkedSessionId(sessionId), id);
   if (!f) return null;
   if (approved !== true) return {};
+  const entry = open.get(sessionId);
+  if (!entry) {
+    pendingForwards.add(sessionId, f); // not sent: the card stays, Send tries again once the session is open
+    throw new Error("This session is not open.");
+  }
   const keep = () => open.get(sessionId) === entry && pendingForwards.add(sessionId, f);
   let r;
   try {
