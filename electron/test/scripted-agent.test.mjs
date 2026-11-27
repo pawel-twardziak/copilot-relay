@@ -292,3 +292,31 @@ test("prompts as a function plays the steps it returns for each prompt's text an
   a.stop();
   assert.deepEqual(a.updates(from).map((p) => p.update), [text("f0", "0:first"), text("f1", "1:second")]);
 });
+
+test("setting the agent option writes subagent.selected with the scenario's tools, the default subagent.deselected", async (t) => {
+  const cwd = freshCwd();
+  const home = path.join(tmp, `copilot-home-${dirs}`);
+  const withAgents = path.join(tmp, "agents.mjs");
+  const options = [{ value: "", name: "Default" }, { value: "limited", name: "Limited agent" }, { value: "open", name: "open" }];
+  const agent = { id: "agent", name: "Agent", type: "select", currentValue: "", options };
+  writeFileSync(withAgents, `export default { configOptions: [${JSON.stringify(agent)}], agentTools: { limited: ["read"] } };\n`);
+  const a = start(t, cwd, withAgents, { COPILOT_HOME: home });
+  await a.request("initialize", { protocolVersion: 1 });
+  const sessionId = a.seen[await a.request("session/new", { cwd, mcpServers: [] })].result.sessionId;
+  const set = async (value) => {
+    const answer = a.seen[await a.request("session/set_config_option", { sessionId, configId: "agent", value })];
+    assert.ok(!answer.error, JSON.stringify(answer.error));
+    assert.equal(answer.result.configOptions[0].currentValue, value);
+  };
+  await set("limited");
+  await set("");
+  await set("open"); // an agent the scenario lists no tools for: no tools list (an agent file without `tools:`)
+  a.stop();
+  const lines = readFileSync(path.join(home, "session-state", sessionId, "events.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.deepEqual(lines.map((e) => [e.type, e.data]), [
+    ["session.start", { sessionId, context: { cwd } }],
+    ["subagent.selected", { agentName: "limited", agentDisplayName: "Limited agent", tools: ["read"] }],
+    ["subagent.deselected", {}],
+    ["subagent.selected", { agentName: "open", agentDisplayName: "open" }],
+  ]);
+});

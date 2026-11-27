@@ -33,7 +33,10 @@
 // (scripted-<folder>-2, …), for a delegated child, which starts in its parent's folder.
 // The scenario's optional configOptions: the session's config options (an array, or (cwd) => array for options per
 // folder), returned by session/new and session/load; session/set_config_option({ configId, value }) sets that
-// option's currentValue and answers { configOptions }. Without it the session has none.
+// option's currentValue and answers { configOptions }. Without it the session has none. Setting the option "agent"
+// appends to the session's history file (as a checkpoint step does; nothing without $COPILOT_HOME) what Copilot writes
+// then: subagent.selected { agentName, agentDisplayName, tools } (tools from the scenario's optional
+// agentTools: { [name]: string[] }; an agent it does not list gets no tools list), or subagent.deselected {} for "".
 // Unknown arguments (--acp --stdio, the context tier…) are ignored.
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -41,7 +44,7 @@ import path from "node:path";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 
-const { prompts = [], load = {}, uniqueIds = false, configOptions = [] } = process.env.SCRIPTED_SCENARIO ? (await import(pathToFileURL(process.env.SCRIPTED_SCENARIO).href)).default : {};
+const { prompts = [], load = {}, uniqueIds = false, configOptions = [], agentTools = {} } = process.env.SCRIPTED_SCENARIO ? (await import(pathToFileURL(process.env.SCRIPTED_SCENARIO).href)).default : {};
 
 // $SCRIPTED_ARGV_FILE: the arguments this process was started with, one JSON line per start (a check reads what
 // reached the agent through the command line, the app's --acp --stdio included)
@@ -93,22 +96,36 @@ function update(u, record = true) {
   send({ method: "session/update", params: { sessionId: session.id, update: u } });
 }
 
-/** { checkpoint }: what Copilot writes to the session's history file in a turn (see the header). */
-function checkpoint({ ttlMs, model }, text) {
-  if (!process.env.COPILOT_HOME) throw new Error("scripted agent: a checkpoint step needs $COPILOT_HOME");
+/** Appends events ([type, data] pairs) to Copilot's history file of the session, after a session.start line if the
+ *  file has none. */
+function appendEvents(events, now = Date.now()) {
   const dir = path.join(process.env.COPILOT_HOME, "session-state", session.id);
   mkdirSync(dir, { recursive: true });
   const file = path.join(dir, "events.jsonl");
-  const now = Date.now();
   const event = (type, data) => JSON.stringify({ type, id: randomUUID(), timestamp: new Date(now).toISOString(), data });
   const lines = [];
   if (!existsSync(file) || !readFileSync(file, "utf8").includes('"type":"session.start"')) {
     lines.push(event("session.start", { sessionId: session.id, context: { cwd: session.cwd } }));
   }
-  lines.push(event("user.message", { content: text }));
-  const cache = { modelId: model, cacheExpiresAt: new Date(now + ttlMs).toISOString(), cacheTtlSeconds: ttlMs / 1000 };
-  lines.push(event("session.usage_checkpoint", { modelCacheState: [cache] }));
+  for (const [type, data] of events) lines.push(event(type, data));
   appendFileSync(file, lines.join("\n") + "\n");
+}
+
+/** { checkpoint }: what Copilot writes to the session's history file in a turn (see the header). */
+function checkpoint({ ttlMs, model }, text) {
+  if (!process.env.COPILOT_HOME) throw new Error("scripted agent: a checkpoint step needs $COPILOT_HOME");
+  const now = Date.now();
+  const cache = { modelId: model, cacheExpiresAt: new Date(now + ttlMs).toISOString(), cacheTtlSeconds: ttlMs / 1000 };
+  appendEvents([["user.message", { content: text }], ["session.usage_checkpoint", { modelCacheState: [cache] }]], now);
+}
+
+/** What Copilot writes at once when the agent option is set (see the header). */
+function agentChanged(option, value) {
+  if (!process.env.COPILOT_HOME) return;
+  if (!value) return appendEvents([["subagent.deselected", {}]]);
+  const agentDisplayName = option.options?.find((o) => o.value === value)?.name ?? value;
+  const tools = agentTools[value];
+  appendEvents([["subagent.selected", { agentName: value, agentDisplayName, ...(tools ? { tools } : {}) }]]);
 }
 
 function ask(method, params) {
@@ -220,6 +237,7 @@ const handlers = {
     const option = session.configOptions.find((o) => o.id === configId);
     if (!option) throw new Error(`no config option ${configId}`);
     option.currentValue = value;
+    if (configId === "agent") agentChanged(option, value);
     return { configOptions: session.configOptions };
   },
 };
