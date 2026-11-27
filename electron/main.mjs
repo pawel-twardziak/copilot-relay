@@ -2,6 +2,7 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, safeStorage, shell } from "electron";
 import { allowsAutomaticCheck, checkCandidates, createFileWatcher, createLocationTable, expandHome, isNetworkLocation, isRemote, localRealpath, passesAutomaticCheck, resolvePreview, resolveTarget } from "./file-access.mjs";
 import { isInside, lexicalPath } from "./paths.mjs";
+import { attachRendererLog, createFileLog, teeConsole } from "./main-log.mjs";
 import { execFile, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -1068,14 +1069,17 @@ const isDirectoryAsync = async (p) => {
 
 async function sessionRequested(parentSessionId, request) {
   const parent = open.get(parentSessionId);
-  if (!parent) return;
+  const id = request?.requestId;
+  if (!parent) return console.warn(`[delegation] session_request ${id} dropped: session ${parentSessionId} is not open`);
+  console.info(`[delegation] session_request ${id} from ${parentSessionId}`);
   const req = { ...request, parentSessionId };
   pendingRequests.add(req); // before the folder check: a close or a reload meanwhile drops it as any other request
   notifyIfUnfocused("A session asks to start a new session", req.name);
   // the folder is model-written: looked at only as far as the automatic-check rule allows (never a network location)
   const folder = await folderState(req.folder, { allow: allowAutomatic, isDir: isDirectoryAsync });
   // the parent closed (or was reopened) or the window reloaded meanwhile: the request is gone, so is its card
-  if (open.get(parentSessionId) !== parent || !pendingRequests.has(req.requestId)) return;
+  if (open.get(parentSessionId) !== parent || !pendingRequests.has(req.requestId))
+    return console.info(`[delegation] session_request ${id} dropped: its session closed or the window reloaded during the folder check`);
   // the parent's own command, for the card's command field: from the store, never from the request
   const storedCommand = commands.get(parentSessionId) ?? "";
   const start = cardStart(
@@ -1085,6 +1089,7 @@ async function sessionRequested(parentSessionId, request) {
   );
   // the card reads only `start` for the child's values: the request's own fields (model-written) are not sent raw
   send("delegation:request", { requestId: req.requestId, parentSessionId, name: req.name, task: req.task, start });
+  console.info(`[delegation] session_request ${id}: card sent to the window`);
 }
 
 /** The broker asks the user (through the sender's view) to reopen a closed relative that a message is waiting for. */
@@ -1997,6 +2002,7 @@ function createWindow() {
   // set once the page has loaded (and again after a reload): before that it rejects ("Render frame was disposed")
   win.webContents.on("did-finish-load", () => win.webContents.setVisualZoomLevelLimits(1, 1).catch(() => {}));
   win.webContents.on("zoom-changed", () => win.webContents.setZoomFactor(1));
+  if (mainLog) attachRendererLog(win.webContents, mainLog);
   win.on("focus", () => quota.get().catch(() => {}));
   win.webContents.setWindowOpenHandler(({ url }) => {
     openWeb(url);
@@ -2093,11 +2099,29 @@ function killAll() {
   lister?.kill();
 }
 
+// The log file (see main-log.mjs): the console's lines and the window's warnings and errors, for an app without a
+// console. Started by the one instance that runs, before anything else it does.
+let mainLog = null;
+function startMainLog() {
+  try {
+    mainLog = createFileLog(path.join(app.getPath("userData"), "logs", "main.log"));
+  } catch (e) {
+    console.warn(`[log] no log file: ${e.message}`);
+    return;
+  }
+  teeConsole(mainLog);
+  // written, not handled: an uncaught exception still ends the process as before
+  process.on("uncaughtExceptionMonitor", (err, origin) => mainLog.write("error", [`[main] ${origin}:`, err]));
+  process.on("warning", (w) => mainLog.write("warn", ["[main]", w]));
+  console.info(`[log] Copilot Sessions ${app.getVersion()} started (${process.platform} ${process.arch}, Electron ${process.versions.electron})`);
+}
+
 // One instance at a time: two would share (and clean up) the same paste folder and settings file.
 // Starting the app again focuses the open window instead.
 if (!app.requestSingleInstanceLock()) {
   app.quit(); // and nothing else: no login-shell PATH lookup, no window
 } else {
+  startMainLog();
   app.on("second-instance", () => {
     if (!win) return app.isReady() && createWindow(); // e.g. macOS with the window closed but the app running
     if (win.isMinimized()) win.restore();
@@ -2128,6 +2152,7 @@ if (!app.requestSingleInstanceLock()) {
             { label: "Reload", accelerator: "CmdOrCtrl+R", click: () => confirmedReload((wc) => wc.reload()) },
             { label: "Force Reload", accelerator: "Shift+CmdOrCtrl+R", click: () => confirmedReload((wc) => wc.reloadIgnoringCache()) },
             { role: "toggleDevTools" },
+            { label: "Show Log File", click: () => mainLog && shell.showItemInFolder(mainLog.file) },
             { type: "separator" },
             { role: "togglefullscreen" },
           ],

@@ -38,6 +38,7 @@
       "cache-keeper-runner.mjs",
       "usage.mjs",
       "paths.mjs",
+      "main-log.mjs",
       "file-access.mjs",
       "delegation.mjs",
       "prompt-count.mjs",
