@@ -70,7 +70,7 @@ None of these blocked the merge. Line numbers were taken at the review and may d
      session ids, job names; the connection token travels only in a child's env). Worth a line in the docs, since the
      user will share this file.
 
-3. **The relay trace stops at the view.**
+2. **The relay trace stops at the view.**
    - Where: `SessionView.incoming`, `SessionView.delegationCard` (`electron/renderer/app.js`).
    - When the view exists, a message or card that does not render leaves only a renderer console error (which reaches
      main.log). A card that renders but is not visible (scrolled, in a collapsed group) leaves nothing. Proposal: an
@@ -100,12 +100,12 @@ None of these blocked the merge. Line numbers were taken at the review and may d
 5. **`git describe` delays the broker's start by up to 3 s** (`BUILD`, `server.mjs`), before `listen`. Acceptable with
    the clients' retry delays and broker-restart's 15 s health wait.
 
-7. **`GET /health` does not carry the broker's build**, and no README mentions `broker.log` or
-   `COPILOT_RELAY_LOG_FILE`: the path is found only through main.log's `← registered … its log: …` line.
-
 6. **The broker's log module lives in `electron/`.** `server.mjs` imports `./electron/main-log.mjs` dynamically; a copy
    of the broker without that folder (the broker-restart e2e test's copy) runs without broker.log. The canonical place
    would be `src/`, but the packaged app cannot import from it (only `electron/` is packaged).
+
+7. **`GET /health` does not carry the broker's build**, and no README mentions `broker.log` or
+   `COPILOT_RELAY_LOG_FILE`: the path is found only through main.log's `← registered … its log: …` line.
 
 ## D. Tests and housekeeping
 
