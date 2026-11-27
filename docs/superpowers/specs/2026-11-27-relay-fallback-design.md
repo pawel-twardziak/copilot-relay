@@ -174,7 +174,8 @@ A forward is prepared when all hold:
 - Several pending forwards each have their own card.
 - Pending forwards live in main memory per session and are shown again when the session's view reopens (like the held
   cache); they are lost when the app quits. A lost report leaves the existing "ended without reporting" notice path in
-  place. *(builder's call)*
+  place. *(builder's call)* Pending forwards are dropped when the session's history is cut (delete from a message,
+  an edit) or the session is deleted.
 
 ### Switches
 

@@ -1389,6 +1389,34 @@ const fallbackChecks = [
     },
   },
   {
+    // "Delete this reply" under a pending card: the cut history no longer holds the reply, so the reopened view shows
+    // no card (and main keeps no forward to send)
+    name: "fallback-truncate",
+    modes: ["off"],
+    scenario: FALLBACK_SCENARIO,
+    settings: { relay: true },
+    broker: true,
+    async run(app) {
+      const { child, childDir, parent } = await fallbackChild(app);
+      await app.check(`!${VC(child)}.busy && ${VC(child)}.el.querySelectorAll(".fallback-card").length === 1`, "the card in the child");
+      // Copilot's history of the turn (the scripted agent keeps none): the prompt as sent, then the reply
+      const file = path.join(app.dir, "copilot-home", "session-state", child, "events.jsonl");
+      const event = (type, data) => JSON.stringify({ type, id: randomUUID(), timestamp: new Date().toISOString(), data }) + "\n";
+      appendFileSync(file, event("user.message", { content: promptsIn(childDir)[0] }) + event("assistant.message", { messageId: "fb-reply", content: FB.RESULT }));
+      const reply = `[...${VC(child)}.log.querySelectorAll(":scope > .msg.agent")].find((e) => e._kind === "reply")`;
+      await app.check(`!!${reply}`, "the reply with its actions");
+      await app.ev(`(() => { window.confirm = () => true; const v = ${VC(child)}; window.__cut = v.historyAction(${reply}, "delete"); })()`);
+      await app.ev(`window.__cut`, "the delete to finish");
+      await app.check(`!!${VC(child)} && !${VC(child)}.busy && !${VC(child)}.resuming`, "the reopened child");
+      const kept = readFileSync(file, "utf8").trim().split("\n").map((l) => JSON.parse(l).type);
+      assert.deepEqual(kept, ["session.start", "subagent.selected", "user.message"], "the reply cut from the history");
+      await settle();
+      assert.deepEqual(await forwardCards(app, child), [], "no card after the reopen");
+      assert.deepEqual(await app.ev(`api.fallbackList(${J(child)})`), [], "nothing pending in main");
+      assert.deepEqual(await childReplies(app, parent), [], "nothing reached the parent");
+    },
+  },
+  {
     // Settings → Sessions: the approval off by default, saved; a new child's reply goes at once, without a card
     name: "fallback-settings",
     modes: ["off"],

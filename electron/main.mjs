@@ -101,8 +101,8 @@ const fallbackSwitches = createFallbackStore(path.join(app.getPath("userData"), 
 /** Does the forward of this session's reply wait for approval: its own switch, else the Settings default (on). */
 const fallbackApproval = (sessionId) => fallbackSwitches.get(sessionId) ?? loadSettings().approveFallback !== false;
 // forwarded replies waiting for that approval, per session; lost when the app quits (see fallback.mjs). Kept while the
-// session is closed (its view reopened, a restart, a process that ended): the reopened view shows them again. A delete
-// drops them.
+// session is closed (its view reopened, a restart, a process that ended): the reopened view shows them again. A cut of
+// the history (delete from a message, an edit) and a delete of the session drop them.
 const pendingForwards = createPending();
 const heldCache = createHeldCache();
 const HELD_NOTICE = { child: "A sub-session replied", parent: "Your parent session sent a message", other: "Another session sent a message" };
@@ -1550,7 +1550,9 @@ handle("sessions:truncate", async (sessionId, target) => {
   return historyOp(sessionId, async () => {
     describeCut(sessionId, target); // throws for a target that doesn't match, before anything is closed
     await closeAndWait(sessionId);
-    return truncateSession(sessionId, target);
+    const res = truncateSession(sessionId, target);
+    pendingForwards.drop(sessionId); // a waiting forward may hold a reply the cut removed: it must not be sent
+    return res;
   });
 });
 
