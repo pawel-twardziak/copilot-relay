@@ -3326,7 +3326,7 @@ function openRelative(id) {
   if (deleting.has(id)) return setStatus("This session is being deleted.", true);
   const s = sessions.find((x) => x.sessionId === id) ?? (v && { sessionId: id, cwd: v.cwd, title: v.title });
   if (!s) return setStatus("This session is not in Copilot's session list.", true);
-  openSession(s);
+  return openSession(s); // a promise: a caller that needs the opened view awaits it
 }
 
 /** showProject: its folder goes into the meta line (in Pinned and Open in app, or its folder differs from its root's).
@@ -3987,10 +3987,7 @@ function scheduleContentSearch() {
 
 /** Opens the session of a hit (Task 7 adds the jump to the message). hit: { k, before, after } or null (the first hit). */
 async function jumpToHit(sessionId, hit) {
-  const s = sessions.find((x) => x.sessionId === sessionId) ?? views.get(sessionId);
-  if (!s) return;
-  if (views.has(sessionId)) activate(sessionId);
-  else await openSession(s);
+  await openRelative(sessionId);
 }
 
 function snippetNode(sessionId, hit) {
