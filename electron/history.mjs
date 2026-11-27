@@ -3,8 +3,13 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { isKeepAlive } from "./cache-keeper.mjs";
+
+const require = createRequire(import.meta.url);
+const MessageText = require("./renderer/message-text.js");
+const FindText = require("./renderer/find-text.js");
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const FORMAT_ERROR = "Unrecognized session history format";
@@ -134,6 +139,71 @@ export async function messageTimes(id) {
     }
   }
   return { users, agents };
+}
+
+/** Probe results (docs/superpowers/specs/2026-11-27-content-search-design.md): commentary is replayed, and so is
+ *  the history from before a compaction. */
+export const SEARCH_COMMENTARY = true;
+export const REPLAY_HAS_PRE_COMPACTION = true;
+
+/** The searchable messages of an events.jsonl text, in file order: { kind, text, at, beforeCompaction }.
+ *  Sub-agent events, keep-alive prompts, empty texts and unparsable lines (a half-written last one) are skipped. */
+export function extractMessages(text) {
+  const messages = [];
+  let lastCompaction = 0; // messages.length at the last compaction
+  for (const line of text.split("\n")) {
+    const isMsg = line.includes('"user.message"') || line.includes('"assistant.message"');
+    if (!isMsg && !line.includes('"session.compaction_complete"')) continue;
+    let e;
+    try {
+      e = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (e?.agentId) continue;
+    if (e?.type === "session.compaction_complete") {
+      lastCompaction = messages.length;
+      continue;
+    }
+    const raw = e?.data?.content;
+    if (typeof raw !== "string") continue;
+    let kind, body;
+    if (e.type === "user.message") {
+      if (isKeepAlive(raw)) continue;
+      kind = "user";
+      body = MessageText.searchableUserText(raw);
+    } else if (e.type === "assistant.message") {
+      if (e.data.phase === "commentary" && !SEARCH_COMMENTARY) continue;
+      kind = "agent";
+      body = raw;
+    } else continue;
+    if (!body.trim()) continue;
+    const t = Date.parse(e.timestamp);
+    messages.push({ kind, text: body, at: Number.isFinite(t) ? t : null, beforeCompaction: false });
+  }
+  for (let i = 0; i < lastCompaction; i++) messages[i].beforeCompaction = true;
+  return messages;
+}
+
+/** Search `query` in `messages`: the total number of occurrences, the newest time of a hit, and the first `shown`
+ *  hits. `k` numbers the occurrences in file order; without pre-compaction replay the older ones get -1 and the
+ *  numbering starts after the compaction. */
+export function searchMessages(messages, query, { shown = 3 } = {}) {
+  const hits = [];
+  let count = 0;
+  let latest = null;
+  let k = 0;
+  for (const m of messages) {
+    for (const { start, end } of FindText.findMatches(m.text, query)) {
+      count++;
+      if (m.at !== null && (latest === null || m.at > latest)) latest = m.at;
+      const hitK = !REPLAY_HAS_PRE_COMPACTION && m.beforeCompaction ? -1 : k++;
+      if (hits.length < shown) {
+        hits.push({ k: hitK, kind: m.kind, snippet: FindText.makeSnippet(m.text, start, end), at: m.at, beforeCompaction: m.beforeCompaction });
+      }
+    }
+  }
+  return { count, latest, hits };
 }
 
 /** What cutting session `id` at `target` would remove, for the confirm dialog. */
