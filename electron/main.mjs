@@ -100,7 +100,9 @@ const holds = createHoldStore(path.join(app.getPath("userData"), "held-replies.j
 const fallbackSwitches = createFallbackStore(path.join(app.getPath("userData"), "fallback-approval.json"));
 /** Does the forward of this session's reply wait for approval: its own switch, else the Settings default (on). */
 const fallbackApproval = (sessionId) => fallbackSwitches.get(sessionId) ?? loadSettings().approveFallback !== false;
-// forwarded replies waiting for that approval, per session; lost when the app quits (see fallback.mjs)
+// forwarded replies waiting for that approval, per session; lost when the app quits (see fallback.mjs). Kept while the
+// session is closed (its view reopened, a restart, a process that ended): the reopened view shows them again. A delete
+// drops them.
 const pendingForwards = createPending();
 const heldCache = createHeldCache();
 const HELD_NOTICE = { child: "A sub-session replied", parent: "Your parent session sent a message", other: "Another session sent a message" };
@@ -594,7 +596,6 @@ function attach(sessionId, conn, cwd, relay, link) {
     dropReopenCards(sessionId);
     dropLinkCards(sessionId);
     heldCache.drop(sessionId);
-    pendingForwards.drop(sessionId);
     usage.forget(sessionId);
     pendingRequests.dropForParent(sessionId);
     send("acp:exit", { sessionId, code, signal, stderr: stderr?.trim().slice(-800) });
@@ -1045,7 +1046,6 @@ async function closeEntry(sessionId) {
   dropReopenCards(sessionId);
   dropLinkCards(sessionId);
   heldCache.drop(sessionId);
-  pendingForwards.drop(sessionId);
   e.relay?.stop();
   await Promise.race([e.conn.request("session/close", { sessionId }).catch(() => {}), new Promise((r) => setTimeout(r, 2000))]);
   e.conn.kill();
@@ -1581,6 +1581,7 @@ handle("sessions:delete", async (sessionId) => {
     const res = await deleteSession(sessionId, { missingOk: true });
     holds.delete(sessionId);
     fallbackSwitches.delete(sessionId);
+    pendingForwards.drop(sessionId);
     keeperOptOut.delete(sessionId);
     tiers.delete(sessionId);
     prompts.delete(sessionId);
