@@ -59,11 +59,52 @@ test("a later baseline of the agent beats an older subagent.selected", () => {
   assert.deepEqual(agentRelayTools("limited", [selected("limited", ["read"]), base(["view", "relay_report_result", "relay_send_message"])]), both);
   // the other order: the newer selected wins
   assert.deepEqual(agentRelayTools("limited", [base(["view", "relay_report_result", "relay_send_message"]), selected("limited", ["read"])]), none);
-  // a baseline of another agent does not count
+  // a baseline of another agent (written after switching to it) does not count
   const other = { type: "session.tool_baseline", data: { surface: "x:agent=other", tools: [{ name: "relay_send_message" }] } };
-  assert.deepEqual(agentRelayTools("limited", [selected("limited", ["read"]), other]), none);
+  assert.deepEqual(agentRelayTools("limited", [selected("limited", ["read"]), selected("other", ["*"]), other]), none);
+  // nor a default-agent baseline (empty name), even with no switch recorded before it
+  const plain = { type: "session.tool_baseline", data: { surface: "x:agent=", tools: [{ name: "relay_send_message" }] } };
+  assert.deepEqual(agentRelayTools("limited", [selected("limited", ["read"]), plain]), none);
   // a later baseline without a tools list means all tools
   assert.deepEqual(agentRelayTools("limited", [selected("limited", ["read"]), { type: "session.tool_baseline", data: { surface: "x:agent=limited" } }]), both);
+});
+
+// A real session (Copilot 1.0.117): the agent's `name:` ("Poeta wspomnień") is the option value and subagent.selected's
+// agentName, but the baseline's surface carries the file name ("poeta-wspomnien"). The agent file gained all tools and
+// the session was resumed: a new baseline, no new subagent.selected.
+const relayBase = (surfaceAgent, names) => ({
+  type: "session.tool_baseline",
+  data: { surface: `responses:capi:none:agent=${surfaceAgent}`, tools: names.map((name) => ({ name, deferred: false })) },
+});
+const POET = "Poeta wspomnień";
+
+test("a baseline after the agent's own selection counts, whatever name its surface carries", () => {
+  const events = [
+    { type: "session.start", data: {} },
+    selected(POET, ["edit"]),
+    relayBase("poeta-wspomnien", ["view", "skill", "sql"]),
+    { type: "session.shutdown", data: {} },
+    { type: "session.resume", data: {} },
+    relayBase("poeta-wspomnien", ["view", "relay-report_result", "relay-send_message"]),
+  ];
+  assert.deepEqual(agentRelayTools(POET, events), both);
+  assert.deepEqual(agentRelayTools(POET, events.slice(0, 5)), none); // before the new baseline: still the old list
+});
+
+test("a baseline after another agent's selection does not count for this one", () => {
+  const events = [
+    selected(POET, ["edit"]),
+    selected("Poeta sensu życia", ["*"]),
+    relayBase("poeta-sensu-zycia", ["relay-report_result", "relay-send_message"]),
+  ];
+  assert.deepEqual(agentRelayTools(POET, events), none);
+});
+
+test("a baseline is matched by the agent's name or by its file-style name", () => {
+  const events = [relayBase("poeta-wspomnien", ["relay-report_result", "relay-send_message"])];
+  assert.deepEqual(agentRelayTools(POET, events), both);
+  assert.deepEqual(agentRelayTools("Poeta sensu życia", [relayBase("poeta-sensu-zycia", ["view"])]), none);
+  assert.deepEqual(agentRelayTools("Łąka Ćma", [relayBase("laka-cma", ["view"])]), none);
 });
 
 test("a missing tools list means all tools", () => {

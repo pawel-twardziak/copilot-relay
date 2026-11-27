@@ -16,6 +16,9 @@ None of these blocked the merge. Line numbers were taken at the review and may d
   Stop during the note request skips the prompt.
 - Pending forwards survive a close and are dropped by a delete or a cut of the history.
 - `fallback:list` returns the `old` / `error` flags, so the "broker too old" line comes back after a reopen (v0.38.1).
+- A baseline is matched to the agent by order after its own selection and by its file-style name, so an agent whose
+  `name:` differs from its file name ("Poeta wspomnień" / `poeta-wspomnien`) is seen with its new tools after a
+  restart (v0.38.2).
 - Pending forwards are kept on disk (`fallback-pending.json`) and survive an app restart; a forward stays on disk
   until its send succeeded, and a send failing during a close or restart keeps it (v0.38.1).
 - The note waits up to 2 s for `subagent.selected` after the app set the agent (Copilot writes it ~500 ms late).

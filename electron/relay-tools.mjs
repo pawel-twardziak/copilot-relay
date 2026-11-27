@@ -12,16 +12,37 @@ const grants = (entry, tool) => {
 
 const flags = (entries) => Object.fromEntries(RELAY_TOOLS.map((t) => [t, entries.some((e) => grants(e, t))]));
 
+/** The file-style name Copilot puts in a baseline's surface for an agent named `name` ("Poeta wspomnień" →
+ *  "poeta-wspomnien"): lower case, no diacritics, runs of other characters as one "-". */
+export const agentSlug = (name) =>
+  String(name ?? "")
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .replace(/ł/g, "l")
+    .replace(/Ł/g, "L")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+const isSwitch = (e) => e?.type === "subagent.selected" || e?.type === "subagent.deselected";
+
 /** Relay tools the agent can call, from events.jsonl. The default agent ("" or undefined) and unknown ones have both.
- *  Of the agent's last subagent.selected and its last tool baseline (surface ending in `agent=<name>`), the later one
- *  in the list counts: a reload after the agent file changed writes a new baseline but no new subagent.selected. */
+ *  Of the agent's last subagent.selected and its last tool baseline, the later one in the list counts: a reload after
+ *  the agent file changed writes a new baseline but no new subagent.selected. A baseline is the agent's when it was
+ *  written after the agent's own selection with no switch since (its surface carries the file name, which can differ
+ *  from the agent's `name:`), or when its surface ends with `agent=<name>` or `agent=<file-style name>`. */
 export function agentRelayTools(agent, events) {
   if (!agent) return both();
   const list = events ?? [];
   const selAt = list.findLastIndex((e) => e?.type === "subagent.selected" && e.data?.agentName === agent);
-  const baseAt = list.findLastIndex(
-    (e) => e?.type === "session.tool_baseline" && String(e.data?.surface ?? "").endsWith(`agent=${agent}`),
-  );
+  const ownFrom = selAt >= 0 && list.findLastIndex(isSwitch) === selAt ? selAt : Infinity;
+  const names = new Set([`agent=${agent}`, `agent=${agentSlug(agent)}`]);
+  const baseAt = list.findLastIndex((e, i) => {
+    if (e?.type !== "session.tool_baseline") return false;
+    const surface = String(e.data?.surface ?? "");
+    if (i > ownFrom && !surface.endsWith("agent=")) return true; // a default-agent baseline is never this agent's
+    return [...names].some((n) => surface.endsWith(n));
+  });
   if (selAt < 0 && baseAt < 0) return both();
   // A missing tools list means all tools (an agent file without a `tools:` key).
   if (selAt > baseAt) {

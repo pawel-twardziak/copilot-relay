@@ -107,7 +107,12 @@ the probe showed a reliable signal before the prompt.
 
 - `agent` is the session's live `agent` option `currentValue`; no option or `""` → both `true` (the default agent).
 - Otherwise two events count: the last `subagent.selected` with `agentName === agent`, and the last
-  `session.tool_baseline` whose `surface` ends with `agent=<agent>`. Whichever of the two comes later in the history
+  `session.tool_baseline` that is this agent's. The option value and `agentName` are the agent's `name:` ("Poeta
+  wspomnień"), but a baseline's `surface` carries the agent's file name (`agent=poeta-wspomnien`; verified on CLI
+  1.0.117, 2026-11-27). So a baseline is the agent's when it comes after the agent's own `subagent.selected` with no
+  other `subagent.selected`/`deselected` since (and its surface does not end in an empty `agent=`), or when its
+  surface ends with `agent=<agent>` or `agent=<file-style name>` (`agentSlug`: lower case, no diacritics, other
+  characters as `-`) (v0.38.2). Whichever of the two comes later in the history
   decides: a stale selection does not beat a newer baseline (an agent file that gained `relay/*`, then a
   `session/load`, which writes a new baseline but no new `subagent.selected`), and a newer selection beats an older
   baseline.
