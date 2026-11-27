@@ -23,7 +23,8 @@ it with navigation; and to search inside one open session.
 - Regex, word boundaries, fuzzy matching, ranking.
 - Searching sessions that the sidebar does not list (deleted, other Copilot homes).
 - A persistent index (no FTS of our own on disk, no reliance on Copilot's `session-store.db` `search_index`: on this
-  machine it covers only 13 of 24 sessions that have an `events.jsonl`). An in-memory cache in the scan worker (below)
+  machine (2026-11-27) only 10 of the 13 sessions with an `events.jsonl` are in it, while it still holds 14 sessions
+  whose history is gone, and it indexes whole turns, not the messages the view renders). An in-memory cache in the scan worker (below)
   is allowed: it is lost on restart.
 - Relay sender names: the `[from <name>]` header is not searchable (on either side), only the message text.
 
