@@ -129,6 +129,8 @@ const FileLinks = {
   pathCandidates,
   splitPathSuffix,
   parseRelayHeader,
+  FROM_LINE,
+  FOLDER_LINE,
   previewLanguage,
   WELL_KNOWN_NAMES,
 };
