@@ -259,6 +259,11 @@ async function seedHistory(app, v, reload = () => app.reload()) {
   writeFileSync(path.join(dir, "events.jsonl"), [{ type: "session.start", data: {}, timestamp: at }, ...events].map((e) => JSON.stringify(e)).join("\n") + "\n");
   await reload();
 }
+/** Closes the view of HISTORY_ID and lists its session (the scripted agent lists none), so a click opens it again. */
+async function closeAndList(app, id) {
+  await app.ev(`(async () => { const v = views.get(${id}); sessions = [{ sessionId: ${id}, cwd: v.cwd, title: "history" }]; await closeView(${id}); renderList(); })()`);
+  await app.check(`!views.has(${id})`, "the view to close");
+}
 const activate = async (app, id) => {
   await app.ev(`activate(${JSON.stringify(id)})`);
   await frames(app);
@@ -4744,8 +4749,9 @@ export const checks = [
       assert.ok(n >= 2, `the word in the main thread: ${n}`);
       await typeSearch(app, WORD);
       await untilHits(app);
-      assert.equal(await app.ev(`${v}.findBar.isOpen`), false, "the bar starts closed");
+      await closeAndList(app, id);
       await app.ev(`document.querySelectorAll("#session-list .content-hit")[1].click()`);
+      await app.check(`!!${v}`, "the session to open");
       await app.check(`${findState(v)}.counter === "2/${n}"`, `the counter 2/${n}`);
       const r = await app.ev(`(() => {
         const b = ${v}.findBar;
@@ -4758,6 +4764,36 @@ export const checks = [
       // a jump with no hit (the session row) opens the bar on the first match
       await app.ev(`document.querySelector("#session-list .content-title").click()`);
       await app.check(`${findState(v)}.counter === "1/${n}"`, `the counter 1/${n}`);
+    },
+  },
+  {
+    // a snippet clicked while its session is still resuming (after the row's own click): the bar lands after the
+    // replay, on that hit, with no note
+    name: "content-jump-resuming",
+    modes: ["off"],
+    sessionId: HISTORY_ID,
+    scenario: path.join(FIXTURES, "slow-load-scenario.mjs"),
+    async run(app) {
+      const id = JSON.stringify(HISTORY_ID);
+      const v = `views.get(${id})`;
+      await seedHistory(app, v, async () => { await app.reload(); await app.check(`${v} && !${v}.resuming`, "the reload to settle"); });
+      const n = await mainCount(app, v, "look");
+      await typeSearch(app, "look");
+      await untilHits(app);
+      await closeAndList(app, id);
+      await app.ev(`document.querySelector("#session-list .content-title").click()`);
+      await app.check(`${v}?.resuming`, "the session to be resuming");
+      await app.ev(`document.querySelectorAll("#session-list .content-hit")[1].click()`);
+      await app.check(`${findState(v)}.counter === "2/${n}"`, `the counter 2/${n}`);
+      await frames(app);
+      const r = await app.ev(`(() => {
+        const b = ${v}.findBar;
+        const cur = [...CSS.highlights.get("find-current")];
+        const rect = cur[0].getBoundingClientRect();
+        const box = ${v}.log.getBoundingClientRect();
+        return { resuming: ${v}.resuming, counter: b.count.textContent, text: cur.map((x) => x.toString().toLowerCase()), inView: rect.top >= box.top - 1 && rect.bottom <= box.bottom + 1, note: b.note.hidden };
+      })()`);
+      assert.deepEqual(r, { resuming: false, counter: `2/${n}`, text: ["look"], inView: true, note: true });
     },
   },
   {

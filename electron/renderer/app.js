@@ -3093,6 +3093,8 @@ async function openSession(s, { activate: show = true } = {}) {
   v.resuming = true;
   const replayId = ++replaySeq;
   const replayed = new Promise((resolve) => replayEnds.set(replayId, resolve));
+  let opened;
+  v.opening = new Promise((resolve) => (opened = resolve)); // settles when the replay is shown (or failed)
   try {
     const res = await api.openSession(s.sessionId, s.cwd, replayId);
     await replayed; // the answer may overtake the last replayed updates, the marker cannot
@@ -3119,6 +3121,8 @@ async function openSession(s, { activate: show = true } = {}) {
     v.setBusy(false);
   } finally {
     replayEnds.delete(replayId);
+    v.opening = null;
+    opened();
   }
 }
 
@@ -3996,12 +4000,17 @@ function scheduleContentSearch() {
 /** Opens the session of a hit and lands its find bar on the message: the filter field's text is searched, and the
  *  match that agrees with hit ({ k, before, after }) is current (null: the first match). When none agrees the bar
  *  says so. A view whose open failed still shows what was replayed: the bar opens over it. */
+let jumpSeq = 0;
 async function jumpToHit(sessionId, hit) {
+  const query = $("#search").value.trim(); // as at the click: the field may change while the session opens
+  const seq = ++jumpSeq; // only the latest jump lands
   await openRelative(sessionId);
+  await views.get(sessionId)?.opening; // a view still resuming: its replay first
   const view = views.get(sessionId);
-  if (!view || activeId !== sessionId) return; // not opened (deleting, not listed) or another view was chosen meanwhile
-  view.findBar.open($("#search").value.trim());
+  if (seq !== jumpSeq || !view || activeId !== sessionId) return; // superseded, not opened (deleting, not listed) or another view was chosen meanwhile
+  view.findBar.open(query);
   const { exact } = view.findBar.goTo(hit);
+  view.follow = false; // the log stays at the hit: the bar's own resize of the log must not take it to the bottom again
   if (hit && !exact) view.findBar.setNote("This hit was not found in the loaded view");
 }
 
