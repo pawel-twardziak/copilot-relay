@@ -17,11 +17,12 @@ export function agentRelayTools(agent, events) {
   if (!agent) return both();
   const list = events ?? [];
   const sel = list.findLast((e) => e?.type === "subagent.selected" && e.data?.agentName === agent);
-  if (sel) return flags(Array.isArray(sel.data.tools) ? sel.data.tools : []);
+  // A missing tools list means all tools (an agent file without a `tools:` key).
+  if (sel) return Array.isArray(sel.data.tools) ? flags(sel.data.tools) : both();
   const base = list.findLast(
     (e) => e?.type === "session.tool_baseline" && String(e.data?.surface ?? "").endsWith(`agent=${agent}`),
   );
-  if (base) return flags((base.data.tools ?? []).map((t) => t?.name));
+  if (base) return Array.isArray(base.data.tools) ? flags(base.data.tools.map((t) => t?.name)) : both();
   return both();
 }
 

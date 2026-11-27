@@ -50,6 +50,12 @@ test("baseline fallback", () => {
   assert.equal(agentRelayTools("limited", [baseline("relay_send_message")]).report_result, false);
 });
 
+test("a missing tools list means all tools", () => {
+  assert.deepEqual(agentRelayTools("limited", [selected("limited", undefined)]), both);
+  const baseline = { type: "session.tool_baseline", data: { surface: "x:agent=limited" } };
+  assert.deepEqual(agentRelayTools("limited", [baseline]), both);
+});
+
 test("switch back to default", () => {
   const events = [selected("limited", ["read"]), { type: "subagent.deselected", data: {} }];
   assert.deepEqual(agentRelayTools("", events), both);
@@ -90,8 +96,9 @@ test("neededTool", () => {
 test("note and strip", () => {
   const note = fallbackNote({ toName: "p", kind: "report" });
   assert.ok(note.startsWith(`${NOTE_MARK}\n`));
-  assert.ok(note.includes("p") && note.includes("report"));
-  assert.ok(fallbackNote({ toName: "p", kind: "message" }).includes("reply"));
+  assert.ok(note.includes('"p" as your report'));
+  assert.ok(!note.includes("as your reply"));
+  assert.ok(fallbackNote({ toName: "p", kind: "message" }).includes('"p" as your reply'));
   assert.equal(stripNote(`hi\n\n${note}`), "hi");
   assert.equal(stripNote("hi there"), "hi there");
 });
