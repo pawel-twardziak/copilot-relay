@@ -276,6 +276,17 @@ an ordinary session: it appears in the list, you can open it, read what it did, 
   above).
   While it waits, it has a `!` in the list and an OS notification fires if the window is not focused. Nothing is
   answered for you.
+- **Sessions without relay tools.** A session whose custom agent (`.github/agents`, `~/.copilot/agents`, an
+  organisation agent) leaves the relay server out of its `tools:` list can read relay messages but cannot answer them.
+  The app notices this before each prompt and adds a note: the session's last message of the turn goes to the sender
+  as its answer, so it should end the turn with the result. After such a turn a card under the reply asks
+  **Send this reply to "<S>" as its report?** (or "as a message"): **Send** forwards it, to the parent as the child's
+  report the first time and as a message after that, to any other session as a message; **Don't send** drops it. An
+  unreported child gets the card after a turn you started too. Waiting cards come back when the session reopens, but
+  are lost when the app quits. The **Forwarded replies** switch after **Approve:** (shown only for such a session)
+  turns the card off for that session, and the reply then goes at once; the default for all sessions is
+  **Approve forwarded replies of sessions without relay tools** in Settings → Sessions (on). It needs the broker of
+  this version. Sessions with the default agent, or an agent that lists the relay tools, are unchanged.
 - **No isolation.** By default a child works in **the parent's folder and on its branch**; the parent can propose
   another folder and you can change it on the card. There is still no worktree or sandbox. Children that edit files can get in each other's way or in the
   parent's.
