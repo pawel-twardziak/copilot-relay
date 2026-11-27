@@ -12,7 +12,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { AcpConnection } from "./acp.mjs";
 import { createCommsForward } from "./comms-forward.mjs";
 import { isNotFoundExit, normalizeCommand, resolveCommand, shellLine, startFailureText } from "./copilot-command.mjs";
-import { countUserMessages, deleteSession, describeCut, forkSession, isSessionId, messageTimes, purgeDeleted, sessionCreatedAt, sessionDir, truncateSession } from "./history.mjs";
+import { countUserMessages, deleteSession, describeCut, forkSession, isSessionId, messageTimes, purgeDeleted, readEvents, sessionCreatedAt, sessionDir, truncateSession } from "./history.mjs";
 import { createLastActivity } from "./last-activity.mjs";
 import { createCopilotRuntime } from "./copilot-runtime.mjs";
 import { createQuotaService, createUsagePusher, quotaView, readCacheExpiry, readLiveQuota } from "./usage.mjs";
@@ -21,7 +21,9 @@ import { createKeeperOptOut, createKeeperRunner } from "./cache-keeper-runner.mj
 import { JobScheduler } from "./scheduler.mjs";
 import { scheduleInfo } from "./jobs.mjs";
 import { PendingRequests, answerFields, cardStart, childPrompt, createdText, findModelOption, folderState, isRelayTool, linkCardOf, reloadWarning, resolveConfig, unreportedChildren, withDeadline } from "./delegation.mjs";
+import { createChainState, createPending, decideForward, originOf } from "./fallback.mjs";
 import { createFallbackStore } from "./fallback-store.mjs";
+import { agentRelayTools, fallbackNote, neededTool } from "./relay-tools.mjs";
 import { createHeldCache, createHoldStore, HELD_KINDS, heldKind } from "./held-replies.mjs";
 import { readLinksCache, writeLinksCache } from "./links-cache.mjs";
 import { listAllPages } from "./session-list.mjs";
@@ -41,7 +43,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 let win = null;
 let scheduler = null;
 let lister = null; // one long-lived connection used for session/list
-const open = new Map(); // sessionId -> { conn, cwd, permissions: Map<reqId, rpcId>, relay, configOptions, parentSessionId?, reported?, adopted?, replaying? }
+const open = new Map(); // sessionId -> { conn, cwd, permissions: Map<reqId, rpcId>, relay, configOptions, chain, parentSessionId?, reported?, adopted?, replaying? }
 let permSeq = 0;
 const pendingRequests = new PendingRequests(); // delegated-session requests waiting for the user's answer
 // reopen cards shown and not answered yet (requestId -> the reopen:request payload): the broker asks again only when
@@ -98,6 +100,8 @@ const holds = createHoldStore(path.join(app.getPath("userData"), "held-replies.j
 const fallbackSwitches = createFallbackStore(path.join(app.getPath("userData"), "fallback-approval.json"));
 /** Does the forward of this session's reply wait for approval: its own switch, else the Settings default (on). */
 const fallbackApproval = (sessionId) => fallbackSwitches.get(sessionId) ?? loadSettings().approveFallback !== false;
+// forwarded replies waiting for that approval, per session; lost when the app quits (see fallback.mjs)
+const pendingForwards = createPending();
 const heldCache = createHeldCache();
 const HELD_NOTICE = { child: "A sub-session replied", parent: "Your parent session sent a message", other: "Another session sent a message" };
 const sessionTier = (sessionId) => effectiveTier(tiers.get(sessionId), loadSettings().contextTier);
@@ -187,8 +191,9 @@ function relayStart(sessionId, cwd, { cfg, alias }, { name, parentKey } = {}) {
     // `human` is set by the broker (true only for messages typed by a person in the relay GUI), not by the sender's name
     // human: true/false from this broker, undefined from an older one (the renderer then falls back to the sender name)
     onMessage: (m) => {
-      // fromChild / heldAs are set by the broker: such a message waits for the user's approval
-      const payload = { sessionId, from: m.from, human: m.human, text: m.text, prompt: m.prompt, fromCwd: m.fromCwd, deliveryId: m.deliveryId, wake: m.wake, fromChild: m.fromChild === true, heldAs: m.heldAs, redelivered: m.redelivered === true, arrivedAt: Date.now() };
+      // fromChild / heldAs are set by the broker: such a message waits for the user's approval. fromKey: the sender's
+      // peer key, the reply fallback's recipient (none for the broker's own notices)
+      const payload = { sessionId, from: m.from, fromKey: m.fromKey, human: m.human, text: m.text, prompt: m.prompt, fromCwd: m.fromCwd, deliveryId: m.deliveryId, wake: m.wake, fromChild: m.fromChild === true, heldAs: m.heldAs, redelivered: m.redelivered === true, arrivedAt: Date.now() };
       send("relay:message", payload);
       // cached whatever the switch says; the notification is only for a message that really waits (none for a person's)
       const kind = heldKind(payload);
@@ -522,7 +527,7 @@ const keeper = createKeeperRunner({
 /** Wire a session's connection to the window. */
 function attach(sessionId, conn, cwd, relay, link) {
   if (cwd) knownFolders.add(cwd);
-  const entry = { conn, cwd, permissions: new Map(), relay: relayStart(sessionId, cwd, relay, link), toolTitles: new Map(), configOptions: [] };
+  const entry = { conn, cwd, permissions: new Map(), relay: relayStart(sessionId, cwd, relay, link), toolTitles: new Map(), configOptions: [], chain: createChainState() };
   open.set(sessionId, entry);
   // one path for live and replayed updates (see sessions:new)
   entry.update = (u) => {
@@ -549,6 +554,7 @@ function attach(sessionId, conn, cwd, relay, link) {
     if (entry.replaying && !entry.replayFilter.pass(u)) return;
     // /rename answers with a chat line ("Session renamed to: …"); the new title arrives as session_info_update
     if (entry.renaming && u?.sessionUpdate === "agent_message_chunk") return;
+    if (!entry.replaying) entry.chain.update(u); // the reply fallback: live turns only (a keeper turn returned above)
     send("acp:update", { sessionId, update: u });
     if (!entry.replaying) tracker.update(sessionId, cwd, u); // a replayed history is not new work
   };
@@ -588,6 +594,7 @@ function attach(sessionId, conn, cwd, relay, link) {
     dropReopenCards(sessionId);
     dropLinkCards(sessionId);
     heldCache.drop(sessionId);
+    pendingForwards.drop(sessionId);
     usage.forget(sessionId);
     pendingRequests.dropForParent(sessionId);
     send("acp:exit", { sessionId, code, signal, stderr: stderr?.trim().slice(-800) });
@@ -938,10 +945,11 @@ async function promptBlocks(text, cwd, { attachImages, imagesSupported }) {
   return { blocks, notes };
 }
 
-handle("sessions:prompt", async (sessionId, text, source = "relay") => {
+handle("sessions:prompt", async (sessionId, text, source = "relay", meta = null) => {
   // source: "app"   – typed in this app: re-opens the relay budget and attaches mentioned images
   //         "human" – typed by a person in the relay web GUI: re-opens the budget only
   //         "relay" – sent by another session: neither
+  // meta: { seq, first, origin } when the prompt belongs to a chain of the reply fallback (see chainPrompt)
   // Images are only ever attached for "app": the broker can't prove who is behind a relay message, and reading
   // local files must never be triggered from outside this window.
   await keeper.whenIdle(sessionId); // a running ping or compaction finishes first (Goal 10 of the cache keeper)
@@ -957,11 +965,17 @@ handle("sessions:prompt", async (sessionId, text, source = "relay") => {
   // the checkpoint before the turn, read before the request: a short turn can write its own before a later read.
   // Not when the keeper can't act here: without a baseline the turn's end takes the first checkpoint it finds.
   if (keeperOn(sessionId)) await keeper.turnStarted(sessionId);
+  const chainN = chainPrompt(entry, meta);
   // fork/truncate refuse while a turn is running: the agent is still writing the history
   if (beginPrompt(entry)) entry.relay?.state(true);
   try {
     const res = await conn.request("session/prompt", { sessionId, prompt: blocks });
-    return res?.stopReason ?? "end_turn";
+    const stop = res?.stopReason ?? "end_turn";
+    if (chainN) entry.chain.stopped(stop, chainN);
+    return stop;
+  } catch (e) {
+    if (chainN) entry.chain.stopped("failed", chainN);
+    throw e;
   } finally {
     if (endPrompt(entry)) {
       entry.relay?.state(false);
@@ -1031,6 +1045,7 @@ async function closeEntry(sessionId) {
   dropReopenCards(sessionId);
   dropLinkCards(sessionId);
   heldCache.drop(sessionId);
+  pendingForwards.drop(sessionId);
   e.relay?.stop();
   await Promise.race([e.conn.request("session/close", { sessionId }).catch(() => {}), new Promise((r) => setTimeout(r, 2000))]);
   e.conn.kill();
@@ -1249,7 +1264,7 @@ async function createChild(req, own = "", command = undefined, fields) {
     const parentEntry = open.get(parentSessionId) ?? parent;
     const parentName = parentEntry.relay?.name;
     const folder = parentEntry.cwd;
-    send("relay:message", { sessionId, from: parentName, fromCwd: folder, human: false, text: task, prompt: childPrompt({ parentName, task, folder }), wake: true });
+    send("relay:message", { sessionId, from: parentName, fromKey: `cli:${parentSessionId}`, fromCwd: folder, human: false, text: task, prompt: childPrompt({ parentName, task, folder }), wake: true });
     return { outcome: "created" };
   } catch (e) {
     await discard();
@@ -1339,6 +1354,109 @@ handle("fallback:getApproval", (sessionId) => fallbackApproval(checkedSessionId(
 handle("fallback:setApproval", (sessionId, on) => {
   fallbackSwitches.set(checkedSessionId(sessionId), on !== false);
 });
+
+// ---------- reply fallback ----------
+
+// A session whose current agent lacks the relay tool its reply needs: main tracks the chain of prompts a relay
+// message (or an owner turn of an unreported child) starts, and forwards the chain's last reply to its sender
+// (see fallback.mjs and docs/superpowers/specs/2026-11-27-relay-fallback-design.md).
+const parentKeyOf = (entry) => (entry.parentSessionId ? `cli:${entry.parentSessionId}` : null);
+
+/** The relay tools of the session's current agent, read now: no cache an agent change could leave stale. */
+function relayToolsOf(sessionId, entry) {
+  const agent = entry.configOptions?.find((o) => o.id === "agent")?.currentValue;
+  let events = null;
+  if (agent) {
+    try {
+      events = readEvents(sessionDir(sessionId));
+    } catch {
+      /* no readable history: the agent's tools are unknown, treated as having them */
+    }
+  }
+  return agentRelayTools(agent, events);
+}
+
+/** The recipient's name for the note and the card: the sender's, else the parent's relay name, else its id. */
+function recipientName(entry, origin) {
+  if (origin?.kind === "relay") return origin.fromName || origin.fromKey.replace(/^cli:/, "");
+  return open.get(entry.parentSessionId)?.relay?.name || entry.parentSessionId || "";
+}
+
+/** Feeds a prompt of a chain to the session's chain state: its number, or null when it is none (no meta, relay off,
+ *  or a chain this entry did not start). */
+function chainPrompt(entry, meta) {
+  if (!entry.relay || typeof meta?.seq !== "string" || !meta.seq) return null;
+  if (meta.first === true) entry.chain.start({ seq: meta.seq, origin: originOf(meta.origin), reported: Boolean(entry.reported) });
+  else if (entry.chain.snapshot().seq !== meta.seq) return null;
+  return entry.chain.prompt();
+}
+
+/** A forward waiting for the owner: kept per session, shown as a card in the session's view. */
+function offerForward(sessionId, f, extra = {}) {
+  const id = pendingForwards.add(sessionId, f);
+  send("relay:fallback", { sessionId, id, toName: f.toName, kind: f.kind, text: f.text, ...extra });
+}
+
+/** Sends a forward through the broker: { result }, or { old: true } from a broker without the route. Throws when it
+ *  did not arrive. */
+async function sendForward(sessionId, entry, f) {
+  const r = await entry.relay.fallback(f.toKey, f.text);
+  if (!r.old) send("relay:fallbackSent", { sessionId, toName: f.toName, kind: f.kind, result: r.result });
+  return r;
+}
+
+// The note the window appends to a chain's first prompt when the session cannot answer with the relay tool; null
+// when it can (every text stays unchanged) or the relay is off.
+handle("fallback:note", (sessionId, origin) => {
+  const entry = open.get(checkedSessionId(sessionId));
+  if (!entry?.relay) return null;
+  const o = originOf(origin);
+  const tool = neededTool({ origin: o, parentKey: parentKeyOf(entry), reported: entry.reported });
+  if (!tool || relayToolsOf(sessionId, entry)[tool] !== false) return null;
+  return fallbackNote({ toName: recipientName(entry, o), kind: tool === "report_result" ? "report" : "message" });
+});
+// The window's chain ended (its last prompt returned): its last reply is forwarded when the turn-end rules say so,
+// at once or after the owner's approval.
+handle("fallback:chainEnded", async (sessionId, seq) => {
+  const entry = open.get(checkedSessionId(sessionId));
+  if (!entry?.relay || typeof seq !== "string") return;
+  const snapshot = entry.chain.snapshot();
+  if (snapshot.seq !== seq) return;
+  entry.chain.start(); // ended: a second call for the same chain finds nothing
+  // the agent is read again now: it can change between the prompt and a queued continue
+  const forward = decideForward({ snapshot, tools: relayToolsOf(sessionId, entry), parentKey: parentKeyOf(entry), reported: snapshot.reported });
+  if (!forward) return;
+  const f = { ...forward, toName: recipientName(entry, snapshot.origin), text: snapshot.text.trim() };
+  if (fallbackApproval(sessionId)) return offerForward(sessionId, f);
+  try {
+    if ((await sendForward(sessionId, entry, f)).old && open.get(sessionId) === entry) offerForward(sessionId, f, { old: true });
+  } catch (e) {
+    if (open.get(sessionId) === entry) offerForward(sessionId, f, { error: friendly(e) }); // not lost: Send tries again
+  }
+});
+// Send (approved = true) or Don't send on a card. A forward an older broker refused ({ old: true }) or one that did not
+// arrive (an error) stays pending; null when it was answered already.
+handle("fallback:answer", async (sessionId, id, approved) => {
+  const entry = getOpen(checkedSessionId(sessionId));
+  const f = pendingForwards.take(sessionId, id);
+  if (!f) return null;
+  if (approved !== true) return {};
+  const keep = () => open.get(sessionId) === entry && pendingForwards.add(sessionId, f);
+  let r;
+  try {
+    r = await sendForward(sessionId, entry, f);
+  } catch (e) {
+    keep();
+    throw e;
+  }
+  if (r.old) {
+    keep();
+    return { old: true };
+  }
+  return { result: r.result };
+});
+// the session's pending forwards, for its view when it opens again
+handle("fallback:list", (sessionId) => pendingForwards.list(checkedSessionId(sessionId)).map(({ id, toName, kind, text }) => ({ id, toName, kind, text })));
 
 // the cache keeper, from the window: the queue or message box holds text, Not now, the per-session switch
 handle("keeper:held", (sessionId, held) => keeper.setHeld(checkedSessionId(sessionId), held === true));

@@ -21,7 +21,8 @@ contextBridge.exposeInMainWorld("api", {
   newSession: (cwd, own = "", command = "") => call("sessions:new", cwd, own, command),
   openSession: (sessionId, cwd, replayId) => call("sessions:open", sessionId, cwd, replayId),
   // source: "app" (typed here), "human" (relay web GUI) or "relay" (another session) – see sessions:prompt
-  prompt: (sessionId, text, source = "relay") => call("sessions:prompt", sessionId, text, source),
+  // meta: { seq, first, origin } for a prompt of a reply-fallback chain (see fallbackNote), else omitted
+  prompt: (sessionId, text, source = "relay", meta) => call("sessions:prompt", sessionId, text, source, meta),
   relayRename: (sessionId, name) => call("relay:rename", sessionId, name),
   // the Copilot session's title (Copilot's /rename), not the relay name
   renameSession: (sessionId, name) => call("sessions:rename", sessionId, name),
@@ -63,6 +64,15 @@ contextBridge.exposeInMainWorld("api", {
   getHoldReplies: (sessionId) => call("held:get", sessionId),
   getFallbackApproval: (sessionId) => call("fallback:getApproval", sessionId),
   setFallbackApproval: (sessionId, on) => call("fallback:setApproval", sessionId, on),
+  // the reply fallback (electron/fallback.mjs). origin: { kind: "relay", fromKey, fromName } | { kind: "owner" } | null;
+  // the note for a chain's first prompt, or null when the session can answer with the relay tools
+  fallbackNote: (sessionId, origin) => call("fallback:note", sessionId, origin),
+  // the chain's last prompt returned: main forwards its last reply, or offers it (onRelayFallback)
+  fallbackChainEnded: (sessionId, seq) => call("fallback:chainEnded", sessionId, seq),
+  // Send (true) or Don't send (false) on a card: { result } | { old: true } | {} (not sent) | null (answered already)
+  fallbackAnswer: (sessionId, id, send) => call("fallback:answer", sessionId, id, send),
+  // the session's pending forwards [{ id, toName, kind, text }], for its view when it opens again
+  fallbackList: (sessionId) => call("fallback:list", sessionId),
   setHoldReplies: (sessionId, kind, on) => call("held:set", sessionId, kind, on),
   // keys are "cli:<sessionId>": removed from the tree by the user / no longer in Copilot's session list
   forgetLinks: (keys) => call("links:forget", keys),
@@ -143,6 +153,9 @@ contextBridge.exposeInMainWorld("api", {
   onNotice: on("acp:notice"),
   onRelayMessage: on("relay:message"),
   onRelayStatus: on("relay:status"),
+  // a forward waiting for approval { sessionId, id, toName, kind, text, old?, error? }; one sent { sessionId, toName, kind, result }
+  onRelayFallback: on("relay:fallback"),
+  onRelayFallbackSent: on("relay:fallbackSent"),
   onDelegationRequest: on("delegation:request"),
   onDelegationCreated: on("delegation:created"),
   onDelegationClosed: on("delegation:closed"),
