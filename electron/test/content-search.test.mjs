@@ -21,10 +21,11 @@ test("extract skips sub-agents, keep-alive and bad lines", () => {
     agent("sub", { agentId: "a1" }),
     user(`${KEEPALIVE_MARKER} The user is away.`),
     "not json but has \"user.message\"",
+    user("again"),
     agent("world"),
   );
   const m = extractMessages(text);
-  assert.deepEqual(m.map((x) => [x.kind, x.text]), [["user", "hello"], ["agent", "world"]]);
+  assert.deepEqual(m.map((x) => [x.kind, x.text]), [["user", "hello"], ["user", "again"], ["agent", "world"]]);
   assert.equal(typeof m[0].at, "number");
 });
 
@@ -186,4 +187,19 @@ test("a query too short for the trimmed text finds nothing and close is idempote
   assert.equal((await svc.search("   ", [SESSION_A])).sessions.length, 0);
   await svc.close();
   await svc.close();
+});
+
+test("a keep-alive turn's replies and the compact reply are not searched", () => {
+  const m = extractMessages(file(
+    user("needle first"),
+    user(`${KEEPALIVE_MARKER} The user is away.`),
+    agent("needle ."),
+    user("real question"),
+    agent("Compacted conversation history needle"),
+    agent("a needle"),
+  ));
+  assert.deepEqual(m.map((x) => x.text), ["needle first", "real question", "a needle"]);
+  const r = searchMessages(m, "needle");
+  assert.equal(r.count, 2);
+  assert.deepEqual(r.hits.map((h) => h.k), [0, 1]);
 });

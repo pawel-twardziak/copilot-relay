@@ -451,6 +451,11 @@ replies in the main thread, and relay messages without their sender header. Matc
 snippets; click one to open the session at that message, or click the session to open it at the first match.
 Tool output, Thinking blocks and what sub-agents do are not searched.
 
+Message search starts at 2 characters. It shows up to 3 snippets per session and covers up to 50 sessions (the heading
+says `50+` when there are more). It reads the stored history, which holds the Markdown source of the agent's replies,
+while a session's find bar reads what is rendered: a query with Markdown syntax in it (`**`, a link's URL) can match in
+the history and not in the view. Keep-alive prompts and their replies are not searched.
+
 In a session, `Ctrl+F` (`Cmd+F` on macOS) opens a find bar over its messages. `Enter` goes to the next match,
 `Shift+Enter` to the previous one, `Esc` closes the bar.
 

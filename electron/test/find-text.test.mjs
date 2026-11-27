@@ -67,3 +67,26 @@ test("foldText is the folded form findMatches searches", () => {
   assert.equal(foldText(" X"), " x");
   assert.equal(findMatches("A\n\n B", foldText("a b")).length, 1);
 });
+
+test("pickTarget compares raw Markdown with its rendered text", () => {
+  const raw = "To run the suite use `npm test` in the **electron** folder, then check `scripts/ui-check/run.mjs` for the rest of it.";
+  const rendered = "To run the suite use npm test in the electron folder, then check scripts/ui-check/run.mjs for the rest of it.";
+  const other = "Something else entirely about the electron folder and a different neighbour sentence that goes on.";
+  for (const word of ["suite", "electron", "folder"]) {
+    const at = raw.indexOf(word);
+    const wanted = { k: 0, ...makeSnippet(raw, at, at + word.length) };
+    const at2 = rendered.indexOf(word);
+    const view = [makeSnippet(other, other.indexOf(word) === -1 ? 0 : other.indexOf(word), (other.indexOf(word) === -1 ? 0 : other.indexOf(word)) + word.length), makeSnippet(rendered, at2, at2 + word.length)];
+    assert.deepEqual(pickTarget(view, wanted), { index: 1, exact: true }, word);
+  }
+  // a list item under a heading and a link
+  const rawList = "## Steps\n\n- first install the [docs](https://example.com/x) and then we look at needle which appears here in a list";
+  const renList = "Steps first install the docs and then we look at needle which appears here in a list";
+  const a = rawList.indexOf("needle");
+  const b = renList.indexOf("needle");
+  assert.deepEqual(pickTarget([makeSnippet(renList, b, b + 6)], { k: 0, ...makeSnippet(rawList, a, a + 6) }), { index: 0, exact: true });
+  // a genuinely different neighbour text is still not exact
+  const diff = "completely unrelated words before needle and unrelated words after it";
+  const c = diff.indexOf("needle");
+  assert.equal(pickTarget([makeSnippet(diff, c, c + 6)], { k: 0, ...makeSnippet(rawList, a, a + 6) }).exact, false);
+});

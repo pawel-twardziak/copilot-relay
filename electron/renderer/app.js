@@ -4010,7 +4010,7 @@ async function jumpToHit(sessionId, hit) {
   if (seq !== jumpSeq || !view || activeId !== sessionId) return; // superseded, not opened (deleting, not listed) or another view was chosen meanwhile
   view.findBar.open(query);
   const { exact } = view.findBar.goTo(hit);
-  view.follow = false; // the log stays at the hit: the bar's own resize of the log must not take it to the bottom again
+  if (view.findBar.matches.length) view.follow = false; // the log stays at the hit: the bar's own resize of the log must not take it to the bottom again
   if (hit && !exact) view.findBar.setNote("This hit was not found in the loaded view");
 }
 

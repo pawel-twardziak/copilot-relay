@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import { createRequire } from "node:module";
 import path from "node:path";
-import { isKeepAlive } from "./cache-keeper.mjs";
+import { isCompactReply, isKeepAlive } from "./cache-keeper.mjs";
 
 const require = createRequire(import.meta.url);
 const MessageText = require("./renderer/message-text.js");
@@ -151,6 +151,7 @@ export const REPLAY_HAS_PRE_COMPACTION = true;
 export function extractMessages(text) {
   const messages = [];
   let lastCompaction = 0; // messages.length at the last compaction
+  let keepAliveTurn = false; // inside a keep-alive turn: its replies are not shown either (createReplayFilter)
   for (const line of text.split("\n")) {
     const isMsg = line.includes('"user.message"') || line.includes('"assistant.message"');
     if (!isMsg && !line.includes('"session.compaction_complete"')) continue;
@@ -169,11 +170,13 @@ export function extractMessages(text) {
     if (typeof raw !== "string") continue;
     let kind, body;
     if (e.type === "user.message") {
-      if (isKeepAlive(raw)) continue;
+      keepAliveTurn = isKeepAlive(raw);
+      if (keepAliveTurn) continue;
       kind = "user";
       body = MessageText.searchableUserText(raw);
     } else if (e.type === "assistant.message") {
       if (e.data.phase === "commentary" && !SEARCH_COMMENTARY) continue;
+      if (keepAliveTurn || isCompactReply(raw)) continue;
       kind = "agent";
       body = raw;
     } else continue;
@@ -186,8 +189,10 @@ export function extractMessages(text) {
 }
 
 /** Search `query` in `messages`: the total number of occurrences, the newest time of a hit, and the first `shown`
- *  hits. A message with a cached `folded` (FindText.foldText of its text) that lacks the query is skipped unfolded. `k` numbers the occurrences in file order; without pre-compaction replay the older ones get -1 and the
- *  numbering starts after the compaction. */
+ *  hits. A message with a cached `folded` (FindText.foldText of its text) that lacks the query is skipped unfolded.
+ *  `k` numbers the occurrences in file order, so it matches the n-th match in the view's replay (which includes the
+ *  history from before a compaction while REPLAY_HAS_PRE_COMPACTION is true). Were that not so, the occurrences
+ *  before the last compaction would get -1 and the numbering would start after it. */
 export function searchMessages(messages, query, { shown = 3 } = {}) {
   const hits = [];
   let count = 0;

@@ -73,9 +73,13 @@
   function pickTarget(snippets, wanted) {
     const n = snippets.length;
     if (!n) return { index: -1, exact: false };
-    // the cut marks makeSnippet adds are not text
-    const normBefore = (s) => fold(String(s ?? "").replace(/^…/, "")).folded;
-    const normAfter = (s) => fold(String(s ?? "").replace(/…$/, "")).folded;
+    // the cut marks makeSnippet adds are not text; and the history snippet is raw Markdown while the view's is rendered
+    // text, so only letters and digits are compared, and only the NEAR_CHARS nearest the match (a link URL or a list
+    // number rarely falls inside that)
+    const NEAR_CHARS = 16;
+    const letters = (s) => s.replace(/[^\p{L}\p{N}]+/gu, "");
+    const normBefore = (s) => letters(fold(String(s ?? "").replace(/^…/, "")).folded).slice(-NEAR_CHARS);
+    const normAfter = (s) => letters(fold(String(s ?? "").replace(/…$/, "")).folded).slice(0, NEAR_CHARS);
     const wb = normBefore(wanted.before);
     const wa = normAfter(wanted.after);
     let best = -1;

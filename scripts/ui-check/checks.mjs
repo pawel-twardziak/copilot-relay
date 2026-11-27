@@ -11,6 +11,7 @@ import { LATE_TEXT } from "../../electron/test/fixtures/acp/late-group-scenario.
 import { PARTS } from "../../electron/test/fixtures/acp/panel-scroll-scenario.mjs";
 import { RUNNING_TITLE } from "../../electron/test/fixtures/acp/tool-split-scenario.mjs";
 import { SLOW } from "../../electron/test/fixtures/acp/comms-scenario.mjs";
+import { ANSWER_MARKDOWN } from "../../electron/test/fixtures/acp/markdown-scenario.mjs";
 import { CHILD_PART, DEFAULT_PART } from "../../electron/session-prompts.mjs";
 import { REMINDER } from "../../electron/delegation.mjs";
 import { KEEPALIVE_MARKER } from "../../electron/cache-keeper.mjs";
@@ -4834,6 +4835,44 @@ export const checks = [
       await frames(app);
       assert.deepEqual(await app.ev(`__errors`), []);
       assert.equal(await app.ev(`${v}.findBar.matches.length > 0`), true, "the replayed text is searched");
+    },
+  },
+  {
+    // the history holds raw Markdown, the view shows it rendered: the jump still agrees on the hit (no note)
+    name: "content-jump-markdown",
+    modes: ["off"],
+    sessionId: HISTORY_ID,
+    scenario: path.join(FIXTURES, "markdown-scenario.mjs"),
+    async run(app) {
+      const id = JSON.stringify(HISTORY_ID);
+      const v = `views.get(${id})`;
+      await app.newSession();
+      await app.send("Go.");
+      await app.idle();
+      const at = new Date().toISOString();
+      const events = [
+        { type: "session.start", data: {}, timestamp: at },
+        { type: "user.message", data: { content: "Go." }, timestamp: at },
+        { type: "assistant.message", data: { messageId: "md1", content: ANSWER_MARKDOWN }, timestamp: at },
+      ];
+      const dir = path.join(app.dir, "copilot-home", "session-state", HISTORY_ID);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(path.join(dir, "events.jsonl"), events.map((e) => JSON.stringify(e)).join("\n") + "\n");
+      await app.reload();
+      for (const [word, near] of [["folder", "electron"], ["second", "item with link text"]]) {
+        await typeSearch(app, word);
+        await app.check(`document.querySelectorAll("#session-list .content-hit").length >= 1`, "the message hit");
+        await closeAndList(app, id);
+        await app.ev(`document.querySelectorAll("#session-list .content-hit")[0].click()`);
+        await app.check(`${findState(v)}.counter === "1/1"`, `the counter 1/1 for ${word}`);
+        await frames(app);
+        const r = await app.ev(`(() => {
+          const b = ${v}.findBar;
+          return { note: b.note.hidden, text: [...CSS.highlights.get("find-current")].map((x) => x.toString().toLowerCase()), around: b.matches[b.current].text.includes(${JSON.stringify(near)}) };
+        })()`);
+        assert.deepEqual(r, { note: true, text: [word], around: true }, word);
+        await app.ev(`${v}.findBar.close()`);
+      }
     },
   },
   ...commsChecks,
