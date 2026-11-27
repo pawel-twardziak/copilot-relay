@@ -2,6 +2,7 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, safeStorage, shell } from "electron";
 import { allowsAutomaticCheck, checkCandidates, createFileWatcher, createLocationTable, expandHome, isNetworkLocation, isRemote, localRealpath, passesAutomaticCheck, resolvePreview, resolveTarget } from "./file-access.mjs";
 import { isInside, lexicalPath } from "./paths.mjs";
+import { attachRendererLog, createFileLog, teeConsole } from "./main-log.mjs";
 import { execFile, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -186,7 +187,8 @@ function relayStart(sessionId, cwd, { cfg, alias }, { name, parentKey } = {}) {
     onMessage: (m) => {
       // fromChild / heldAs are set by the broker: such a message waits for the user's approval
       const payload = { sessionId, from: m.from, human: m.human, text: m.text, prompt: m.prompt, fromCwd: m.fromCwd, deliveryId: m.deliveryId, wake: m.wake, fromChild: m.fromChild === true, heldAs: m.heldAs, redelivered: m.redelivered === true, arrivedAt: Date.now() };
-      send("relay:message", payload);
+      if (send("relay:message", payload)) console.info(`[relay ${sessionId}] message ${m.deliveryId ?? "(no id)"} handed to the window`);
+      else console.warn(`[relay ${sessionId}] message ${m.deliveryId ?? "(no id)"} from ${m.from}: no window to show it`);
       // cached whatever the switch says; the notification is only for a message that really waits (none for a person's)
       const kind = heldKind(payload);
       if (kind && m.deliveryId && heldCache.add(sessionId, payload) && holds.get(sessionId)[kind] && HELD_NOTICE[kind]) {
@@ -227,7 +229,11 @@ function relayStart(sessionId, cwd, { cfg, alias }, { name, parentKey } = {}) {
       refreshLinks();
     },
     onLinksChanged: () => refreshLinks(),
-    log: (note) => status({ note }),
+    log: (note) => {
+      console.info(`[relay ${sessionId}] ${note}`);
+      status({ note });
+    },
+    trace: (text) => console.info(`[relay ${sessionId}] ${text}`),
   });
   let markRegistered;
   client.registered = new Promise((resolve) => (markRegistered = resolve));
@@ -235,7 +241,12 @@ function relayStart(sessionId, cwd, { cfg, alias }, { name, parentKey } = {}) {
   return client;
 }
 
-const send = (channel, payload) => win && !win.isDestroyed() && win.webContents.send(channel, payload);
+/** Sends to the window; false when there is none (closed, or not made yet). */
+const send = (channel, payload) => {
+  if (!win || win.isDestroyed()) return false;
+  win.webContents.send(channel, payload);
+  return true;
+};
 
 // ---------- sub-session tree ----------
 //
@@ -1076,14 +1087,17 @@ const isDirectoryAsync = async (p) => {
 
 async function sessionRequested(parentSessionId, request) {
   const parent = open.get(parentSessionId);
-  if (!parent) return;
+  const id = request?.requestId;
+  if (!parent) return console.warn(`[delegation] session_request ${id} dropped: session ${parentSessionId} is not open`);
+  console.info(`[delegation] session_request ${id} from ${parentSessionId}`);
   const req = { ...request, parentSessionId };
   pendingRequests.add(req); // before the folder check: a close or a reload meanwhile drops it as any other request
   notifyIfUnfocused("A session asks to start a new session", req.name);
   // the folder is model-written: looked at only as far as the automatic-check rule allows (never a network location)
   const folder = await folderState(req.folder, { allow: allowAutomatic, isDir: isDirectoryAsync });
   // the parent closed (or was reopened) or the window reloaded meanwhile: the request is gone, so is its card
-  if (open.get(parentSessionId) !== parent || !pendingRequests.has(req.requestId)) return;
+  if (open.get(parentSessionId) !== parent || !pendingRequests.has(req.requestId))
+    return console.info(`[delegation] session_request ${id} dropped: its session closed or the window reloaded during the folder check`);
   // the parent's own command, for the card's command field: from the store, never from the request
   const storedCommand = commands.get(parentSessionId) ?? "";
   const start = cardStart(
@@ -1092,7 +1106,9 @@ async function sessionRequested(parentSessionId, request) {
     { folderState: folder },
   );
   // the card reads only `start` for the child's values: the request's own fields (model-written) are not sent raw
-  send("delegation:request", { requestId: req.requestId, parentSessionId, name: req.name, task: req.task, start });
+  if (send("delegation:request", { requestId: req.requestId, parentSessionId, name: req.name, task: req.task, start }))
+    console.info(`[delegation] session_request ${id}: card sent to the window`);
+  else console.warn(`[delegation] session_request ${id}: no window, the card was not sent`);
 }
 
 /** The broker asks the user (through the sender's view) to reopen a closed relative that a message is waiting for. */
@@ -2005,6 +2021,7 @@ function createWindow() {
   // set once the page has loaded (and again after a reload): before that it rejects ("Render frame was disposed")
   win.webContents.on("did-finish-load", () => win.webContents.setVisualZoomLevelLimits(1, 1).catch(() => {}));
   win.webContents.on("zoom-changed", () => win.webContents.setZoomFactor(1));
+  if (mainLog) attachRendererLog(win.webContents, mainLog);
   win.on("focus", () => quota.get().catch(() => {}));
   win.webContents.setWindowOpenHandler(({ url }) => {
     openWeb(url);
@@ -2101,11 +2118,38 @@ function killAll() {
   lister?.kill();
 }
 
+// The log file (see main-log.mjs): the console's lines and the window's warnings and errors, for an app without a
+// console. Started by the one instance that runs, before anything else it does.
+let mainLog = null;
+function startMainLog() {
+  try {
+    mainLog = createFileLog(path.join(app.getPath("userData"), "logs", "main.log"));
+  } catch (e) {
+    console.warn(`[log] no log file: ${e.message}`);
+    return;
+  }
+  teeConsole(mainLog);
+  // only watched: Electron's own handling of an uncaught exception (its error dialog) stays as it was. Node's
+  // warnings need nothing more: its printer writes them with console.error, which now writes the file too.
+  process.on("uncaughtExceptionMonitor", (err, origin) => mainLog.write("error", [`[main] ${origin}:`, err]));
+  console.info(`[log] Copilot Sessions ${app.getVersion()} started (${process.platform} ${process.arch}, Electron ${process.versions.electron})`);
+}
+
+/** View → Show Log File: the file in its folder, or the folder when no line could be written to it. */
+function showLogFile() {
+  if (!mainLog) return dialog.showMessageBox(win, { type: "info", message: "This run has no log file.", detail: "See the console output." });
+  if (existsSync(mainLog.file)) return shell.showItemInFolder(mainLog.file);
+  shell.openPath(path.dirname(mainLog.file)).then((err) => {
+    if (err) dialog.showMessageBox(win, { type: "warning", message: "The log file could not be written.", detail: `${mainLog.file}\n${err}` });
+  });
+}
+
 // One instance at a time: two would share (and clean up) the same paste folder and settings file.
 // Starting the app again focuses the open window instead.
 if (!app.requestSingleInstanceLock()) {
   app.quit(); // and nothing else: no login-shell PATH lookup, no window
 } else {
+  startMainLog();
   app.on("second-instance", () => {
     if (!win) return app.isReady() && createWindow(); // e.g. macOS with the window closed but the app running
     if (win.isMinimized()) win.restore();
@@ -2136,6 +2180,7 @@ if (!app.requestSingleInstanceLock()) {
             { label: "Reload", accelerator: "CmdOrCtrl+R", click: () => confirmedReload((wc) => wc.reload()) },
             { label: "Force Reload", accelerator: "Shift+CmdOrCtrl+R", click: () => confirmedReload((wc) => wc.reloadIgnoringCache()) },
             { role: "toggleDevTools" },
+            { label: "Show Log File", click: () => showLogFile() },
             { type: "separator" },
             { role: "togglefullscreen" },
           ],

@@ -59,7 +59,7 @@ test("the run updates a repo copy and replaces its running broker", { timeout: 6
     };
     fx.spawnBroker = (node, script, opts) => realSpawn(node, script, {
       ...opts,
-      env: { ...opts.env, COPILOT_RELAY_NAMES_FILE: path.join(stateDir, "names.json"), COPILOT_RELAY_DELEGATIONS_FILE: path.join(stateDir, "delegations.json"), COPILOT_RELAY_COMMS_FILE: path.join(stateDir, "communications.jsonl") },
+      env: { ...opts.env, COPILOT_RELAY_NAMES_FILE: path.join(stateDir, "names.json"), COPILOT_RELAY_DELEGATIONS_FILE: path.join(stateDir, "delegations.json"), COPILOT_RELAY_COMMS_FILE: path.join(stateDir, "communications.jsonl"), COPILOT_RELAY_LOG_FILE: path.join(stateDir, "broker.log") },
     });
 
     const out = await runRestart({ repo, url: old.url, copilotHome }, fx);

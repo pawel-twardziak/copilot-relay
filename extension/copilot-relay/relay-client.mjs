@@ -45,6 +45,7 @@ export class RelayClient {
    * @param {(name:string, payload?:{parentKey:?string,reported:boolean,adopted:boolean})=>void} [o.onRegistered]
    * @param {(name:string)=>void} [o.onRenamed]   renamed elsewhere (GUI)
    * @param {(msg:string)=>void} [o.log]
+   * @param {(msg:string)=>void} [o.trace] diagnostics: the stream's connects, ends and every event it got (ids only)
    */
   constructor(o) {
     Object.assign(this, o);
@@ -54,6 +55,7 @@ export class RelayClient {
     this.requestedName = o.name ?? null;
     this.requestedParent = o.parentKey ?? null; // like requestedName: first connection only
     this.log ??= () => {};
+    this.trace ??= () => {};
     this.stopped = false;
     this.connected = false;
     this.autostarted = false;
@@ -210,7 +212,8 @@ export class RelayClient {
       try {
         await this.#connectOnce();
       } catch (e) {
-        if (this.stopped) return;
+        if (this.stopped) return this.trace(`stopped (${e.message})`);
+        this.trace(`stream ended: ${e.message}${e.cause ? ` (${e.cause.code ?? e.cause.message ?? e.cause})` : ""}`);
         if (this.connected) this.log(`relay: disconnected (${e.message})`);
         this.connected = false;
         if (!this.autostarted && this.brokerScript && /ECONNREFUSED|fetch failed/.test(String(e.cause ?? e.message))) {
@@ -218,6 +221,7 @@ export class RelayClient {
         }
       }
       if (!this.#skipWait) {
+        this.trace(`reconnecting in ${this.#delay} ms`);
         await new Promise((r) => {
           this.#endWait = r;
           this.#timer = setTimeout(r, this.#delay);
@@ -254,9 +258,11 @@ export class RelayClient {
     if (this.requestedParent) qs.set("parent", this.requestedParent);
     if (this.alias) qs.set("alias", this.alias);
     if (this.caps?.length) qs.set("caps", this.caps.join(","));
+    this.trace(`connecting to ${this.url} as ${this.key}`);
     const res = await this.#fetch(`/api/peer/stream?${qs}`, { signal: this.abort.signal, headers: { accept: "text/event-stream" } });
     if (!res.ok || !res.body) throw new Error(`broker answered ${res.status}`);
     this.connected = true;
+    this.trace("stream open");
 
     const decoder = new TextDecoder();
     let buf = "";
@@ -274,6 +280,11 @@ export class RelayClient {
         }
         if (!data) continue;
         const payload = JSON.parse(data);
+        const id = payload?.deliveryId ?? payload?.requestId ?? payload?.event?.id ?? payload?.id;
+        // comms and links_changed come for every change anywhere (live panel updates): not traced
+        if (event === "registered")
+          this.trace(`← registered as ${payload.name} on stream ${payload.stream ?? "?"} (broker ${payload.broker ?? "of an unknown build"}, its log: ${payload.brokerLog ?? "none"})`);
+        else if (event !== "comms" && event !== "links_changed") this.trace(`← ${event}${id ? ` ${id}` : ""}`);
         if (event === "registered") {
           this.name = payload.name;
           this.requestedName = null;

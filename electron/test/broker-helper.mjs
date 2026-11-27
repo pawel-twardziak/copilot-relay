@@ -45,6 +45,7 @@ export async function startBroker(t, { script = SERVER, port: wanted, env } = {}
       COPILOT_RELAY_NAMES_FILE: path.join(tmp, "names.json"),
       COPILOT_RELAY_DELEGATIONS_FILE: path.join(tmp, "delegations.json"),
       COPILOT_RELAY_COMMS_FILE: path.join(tmp, "communications.jsonl"),
+      COPILOT_RELAY_LOG_FILE: path.join(tmp, "broker.log"),
       ...env, // may point a state file elsewhere (a test of an unreadable one)
       COPILOT_RELAY_PORT: String(port),
     },
