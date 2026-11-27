@@ -18,6 +18,9 @@ import { KEEPALIVE_MARKER } from "../../electron/cache-keeper.mjs";
 import { gitIn } from "../../electron/test/git-helper.mjs";
 import { launch, until } from "./driver.mjs";
 
+/** copilot-env-managed: the relay variables of every start of the scripted agent ($SCRIPTED_ENV_FILE). */
+const ENV_FILE = path.join(os.tmpdir(), `ui-check-env-${process.pid}.jsonl`);
+
 // the notes of the prompt editor in a running session and of Settings (global constraints: RESTART_NOTE, SETTINGS_NOTE)
 const RESTART_NOTE = "Saving restarts this session's Copilot. The history stays.";
 const SETUP_TITLE = "This session's prompt and Copilot command (saving restarts its Copilot)";
@@ -3799,6 +3802,26 @@ export const checks = [
       await new Promise((r) => setTimeout(r, 500)); // a child would have been created by now
       assert.equal(await app.ev(`views.has("scripted-work-3")`), false, "no child for the rejected request");
       assert.ok(!JSON.stringify(starts()).includes("Never."), "nothing started with the rejected card's text");
+    },
+  },
+  {
+    // the Copilot the app starts has COPILOT_RELAY_MANAGED: the copilot-relay extension, if Copilot loads it, stays out
+    // and does not register the session a second time (it took the session's stream from the app on Windows)
+    name: "copilot-env-managed",
+    modes: ["off"],
+    env: { SCRIPTED_ENV_FILE: ENV_FILE },
+    async run(app) {
+      const envFile = ENV_FILE;
+      rmSync(envFile, { force: true });
+      try {
+        await app.newSession();
+        await app.check(`!!${V} && !${V}.busy`, "the session's view");
+        const lines = readFileSync(envFile, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+        assert.ok(lines.length >= 1, "the agent was started");
+        assert.ok(lines.every((l) => l.COPILOT_RELAY_MANAGED === "1"), `every start had COPILOT_RELAY_MANAGED=1: ${JSON.stringify(lines)}`);
+      } finally {
+        rmSync(envFile, { force: true });
+      }
     },
   },
   {

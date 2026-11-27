@@ -74,6 +74,7 @@ test("spawns the shell line", async () => {
   assert.equal(opts.shell, true);
   assert.equal(opts.cwd, "/home/x");
   assert.equal(opts.env.COPILOT_CONNECTION_TOKEN, "tok-1");
+  assert.equal(opts.env.COPILOT_RELAY_MANAGED, "1"); // the extension stays out of the app's Copilot (copilotEnv)
   assert.equal(opts.detached, true);
   assert.equal(opts.windowsHide, true);
   await h.port(h.children[0]);

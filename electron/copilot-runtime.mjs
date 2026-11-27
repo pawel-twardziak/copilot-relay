@@ -5,7 +5,7 @@
 import { spawn as nodeSpawn } from "node:child_process";
 import { randomUUID as nodeRandomUUID } from "node:crypto";
 import os from "node:os";
-import { shellLine } from "./copilot-command.mjs";
+import { copilotEnv, shellLine } from "./copilot-command.mjs";
 import { killTree as nodeKillTree } from "./job-runner.mjs";
 
 const TAIL_MAX = 4000;
@@ -109,7 +109,7 @@ export function createCopilotRuntime({
         const line = shellLine(command, ["--headless", "--no-auto-update", "--port", "0"], { platform });
         proc = spawn(line, {
           shell: true, detached: !isWin, windowsHide: true, cwd: homedir(),
-          env: { ...process.env, COPILOT_CONNECTION_TOKEN: token },
+          env: { ...copilotEnv(process.env), COPILOT_CONNECTION_TOKEN: token },
         });
       } catch (e) {
         entry.exitedPromise = Promise.resolve();

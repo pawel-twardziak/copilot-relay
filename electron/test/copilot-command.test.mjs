@@ -1,7 +1,7 @@
 // Tests for electron/copilot-command.mjs: the Copilot command of a session as a line for the system shell.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isNotFoundExit, normalizeCommand, resolveCommand, shellLine, startFailureText } from "../copilot-command.mjs";
+import { copilotEnv, isNotFoundExit, normalizeCommand, resolveCommand, shellLine, startFailureText } from "../copilot-command.mjs";
 
 test("normalizeCommand trims and takes an empty command", () => {
   assert.deepEqual(normalizeCommand("  copilot --x  "), { command: "copilot --x" });
@@ -71,4 +71,13 @@ test("isNotFoundExit", () => {
   assert.equal(isNotFoundExit({ exitCode: 126 }, "darwin"), true);
   assert.equal(isNotFoundExit({ exitCode: 1 }, "linux"), false);
   assert.equal(isNotFoundExit({ exitCode: 127 }, "win32"), false);
+});
+
+test("a Copilot the app starts gets COPILOT_RELAY_MANAGED, so the copilot-relay extension does not register its session a second time", () => {
+  const base = { PATH: "/bin", COPILOT_HOME: "/h" };
+  const env = copilotEnv(base);
+  assert.equal(env.COPILOT_RELAY_MANAGED, "1");
+  assert.equal(env.PATH, "/bin");
+  assert.equal(env.COPILOT_HOME, "/h");
+  assert.equal(base.COPILOT_RELAY_MANAGED, undefined); // the app's own environment is left alone
 });

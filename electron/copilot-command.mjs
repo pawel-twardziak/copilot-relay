@@ -77,3 +77,12 @@ export function startFailureText({ command, source, detail, notFound, login, log
 export function isNotFoundExit(error, platform = process.platform) {
   return platform !== "win32" && (error?.exitCode === 127 || error?.exitCode === 126);
 }
+
+/** The environment of a Copilot process the app starts (ACP sessions, the headless quota CLI). COPILOT_RELAY_MANAGED
+ *  tells the copilot-relay extension that the relay is someone else's job: the app registers each session with the
+ *  broker itself and gives Copilot the relay tools over MCP. Without it a Copilot that loads its extensions (seen on
+ *  Windows with --acp: a second stream of the session's key, without the app's alias) registers the session again,
+ *  the broker gives that stream the session, and approval cards and messages go to the extension, not to the app. */
+export function copilotEnv(env = process.env) {
+  return { ...env, COPILOT_RELAY_MANAGED: "1" };
+}
