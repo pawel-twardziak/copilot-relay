@@ -3993,9 +3993,16 @@ function scheduleContentSearch() {
   }, CONTENT_DEBOUNCE_MS);
 }
 
-/** Opens the session of a hit (Task 7 adds the jump to the message). hit: { k, before, after } or null (the first hit). */
+/** Opens the session of a hit and lands its find bar on the message: the filter field's text is searched, and the
+ *  match that agrees with hit ({ k, before, after }) is current (null: the first match). When none agrees the bar
+ *  says so. A view whose open failed still shows what was replayed: the bar opens over it. */
 async function jumpToHit(sessionId, hit) {
   await openRelative(sessionId);
+  const view = views.get(sessionId);
+  if (!view || activeId !== sessionId) return; // not opened (deleting, not listed) or another view was chosen meanwhile
+  view.findBar.open($("#search").value.trim());
+  const { exact } = view.findBar.goTo(hit);
+  if (hit && !exact) view.findBar.setNote("This hit was not found in the loaded view");
 }
 
 function snippetNode(sessionId, hit) {

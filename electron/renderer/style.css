@@ -141,6 +141,8 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberat
 .find-bar[hidden] { display: none; }
 .find-bar input { flex: 0 1 280px; min-width: 120px; padding: 3px 8px; }
 .find-bar .find-count { min-width: 48px; color: var(--muted); font-variant-numeric: tabular-nums; text-align: center; }
+.find-bar .find-note { flex: 1 1 auto; color: var(--muted); text-align: right; }
+.find-bar .find-note[hidden] { display: none; }
 .find-bar button { padding: 2px 8px; }
 ::highlight(find-match) { background-color: var(--find-match); }
 ::highlight(find-current) { background-color: var(--find-current); color: var(--bg); }

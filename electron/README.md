@@ -444,6 +444,16 @@ A script reaches Azure DevOps the way it would from a terminal. The app passes i
 `az login` in a terminal the `az` CLI works from a job too. Or put a personal access token in a secret variable such
 as `AZURE_DEVOPS_EXT_PAT`, which `az devops` reads by itself.
 
+## Search
+
+The filter field above the session list also searches the messages of your sessions: your messages and the agent's
+replies in the main thread, and relay messages without their sender header. Matches appear under the list as
+snippets; click one to open the session at that message, or click the session to open it at the first match.
+Tool output, Thinking blocks and what sub-agents do are not searched.
+
+In a session, `Ctrl+F` (`Cmd+F` on macOS) opens a find bar over its messages. `Enter` goes to the next match,
+`Shift+Enter` to the previous one, `Esc` closes the bar.
+
 ## Run
 
 Requires Node.js 18+ and an installed, signed-in Copilot CLI (`copilot --version`, `copilot login`).

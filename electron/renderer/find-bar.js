@@ -73,10 +73,14 @@
       this.input.addEventListener("keydown", (e) => this.key(e));
       this.count = document.createElement("span");
       this.count.className = "find-count";
+      this.note = document.createElement("span"); // why a jump did not land exactly; cleared by the next search
+      this.note.className = "find-note";
+      this.note.hidden = true;
       this.el = document.createElement("div");
       this.el.className = "find-bar";
       this.el.hidden = true;
       this.el.append(
+        this.note,
         this.input,
         this.count,
         button("↑", "Previous match (Shift+Enter)", () => this.step(-1)),
@@ -114,10 +118,17 @@
       this.observer.disconnect();
       this.isOpen = false;
       this.el.hidden = true;
+      this.setNote(null);
       this.matches = [];
       this.current = -1;
       this.paint();
       this.hide();
+    }
+
+    /** Shows text in the bar (null hides it). */
+    setNote(text) {
+      this.note.textContent = text ?? "";
+      this.note.hidden = !text;
     }
 
     /** Searches again, keeping the current match when it still exists (no scrolling). */
@@ -178,6 +189,7 @@
     run(keep) {
       clearTimeout(this.typeTimer);
       this.typeTimer = null;
+      if (!keep) this.setNote(null);
       const query = this.input.value;
       const was = this.matches[this.current];
       this.matches = this.search(query);
