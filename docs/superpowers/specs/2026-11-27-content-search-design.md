@@ -159,3 +159,13 @@ The probe runs on this Linux machine; the corp-PC check of the same script goes 
 - Exact caps (hits per session, total), debounce times, snippet length.
 - Where the user-text unwrap rules live (shared module or renderer-side).
 - Module split for the find bar (a new `electron/renderer/find-bar.js` is the expected shape).
+
+## Probe result: compaction (2026-11-27, Linux, Copilot CLI 1.0.117-2, ACP, model `auto`)
+
+A session with 10 turns, a manual `/compact` (`session.compaction_start/complete` in `events.jsonl`), then 2 more
+turns (session `07bdbe50-14f5-4252-b329-e18a4340f0d8`, cwd `~/copilot-search-test`, markers `ZEBRA-1`…`ZEBRA-12`).
+`session/load` replayed 12 `user_message_chunk` and 12 `agent_message_chunk` updates: every message from before and
+after the compaction. `/compact` itself is not a `user.message` in the file and its reply is not replayed.
+So `REPLAY_HAS_PRE_COMPACTION = true`: the pre-compaction marking, dimming and note are not built (plan Task 8 is
+skipped). The corp-PC (Windows, Claude models) repeat goes to the backlog. `phase: "commentary"` is still open
+(this session used no tools): plan Task 1 settles it on existing local sessions, without new prompts.

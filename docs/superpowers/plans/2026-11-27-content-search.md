@@ -57,8 +57,9 @@ in `scripts/ui-check/` (xvfb + scripted ACP agent).
 - Modify: `docs/superpowers/specs/2026-11-27-content-search-design.md` (append `## Probe result`)
 
 **Interfaces:**
-- Produces: two decisions written into the spec and used by Task 3 as constants in `electron/history.mjs`:
-  `SEARCH_COMMENTARY` (boolean) and `REPLAY_HAS_PRE_COMPACTION` (boolean).
+- Produces: the decision `SEARCH_COMMENTARY` (boolean), written into the spec and used by Task 3 as a constant in
+  `electron/history.mjs`. `REPLAY_HAS_PRE_COMPACTION` is already settled: `true` (spec, "Probe result: compaction");
+  the probe still reports the before/after split so the corp-PC repeat can confirm it.
 
 - [ ] **Step 1: Write the probe.** `node replay-vs-file.mjs [<id>…] [--sessions <n>] [--make-compacted]`.
   For each session (default: the newest 20 in `$COPILOT_HOME/session-state` with an `events.jsonl`): open it over
@@ -70,11 +71,11 @@ in `scripts/ui-check/` (xvfb + scripted ACP agent).
   before/after compaction. `--make-compacted` first creates a session in a temp folder, sends two short prompts,
   sends `/compact`, waits for `session.compaction_complete` in the file, and includes that session. The report
   goes to `results/replay-vs-file-<time>.md` and holds counts and event types only, no message text.
-- [ ] **Step 2: Run it.** `cd scripts/sdk-probe && node replay-vs-file.mjs --make-compacted`.
-  Expected: ends with `Done:` and the report path; the compacted session is in the report.
-- [ ] **Step 3: Record the result** in the spec (`## Probe result`: date, CLI version, the two decisions with the
-  counts that support them). If `--make-compacted` cannot run here (no quota, CLI error), record that, set
-  `REPLAY_HAS_PRE_COMPACTION = false` (the safe side: Task 8 runs) and note the corp-PC run for the backlog.
+- [ ] **Step 2: Run it.** `cd scripts/sdk-probe && node replay-vs-file.mjs` (free, no prompts; include
+  `07bdbe50-14f5-4252-b329-e18a4340f0d8`, the compacted session, and sessions with `phase: "commentary"` messages).
+  Expected: ends with `Done:` and the report path.
+- [ ] **Step 3: Record the result** in the spec (`## Probe result: commentary`: date, CLI version, the decision
+  with the counts that support it).
 - [ ] **Step 4: Commit.** `git add scripts/sdk-probe/replay-vs-file.mjs scripts/sdk-probe/README.md docs/superpowers/specs/2026-11-27-content-search-design.md && git commit -m "probe: replay versus events.jsonl for content search"`
 
 ### Task 2: Shared text rules and matcher
@@ -303,7 +304,7 @@ note. If the open fails (dead view), the bar still opens over what was replayed;
 - [ ] **Step 4: Run** both checks, `npm test`, and the full UI run — PASS.
 - [ ] **Step 5: Commit** `feat(search): jump from a sidebar hit to the message`.
 
-### Task 8: Pre-compaction hits (only if the probe set `REPLAY_HAS_PRE_COMPACTION = false`)
+### Task 8: Pre-compaction hits — SKIPPED (`REPLAY_HAS_PRE_COMPACTION = true`, spec "Probe result: compaction")
 
 **Files:**
 - Modify: `electron/renderer/app.js`, `electron/renderer/style.css`
