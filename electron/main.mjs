@@ -235,7 +235,12 @@ function relayStart(sessionId, cwd, { cfg, alias }, { name, parentKey } = {}) {
   return client;
 }
 
-const send = (channel, payload) => win && !win.isDestroyed() && win.webContents.send(channel, payload);
+/** Sends to the window; false when there is none (closed, or not made yet). */
+const send = (channel, payload) => {
+  if (!win || win.isDestroyed()) return false;
+  win.webContents.send(channel, payload);
+  return true;
+};
 
 // ---------- sub-session tree ----------
 //
