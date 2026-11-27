@@ -25,9 +25,9 @@ None of these blocked the merge. Line numbers were taken at the review and may d
      `requestCreate` (`src/delegation.mjs`).
    - Known: the broker answered "sent" (so the peer had a `control` stream); the window's console had no error; the
      Communication panel showed no pending proposal (so `openCard` never ran).
-   - Open: whether the request reached main. With this build, `main.log` has `[delegation] session_request <id> from
-     <session>` if it did, and then the step it stopped at. No such line: the session's relay stream was dead while the
-     broker still wrote to it.
+   - Open: whether the request reached main. With this build, `main.log` has either `[delegation] session_request <id>
+     from <session>` (then the step it stopped at) or `session_request <id> dropped: session <id> is not open` if it
+     did. Neither line: the session's relay stream was dead while the broker still wrote to it.
    - Proposal: if the stream is the cause, the broker should treat a `control` write as delivered only after the app
      acknowledges it (or the app should re-register on a stalled stream), and `requestCreate` should say "not delivered"
      instead of "sent". Decide after the log of one real case.
