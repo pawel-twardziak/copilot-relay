@@ -49,6 +49,14 @@ export function nativeContextOption(configOptions) {
   );
 }
 
+/** The tier to store when Copilot changed its own option by itself (before → after), or null: only a change of a
+ *  tier it already had, to one that is not the session's effective tier already. */
+export function followedTier(before, after, effective) {
+  const was = nativeTierOf(nativeContextOption(before));
+  const now = nativeTierOf(nativeContextOption(after));
+  return was && now && now !== was && now !== effective ? now : null;
+}
+
 /** The tier Copilot's option is set to now, or null when its value is not one of the two. */
 export function nativeTierOf(option) {
   if (option?.currentValue == null) return null;

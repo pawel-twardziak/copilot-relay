@@ -41,6 +41,11 @@ models. The app still adds its own synthetic "Context" select (`context-tier.mjs
   refusals apply to both paths (busy turn, deleting, opening…). The live set holds `historyBusy`, so a delete or a
   restart is refused meanwhile. It has a 15 s deadline. A failed save or set leaves the override as it was and
   comes back as `{ refused, configOptions }`, carrying the options as they are now.
+- When Copilot changes its own option by itself (`followedTier`): a model change that resets it, or an answer that
+  lands after the deadline. Only a change of a tier Copilot already had is followed, and the stored override takes
+  the tier Copilot now runs, so the select and the next start match it. A late answer also sends the window a
+  `config_option_update`. An option that first shows up (a model with a long-context tier) leaves the stored choice
+  alone.
 - `app.js` `switchContext`: a `{ configOptions }` answer updates the selects without a reopen. The status line says
   that the context window changed without a restart.
 

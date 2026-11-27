@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
-import { contextOption, createTierStore, effectiveTier, isContextChoice, nativeContextOption, nativeTierOf, nativeValueFor, saveAndReopen, switchTier, tierArgs, withContextOption } from "../context-tier.mjs";
+import { contextOption, createTierStore, effectiveTier, followedTier, isContextChoice, nativeContextOption, nativeTierOf, nativeValueFor, saveAndReopen, switchTier, tierArgs, withContextOption } from "../context-tier.mjs";
 
 let dir;
 let file;
@@ -229,6 +229,17 @@ test("switchTier live: a failed set restores the override and is refused, nothin
   const g = fakeSwitch({ live: async () => { throw new Error("nope"); }, storeFile: path.join(dir, "g.json") });
   await g.run("inherit");
   assert.equal(g.store.get("s1"), null, "no override before: none after");
+});
+
+test("followedTier: Copilot's own change of a tier it had is followed; a first showing or our own value is not", () => {
+  const at = (cur) => [{ ...sel("context_size"), currentValue: cur }];
+  assert.equal(followedTier(at("long_context"), at("default"), "long_context"), "default", "reset by Copilot");
+  assert.equal(followedTier(at("default"), at("long_context"), "default"), "long_context", "a late answer");
+  assert.equal(followedTier(at("default"), at("long_context"), "long_context"), null, "already ours");
+  assert.equal(followedTier(at("default"), at("default"), "long_context"), null, "unchanged");
+  assert.equal(followedTier([], at("default"), "long_context"), null, "first shows up");
+  assert.equal(followedTier(at("default"), [], "long_context"), null, "gone");
+  assert.equal(followedTier(at("default"), at("other"), "long_context"), null, "an unknown value");
 });
 
 test("switchTier live: an override that can't be saved is refused before Copilot is asked", async () => {
