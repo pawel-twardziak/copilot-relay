@@ -12,16 +12,55 @@ const grants = (entry, tool) => {
 
 const flags = (entries) => Object.fromEntries(RELAY_TOOLS.map((t) => [t, entries.some((e) => grants(e, t))]));
 
+/** The file-style name Copilot puts in a baseline's surface for an agent named `name` ("Poeta wspomnień" →
+ *  "poeta-wspomnien"): lower case, no diacritics, runs of other characters as one "-". */
+export const agentSlug = (name) =>
+  String(name ?? "")
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .replace(/ł/g, "l")
+    .replace(/Ł/g, "L")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+const isSwitch = (e) => e?.type === "subagent.selected" || e?.type === "subagent.deselected";
+
+/** The session's own events: a sub-agent's (task tool) events carry `agentId` on the envelope. */
+const ownEvents = (events) => (events ?? []).filter((e) => !e?.agentId);
+
+/** Is the agent's own subagent.selected the last switch in the session (no other agent selected, no default since)? */
+export const agentIsLastSelected = (agent, events) => {
+  const list = ownEvents(events);
+  const at = list.findLastIndex(isSwitch);
+  return at >= 0 && list[at].type === "subagent.selected" && list[at].data?.agentName === agent;
+};
+
 /** Relay tools the agent can call, from events.jsonl. The default agent ("" or undefined) and unknown ones have both.
- *  Of the agent's last subagent.selected and its last tool baseline (surface ending in `agent=<name>`), the later one
- *  in the list counts: a reload after the agent file changed writes a new baseline but no new subagent.selected. */
+ *  Of the agent's last subagent.selected and its last tool baseline, the later one in the list counts: a reload after
+ *  the agent file changed writes a new baseline but no new subagent.selected. The baseline's surface carries the
+ *  agent's file name, which can differ from its `name:` ("Poeta wspomnień" / `agent=poeta-wspomnien`):
+ *  - the selection's `__copilotSelectedAgentDefinitionId` (CLI 1.0.117) is that file name: a baseline is the agent's
+ *    when its surface ends with `agent=<definition id>` or `agent=<name>`;
+ *  - without it (older CLIs): when it was written after the agent's own selection with no switch since, or when its
+ *    surface ends with `agent=<name>` or `agent=<file-style name>`. */
 export function agentRelayTools(agent, events) {
   if (!agent) return both();
-  const list = events ?? [];
+  const list = ownEvents(events);
   const selAt = list.findLastIndex((e) => e?.type === "subagent.selected" && e.data?.agentName === agent);
-  const baseAt = list.findLastIndex(
-    (e) => e?.type === "session.tool_baseline" && String(e.data?.surface ?? "").endsWith(`agent=${agent}`),
-  );
+  const defId = selAt >= 0 ? list[selAt].__copilotSelectedAgentDefinitionId : undefined;
+  const known = typeof defId === "string" && defId !== "";
+  const ownFrom = !known && selAt >= 0 && list.findLastIndex(isSwitch) === selAt ? selAt : Infinity;
+  // never a bare "agent=": that is the default agent's surface (a name without Latin letters has an empty slug)
+  const slug = known ? defId : agentSlug(agent);
+  const names = [`agent=${agent}`, ...(slug ? [`agent=${slug}`] : [])];
+  const baseAt = list.findLastIndex((e, i) => {
+    if (e?.type !== "session.tool_baseline") return false;
+    const surface = String(e.data?.surface ?? "");
+    // by order: a named, non-default surface only (a default-agent baseline is never this agent's)
+    if (i > ownFrom && /agent=.+$/.test(surface)) return true;
+    return names.some((n) => surface.endsWith(n));
+  });
   if (selAt < 0 && baseAt < 0) return both();
   // A missing tools list means all tools (an agent file without a `tools:` key).
   if (selAt > baseAt) {

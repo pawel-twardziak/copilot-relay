@@ -16,6 +16,9 @@ None of these blocked the merge. Line numbers were taken at the review and may d
   Stop during the note request skips the prompt.
 - Pending forwards survive a close and are dropped by a delete or a cut of the history.
 - `fallback:list` returns the `old` / `error` flags, so the "broker too old" line comes back after a reopen (v0.38.1).
+- A baseline is matched to the agent by order after its own selection and by its file-style name, so an agent whose
+  `name:` differs from its file name ("Poeta wspomnień" / `poeta-wspomnien`) is seen with its new tools after a
+  restart (v0.38.2).
 - Pending forwards are kept on disk (`fallback-pending.json`) and survive an app restart; a forward stays on disk
   until its send succeeded, and a send failing during a close or restart keeps it (v0.38.1).
 - The note waits up to 2 s for `subagent.selected` after the app set the agent (Copilot writes it ~500 ms late).
@@ -106,6 +109,13 @@ None of these blocked the merge. Line numbers were taken at the review and may d
 26. A failed write of `fallback-pending.json` leaves older content on disk: a forward sent or dropped in memory can
     come back after a restart and be sent again (a report is deduplicated by the broker, a message is not).
 
+27. A baseline matched by name can belong to another agent: when another agent's file name equals this agent's
+    `name:` (agent "reviewer" in `strict.agent.md`, another agent in `reviewer.agent.md`), the other one's baseline
+    counts for "reviewer" through `agent=<name>`. Without `__copilotSelectedAgentDefinitionId` (CLIs before 1.0.117?)
+    the order rule and the file-style guess (`agentSlug`: ø, ß, đ become `-`, only `ł`/`Ł` mapped) widen this. If a
+    definition id ever differs from the surface's name (e.g. `agents/poeta-wspomnien`), no baseline matches and the
+    selection's tools decide (the fallback stays on; a resume after the agent gained relay tools is not seen).
+
 ## D. Tests and housekeeping
 
 1. No automated test of main's wiring (`chainPrompt`, `fallback:chainEnded`, `fallback:answer`) beyond the UI checks.
@@ -127,6 +137,12 @@ None of these blocked the merge. Line numbers were taken at the review and may d
    `COPILOT_RELAY_PORT`.
 
 ### Manual checks still open
+
+- Whether Copilot writes `subagent.selected` / `deselected` for an agent chosen with `/agent` in the prompt, a CLI
+  `--agent` flag, or a resume that falls back to the default after the agent file was deleted: since v0.38.2 a
+  baseline counts for the agent selected last with no switch since, so a switch without an event would let another
+  agent's baseline count. Also whether sub-agents write `session.tool_baseline` (their events with `agentId` are
+  skipped since v0.38.2).
 
 - A delegated `limited` child with a model whose first prompt goes out at once, after the 2 s wait fix (verified only
   with a no-prompt probe: the note came after 102 ms).

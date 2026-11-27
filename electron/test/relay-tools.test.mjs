@@ -2,7 +2,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  agentIsLastSelected,
   agentRelayTools,
+  agentSlug,
   fallbackNote,
   isRelayCall,
   neededTool,
@@ -59,11 +61,103 @@ test("a later baseline of the agent beats an older subagent.selected", () => {
   assert.deepEqual(agentRelayTools("limited", [selected("limited", ["read"]), base(["view", "relay_report_result", "relay_send_message"])]), both);
   // the other order: the newer selected wins
   assert.deepEqual(agentRelayTools("limited", [base(["view", "relay_report_result", "relay_send_message"]), selected("limited", ["read"])]), none);
-  // a baseline of another agent does not count
+  // a baseline of another agent (written after switching to it) does not count
   const other = { type: "session.tool_baseline", data: { surface: "x:agent=other", tools: [{ name: "relay_send_message" }] } };
-  assert.deepEqual(agentRelayTools("limited", [selected("limited", ["read"]), other]), none);
+  assert.deepEqual(agentRelayTools("limited", [selected("limited", ["read"]), selected("other", ["*"]), other]), none);
+  // nor a default-agent baseline (empty name), even with no switch recorded before it
+  const plain = { type: "session.tool_baseline", data: { surface: "x:agent=", tools: [{ name: "relay_send_message" }] } };
+  assert.deepEqual(agentRelayTools("limited", [selected("limited", ["read"]), plain]), none);
   // a later baseline without a tools list means all tools
   assert.deepEqual(agentRelayTools("limited", [selected("limited", ["read"]), { type: "session.tool_baseline", data: { surface: "x:agent=limited" } }]), both);
+});
+
+// A real session (Copilot 1.0.117): the agent's `name:` ("Poeta wspomnień") is the option value and subagent.selected's
+// agentName, but the baseline's surface carries the file name ("poeta-wspomnien"). The agent file gained all tools and
+// the session was resumed: a new baseline, no new subagent.selected.
+const relayBase = (surfaceAgent, names) => ({
+  type: "session.tool_baseline",
+  data: { surface: `responses:capi:none:agent=${surfaceAgent}`, tools: names.map((name) => ({ name, deferred: false })) },
+});
+const POET = "Poeta wspomnień";
+
+// Copilot 1.0.117 puts the agent's definition id (its file name, the baseline surface's name) on the envelope.
+const selectedDef = (agentName, tools, def) => ({ __copilotSelectedAgentDefinitionId: def, ...selected(agentName, tools) });
+
+test("with the definition id, a baseline counts only when its surface names it", () => {
+  const sel = selectedDef(POET, ["edit"], "poeta-wspomnien");
+  const relay = ["relay-report_result", "relay-send_message"];
+  // the real session: gained all tools, resumed, a new baseline under the file name
+  assert.deepEqual(agentRelayTools(POET, [sel, relayBase("poeta-wspomnien", ["view"]), relayBase("poeta-wspomnien", relay)]), both);
+  // another agent's baseline after the selection, with no switch recorded: not this agent's
+  assert.deepEqual(agentRelayTools(POET, [sel, relayBase("explore", relay)]), none);
+  // a baseline without a surface: not this agent's
+  assert.deepEqual(agentRelayTools(POET, [sel, { type: "session.tool_baseline", data: { tools: [{ name: "relay-send_message" }] } }]), none);
+});
+
+test("without the definition id (older CLIs), a baseline with no surface never counts by order", () => {
+  const noSurface = { type: "session.tool_baseline", data: { tools: [{ name: "relay-send_message" }] } };
+  assert.deepEqual(agentRelayTools(POET, [selected(POET, ["edit"]), noSurface]), none);
+});
+
+test("agentIsLastSelected", () => {
+  const dese = { type: "subagent.deselected", data: {} };
+  assert.equal(agentIsLastSelected(POET, [selected(POET, ["edit"])]), true);
+  assert.equal(agentIsLastSelected(POET, [selected(POET, ["edit"]), dese]), false);
+  assert.equal(agentIsLastSelected(POET, [selected(POET, ["edit"]), selected("x", [])]), false);
+  assert.equal(agentIsLastSelected(POET, [selected(POET, ["edit"]), { ...selected("x", []), agentId: "t" }]), true);
+  assert.equal(agentIsLastSelected(POET, []), false);
+});
+
+test("a baseline after the agent's own selection counts, whatever name its surface carries", () => {
+  const events = [
+    { type: "session.start", data: {} },
+    selected(POET, ["edit"]),
+    relayBase("poeta-wspomnien", ["view", "skill", "sql"]),
+    { type: "session.shutdown", data: {} },
+    { type: "session.resume", data: {} },
+    relayBase("poeta-wspomnien", ["view", "relay-report_result", "relay-send_message"]),
+  ];
+  assert.deepEqual(agentRelayTools(POET, events), both);
+  assert.deepEqual(agentRelayTools(POET, events.slice(0, 5)), none); // before the new baseline: still the old list
+});
+
+test("a baseline after another agent's selection does not count for this one", () => {
+  const events = [
+    selected(POET, ["edit"]),
+    selected("Poeta sensu życia", ["*"]),
+    relayBase("poeta-sensu-zycia", ["relay-report_result", "relay-send_message"]),
+  ];
+  assert.deepEqual(agentRelayTools(POET, events), none);
+});
+
+test("a sub-agent's events (agentId on the envelope) never count", () => {
+  const sub = { ...relayBase("explore", ["relay-report_result", "relay-send_message"]), agentId: "task-1" };
+  assert.deepEqual(agentRelayTools(POET, [selected(POET, ["edit"]), sub]), none);
+  const subSel = { ...selected(POET, ["*"]), agentId: "task-1" };
+  assert.deepEqual(agentRelayTools(POET, [selected(POET, ["edit"]), subSel]), none);
+});
+
+test("a name without Latin letters or digits matches no default-agent baseline", () => {
+  const events = [
+    selected("Поэт", ["edit"]),
+    relayBase("poet", ["view"]),
+    { type: "subagent.deselected", data: {} },
+    relayBase("", ["relay-report_result", "relay-send_message"]),
+  ];
+  assert.deepEqual(agentRelayTools("Поэт", events), none);
+  assert.equal(agentSlug("Поэт"), "");
+});
+
+test("after a switch back to the default, a later baseline is not the agent's", () => {
+  const events = [selected(POET, ["edit"]), { type: "subagent.deselected", data: {} }, relayBase("other", ["relay-send_message"])];
+  assert.deepEqual(agentRelayTools(POET, events), none);
+});
+
+test("a baseline is matched by the agent's name or by its file-style name", () => {
+  assert.deepEqual(agentRelayTools(POET, [relayBase("poeta-wspomnien", ["view"])]), none);
+  assert.deepEqual(agentRelayTools(POET, [relayBase("Poeta wspomnień", ["view"])]), none);
+  assert.deepEqual(agentRelayTools("Poeta sensu życia", [relayBase("poeta-sensu-zycia", ["view"])]), none);
+  assert.deepEqual(agentRelayTools("Łąka Ćma", [relayBase("laka-cma", ["view"])]), none);
 });
 
 test("a missing tools list means all tools", () => {

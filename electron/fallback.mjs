@@ -1,6 +1,6 @@
 // The reply fallback in main: what a chain of prompts said, whether its last reply is forwarded, and the forwards
 // that wait for the owner's approval. No Electron imports (see docs/superpowers/specs/2026-11-27-relay-fallback-design.md).
-import { agentRelayTools, isRelayCall, neededTool } from "./relay-tools.mjs";
+import { agentIsLastSelected, agentRelayTools, isRelayCall, neededTool } from "./relay-tools.mjs";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { jsonFileMap } from "./json-file-map.mjs";
@@ -53,7 +53,9 @@ export async function relayToolsAfterSet({ agent, readEvents, agentSetAt, now = 
       return null; // not readable (yet)
     }
   };
-  const selected = (events) => (events ?? []).some((e) => e?.type === "subagent.selected" && e.data?.agentName === agent);
+  // the app's own set is written as this agent's subagent.selected after every other switch (an older selection of
+  // the same agent, before an A → B → A, does not end the wait)
+  const selected = (events) => agentIsLastSelected(agent, events);
   const deadline = agentSetAt?.value === agent && typeof agentSetAt.at === "number" ? agentSetAt.at + AGENT_EVENT_WAIT_MS : -Infinity;
   let events = read();
   while (!selected(events) && now() < deadline) {
