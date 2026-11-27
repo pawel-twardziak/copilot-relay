@@ -175,6 +175,20 @@ test("chain: a user Stop during B shows Stopped. for B only", () => {
   assert.deepEqual([rb.showStopped, rb.ended], [true, true]);
 });
 
+test("chain: stopping() tells a Stop of the running chain until it ends", () => {
+  const c = createChain();
+  assert.equal(c.stopping(), false);
+  c.stop(); // outside a chain: no effect
+  assert.equal(c.stopping(), false);
+  const a = c.start();
+  assert.equal(c.stopping(), false);
+  c.stop();
+  assert.equal(c.stopping(), true);
+  const ra = c.returned(a, "cancelled");
+  assert.deepEqual([ra.showStopped, ra.ended, ra.stopped], [true, true, true]);
+  assert.equal(c.stopping(), false);
+});
+
 test("chain: a user Stop of a plain prompt shows Stopped.", () => {
   const c = createChain();
   const a = c.start();

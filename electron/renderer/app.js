@@ -3011,8 +3011,9 @@ class SessionView {
     }
     const wrapped = (b) => (answer && !isCmd ? MessageQueue.wrap(b, { more }) : b);
     let sent = wrapped(body);
-    // the reply fallback: the chain's meta for main; its first prompt may get a note (asked below, once busy)
-    const fb = this.fallbackPrompt({ source, item, midTurn, isCmd, isContinue });
+    // the reply fallback: the chain's meta for main; its first prompt may get a note (asked below, once busy; never
+    // with the default agent, whose prompts go out as before)
+    const fb = this.fallbackPrompt({ source, item, midTurn, answer, isCmd, isContinue });
     if (sent !== text || fb.asksNote) {
       // history records what was sent, so fork/delete match that; the bubble and Left Shift+Up keep what you wrote.
       // Before append: markTurn hands _matchText on to the turn's reply. Read when asked: the note comes after the
@@ -3038,6 +3039,16 @@ class SessionView {
         sent = wrapped(`${body}\n\n${note}`);
         this.fbCannot = true; // the "fallback" switch shows from now on
         this.renderHoldSwitches();
+      }
+      if (this.chain.stopping()) {
+        // Stop pressed while the note was asked: the prompt never goes out (nor into the history), and it ends as a
+        // stopped turn does (a relay message is taken, as a stopped one is)
+        delivery?.returned();
+        this.dropTurn(bubble);
+        const stopped = this.chain.returned(record, "cancelled");
+        if (stopped.showStopped) this.system("Stopped.");
+        if (stopped.ended) await this.chainEnded(null, bubble, stopped.dropped, stopped.stopped);
+        return;
       }
     }
     const before = isCmd ? await api.userMessages(this.sessionId).catch(() => null) : null;
@@ -3086,23 +3097,21 @@ class SessionView {
     // after the last answer to queued messages the interrupted task goes on; "pump": the next queued item is answered
     // first (setBusy(false) has scheduled it)
     const { paused, dead, deleting } = this;
-    if (this.followUp.afterTurn({ stopped, failed, queued: this.queue.length, paused, dead, deleting }) === "continue") void this.sendContinue();
-    // the continue prompt still belongs to the chain; otherwise it is over, and main hears it now: before the pump
-    // (a microtask) can start the next chain, whose first prompt would replace this one's state in main
-    else this.endFallbackChain();
+    const next = this.followUp.afterTurn({ stopped, failed, queued: this.queue.length, paused, dead, deleting });
+    if (next === "continue") void this.sendContinue();
+    // the reply fallback's chain goes on with the continue prompt and with the answers still due (pumped, then the
+    // continue); otherwise it is over, and main hears it now: before the pump (a microtask) can start the next chain,
+    // whose first prompt would replace this one's state in main
+    if (Fallback.chainEnds({ afterTurn: next, answerDue: this.followUp.answerDue(), stopped, failed })) this.endFallbackChain();
   }
 
-  /** The reply fallback's part of a prompt: `meta` ({ seq, first, origin } for main, null outside a chain) and whether
-   *  to ask main for the note. A prompt that is neither delivered mid-turn nor the continue prompt starts a chain: one
-   *  with a sender to answer (Fallback.originOf; a command has none) gets an id, and only its first prompt asks for
-   *  the note. Every later prompt of the chain carries its id, so main counts them. */
-  fallbackPrompt({ source, item, midTurn, isCmd, isContinue }) {
-    if (midTurn || isContinue) return { meta: this.fbSeq && { seq: this.fbSeq.id, first: false, origin: this.fbSeq.origin }, asksNote: false };
-    this.endFallbackChain(); // (normally ended already by chainEnded)
-    const origin = isCmd ? null : Fallback.originOf(item, source);
-    if (!origin) return { meta: null, asksNote: false };
-    this.fbSeq = { id: crypto.randomUUID(), origin };
-    return { meta: { seq: this.fbSeq.id, first: true, origin }, asksNote: true };
+  /** The reply fallback's part of a prompt (Fallback.promptMeta): `meta` for main, whether to ask for the note. A
+   *  prompt that starts a chain ends the running one first (normally ended already by chainEnded). */
+  fallbackPrompt({ source, item, midTurn, answer, isCmd, isContinue }) {
+    const r = Fallback.promptMeta({ fbSeq: this.fbSeq, midTurn, isContinue, isCmd, answer, item, source, customAgent: Fallback.customAgent(this.agentOption), newId: () => crypto.randomUUID() });
+    if (r.starts) this.endFallbackChain();
+    this.fbSeq = r.fbSeq;
+    return r;
   }
 
   /** The chain's last prompt has returned: main forwards its last reply, or offers it in a card (relay:fallback). */

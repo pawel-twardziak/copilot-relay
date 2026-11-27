@@ -164,6 +164,8 @@ function createChain() {
     stop() {
       if (records.length) stopping = true;
     },
+    /** You stopped the running chain (until it has ended). */
+    stopping: () => stopping,
   };
 }
 

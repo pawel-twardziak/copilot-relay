@@ -96,6 +96,66 @@ test("fallback.js loads beside the other window scripts (one global scope)", () 
   assert.equal(typeof vm.runInContext("Fallback.stripNote", ctx), "function");
 });
 
+const X = { kind: "relay", fromKey: "cli:x", from: "x" };
+const xOrigin = { kind: "relay", fromKey: "cli:x", fromName: "x" };
+const meta = (over) => Fallback.promptMeta({ fbSeq: null, midTurn: false, isContinue: false, isCmd: false, answer: false, item: null, source: "relay", customAgent: true, newId: () => "n1", ...over });
+
+test("promptMeta: a chain's first prompt starts it and asks for the note", () => {
+  assert.deepEqual(meta({ item: X }), { meta: { seq: "n1", first: true, origin: xOrigin }, asksNote: true, starts: true, fbSeq: { id: "n1", origin: xOrigin } });
+  // an owner turn typed in the app
+  assert.deepEqual(meta({ source: "app" }).meta, { seq: "n1", first: true, origin: { kind: "owner" } });
+  // a running chain is replaced (the caller ends it first)
+  assert.equal(meta({ item: X, fbSeq: { id: "old", origin: xOrigin } }).fbSeq.id, "n1");
+});
+
+test("promptMeta: the default agent never asks for the note (its prompt goes out as before)", () => {
+  const r = meta({ item: X, customAgent: false });
+  assert.equal(r.asksNote, false);
+  assert.deepEqual(r.meta, { seq: "n1", first: true, origin: xOrigin });
+});
+
+test("promptMeta: later prompts of a chain carry its id, no note, no new chain", () => {
+  const fbSeq = { id: "c1", origin: xOrigin };
+  const later = { meta: { seq: "c1", first: false, origin: xOrigin }, asksNote: false, starts: false, fbSeq };
+  assert.deepEqual(meta({ fbSeq, midTurn: true, answer: true, item: { kind: "relay", fromKey: "cli:y", from: "y" } }), later); // mid-turn
+  assert.deepEqual(meta({ fbSeq, midTurn: true, answer: true, item: { kind: "relay", from: "relay" } }), later); // mid-turn, no origin
+  assert.deepEqual(meta({ fbSeq, answer: true, item: { kind: "relay", fromKey: "cli:z", from: "z" } }), later); // pumped answer
+  assert.deepEqual(meta({ fbSeq, isContinue: true }), later); // the continue prompt
+  assert.deepEqual(meta({ fbSeq, answer: true, isCmd: true, source: "app" }), later); // a command answered in the follow-up
+});
+
+test("promptMeta: outside a chain a follow-up prompt has no meta and starts none", () => {
+  const none = { meta: null, asksNote: false, starts: false, fbSeq: null };
+  assert.deepEqual(meta({ midTurn: true, answer: true, item: X }), none);
+  assert.deepEqual(meta({ answer: true, item: X }), none); // pumped answer after a stopped chain
+  assert.deepEqual(meta({ isContinue: true }), none);
+});
+
+test("promptMeta: a command or a sender-less message starts no chain", () => {
+  const none = { meta: null, asksNote: false, starts: true, fbSeq: null };
+  assert.deepEqual(meta({ isCmd: true, source: "app" }), none);
+  assert.deepEqual(meta({ isCmd: true, item: X, fbSeq: { id: "c1", origin: xOrigin } }), none);
+  assert.deepEqual(meta({ item: { kind: "relay", from: "relay" } }), none); // a broker notice
+  assert.deepEqual(meta({ source: "human", item: { kind: "relay", from: "user" } }), none);
+});
+
+test("chainEnds: the chain stays open for the continue prompt and while answers are due", () => {
+  assert.equal(Fallback.chainEnds({ afterTurn: "continue", answerDue: false, stopped: false, failed: false }), false);
+  assert.equal(Fallback.chainEnds({ afterTurn: "pump", answerDue: true, stopped: false, failed: false }), false);
+  assert.equal(Fallback.chainEnds({ afterTurn: "none", answerDue: true, stopped: false, failed: false }), false); // queue paused, task waits
+  assert.equal(Fallback.chainEnds({ afterTurn: "none", answerDue: false, stopped: false, failed: false }), true);
+  assert.equal(Fallback.chainEnds({ afterTurn: "none", answerDue: true, stopped: true, failed: false }), true); // Stop paused the queue
+  assert.equal(Fallback.chainEnds({ afterTurn: "none", answerDue: false, stopped: false, failed: true }), true);
+  assert.equal(Fallback.chainEnds({ afterTurn: "pump", answerDue: true, stopped: false, failed: true }), true);
+});
+
+test("customAgent: only a non-empty agent option value", () => {
+  assert.equal(Fallback.customAgent(undefined), false);
+  assert.equal(Fallback.customAgent(null), false);
+  assert.equal(Fallback.customAgent({ id: "agent", currentValue: "" }), false);
+  assert.equal(Fallback.customAgent({ id: "agent", currentValue: "limited" }), true);
+});
+
 test("originOf: a relay item with a sender key, an owner turn, else none", () => {
   assert.deepEqual(Fallback.originOf({ kind: "relay", fromKey: "cli:p", from: "parent" }, "relay"), { kind: "relay", fromKey: "cli:p", fromName: "parent" });
   assert.deepEqual(Fallback.originOf({ kind: "relay", fromKey: "cli:p" }, "relay"), { kind: "relay", fromKey: "cli:p", fromName: "" });

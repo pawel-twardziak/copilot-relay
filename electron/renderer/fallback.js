@@ -34,6 +34,37 @@
     return source === "app" ? { kind: "owner" } : null;
   }
 
+  /** A custom agent is set (an "agent" option with a non-empty value): only then can the session lack the relay tools
+   *  (the default agent always has them), so only then is main asked for the note. */
+  const customAgent = (agentOption) => !!agentOption?.currentValue;
+
+  /**
+   * The reply fallback's part of one prompt. A chain is the prompt a message starts, the messages delivered into it
+   * mid-turn, the answers to queued messages while the interrupted task waits (`answer`), and the continue prompt.
+   * Returns { meta, asksNote, starts, fbSeq }: meta for main ({ seq, first, origin } or null), whether to ask main for
+   * the note, whether this prompt starts a chain (the caller ends the running one first), the view's chain after it.
+   * A follow-up prompt (mid-turn, answer, continue) carries the running chain's id, with or without an origin of its
+   * own, so main counts it; outside a chain it has none (it never starts one). A command or a message without a
+   * sender to answer starts no chain.
+   */
+  function promptMeta({ fbSeq, midTurn, isContinue, isCmd, answer, item, source, customAgent: custom, newId }) {
+    if (midTurn || isContinue || answer) {
+      return { meta: fbSeq ? { seq: fbSeq.id, first: false, origin: fbSeq.origin } : null, asksNote: false, starts: false, fbSeq: fbSeq ?? null };
+    }
+    const origin = isCmd ? null : originOf(item, source);
+    if (!origin) return { meta: null, asksNote: false, starts: true, fbSeq: null };
+    const next = { id: newId(), origin };
+    return { meta: { seq: next.id, first: true, origin }, asksNote: !!custom, starts: true, fbSeq: next };
+  }
+
+  /** Whether the chain is over when its renderer chain ended: not while the continue prompt follows or answers to
+   *  queued messages are still due (the interrupted task waits); always after a Stop or an error. */
+  const chainEnds = ({ afterTurn, answerDue, stopped, failed }) => {
+    if (stopped || failed) return true;
+    if (afterTurn === "continue") return false;
+    return !answerDue;
+  };
+
   const as = (kind) => (kind === "report" ? "as its report" : "as a message");
 
   /** The question on a pending forward's card. */
@@ -57,7 +88,7 @@
   /** The "fallback" switch after "Approve:" shows when the session cannot answer with the relay tools or has a forward waiting. */
   const showSwitch = ({ cannotAnswer, pending } = {}) => !!cannotAnswer || (pending ?? 0) > 0;
 
-  const Fallback = { NOTE_MARK, stripNote, originOf, cardText, sentLine, droppedLine, OLD_BROKER, notSentLine, SWITCH_LABEL, SWITCH_TITLE, showSwitch };
+  const Fallback = { NOTE_MARK, stripNote, originOf, customAgent, promptMeta, chainEnds, cardText, sentLine, droppedLine, OLD_BROKER, notSentLine, SWITCH_LABEL, SWITCH_TITLE, showSwitch };
   globalThis.Fallback = Fallback;
   if (typeof module !== "undefined") module.exports = Fallback;
 })();
