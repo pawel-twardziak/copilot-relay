@@ -30,6 +30,36 @@ export function relayToolsFor({ agent, readEvents }) {
   return agentRelayTools(agent, events);
 }
 
+/** How long after the app set the agent its subagent.selected event may still be missing from events.jsonl. */
+export const AGENT_EVENT_WAIT_MS = 2000;
+const AGENT_EVENT_STEP_MS = 100;
+
+/**
+ * relayToolsFor, but right after the app itself set this agent (`agentSetAt` = { value, at }, less than
+ * AGENT_EVENT_WAIT_MS ago) it re-reads the history every 100 ms until the agent's subagent.selected is there or the
+ * wait is over: Copilot writes that event about 500 ms after set_config_option answers (CLI 1.0.117), and a prompt
+ * sent sooner (a delegated child's first one) would otherwise go out as if the agent had the relay tools. Any other
+ * case reads once, as relayToolsFor. `now` and `sleep` are injectable for tests.
+ */
+export async function relayToolsAfterSet({ agent, readEvents, agentSetAt, now = Date.now, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
+  if (!agent) return agentRelayTools(agent, null);
+  const read = () => {
+    try {
+      return readEvents().events;
+    } catch {
+      return null; // not readable (yet)
+    }
+  };
+  const selected = (events) => (events ?? []).some((e) => e?.type === "subagent.selected" && e.data?.agentName === agent);
+  const deadline = agentSetAt?.value === agent && typeof agentSetAt.at === "number" ? agentSetAt.at + AGENT_EVENT_WAIT_MS : -Infinity;
+  let events = read();
+  while (!selected(events) && now() < deadline) {
+    await sleep(Math.min(AGENT_EVENT_STEP_MS, deadline - now()));
+    events = read();
+  }
+  return agentRelayTools(agent, events);
+}
+
 /**
  * One chain: the prompt a relay message (or an owner turn of an unreported child) starts, any prompts delivered into
  * it mid-turn, and the continue prompt. `reported` is the session's state when the chain started: it decides which

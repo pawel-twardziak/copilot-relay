@@ -21,7 +21,7 @@ import { createKeeperOptOut, createKeeperRunner } from "./cache-keeper-runner.mj
 import { JobScheduler } from "./scheduler.mjs";
 import { scheduleInfo } from "./jobs.mjs";
 import { PendingRequests, answerFields, cardStart, childPrompt, createdText, findModelOption, folderState, isRelayTool, linkCardOf, reloadWarning, resolveConfig, unreportedChildren, withDeadline } from "./delegation.mjs";
-import { createChainState, createPending, decideForward, originOf, relayToolsFor } from "./fallback.mjs";
+import { createChainState, createPending, decideForward, originOf, relayToolsAfterSet, relayToolsFor } from "./fallback.mjs";
 import { createFallbackStore } from "./fallback-store.mjs";
 import { fallbackNote, neededTool } from "./relay-tools.mjs";
 import { createHeldCache, createHoldStore, HELD_KINDS, heldKind } from "./held-replies.mjs";
@@ -1184,6 +1184,8 @@ function waitRegistered(client, ms) {
 
 async function setConfigOption(sessionId, entry, configId, value) {
   const res = await entry.conn.request("session/set_config_option", { sessionId, configId, value });
+  // the reply fallback: Copilot writes the agent's subagent.selected a moment later; fallback:note waits for it
+  if (configId === "agent") entry.agentSetAt = { value, at: Date.now() };
   if (res?.configOptions) entry.configOptions = res.configOptions;
   return res?.configOptions ?? null;
 }
@@ -1399,12 +1401,16 @@ async function sendForward(sessionId, entry, f) {
 
 // The note the window appends to a chain's first prompt when the session cannot answer with the relay tool; null
 // when it can (every text stays unchanged) or the relay is off.
-handle("fallback:note", (sessionId, origin) => {
+// Right after the app set the agent, its tools are waited for briefly (relayToolsAfterSet).
+handle("fallback:note", async (sessionId, origin) => {
   const entry = open.get(checkedSessionId(sessionId));
   if (!entry?.relay) return null;
   const o = originOf(origin);
   const tool = neededTool({ origin: o, parentKey: parentKeyOf(entry), reported: entry.reported });
-  if (!tool || relayToolsOf(sessionId, entry)[tool] !== false) return null;
+  if (!tool) return null;
+  const agent = entry.configOptions?.find((c) => c.id === "agent")?.currentValue;
+  const tools = await relayToolsAfterSet({ agent, readEvents: () => readEvents(sessionDir(sessionId)), agentSetAt: entry.agentSetAt });
+  if (tools[tool] !== false) return null;
   return fallbackNote({ toName: recipientName(entry, o), kind: tool === "report_result" ? "report" : "message" });
 });
 // The window's chain ended (its last prompt returned): its last reply is forwarded when the turn-end rules say so,

@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createChainState, createPending, decideForward, originOf, relayToolsFor } from "../fallback.mjs";
+import { createChainState, createPending, decideForward, originOf, relayToolsAfterSet, relayToolsFor } from "../fallback.mjs";
 import { readEvents } from "../history.mjs";
 
 const chunk = (text, agentId) => ({
@@ -208,4 +208,78 @@ test("pending: a taken forward put back keeps its id", () => {
   const f = p.take("s", id);
   assert.equal(p.add("s", f), id);
   assert.deepEqual(p.list("s").map((x) => x.id), [id]);
+});
+
+// Copilot writes subagent.selected to events.jsonl about 500 ms after set_config_option answers (live, CLI 1.0.117):
+// right after the app set the agent, the note waits a little for it (relayToolsAfterSet).
+const LIMITED = { type: "subagent.selected", data: { agentName: "limited", tools: ["read"] } };
+/** A fake clock and an events reader whose subagent.selected for limited appears at appearAt ms (never: Infinity). */
+function slowHistory({ appearAt = Infinity, start = 10_000 } = {}) {
+  let t = start;
+  let reads = 0;
+  return {
+    now: () => t,
+    sleep: async (ms) => {
+      t += ms;
+    },
+    readEvents: () => {
+      reads++;
+      return { events: [{ type: "session.start", data: {} }, ...(t >= start + appearAt ? [LIMITED] : [])], lines: [] };
+    },
+    reads: () => reads,
+    elapsed: () => t - start,
+  };
+}
+const afterSet = (h, agent, agentSetAt) => relayToolsAfterSet({ agent, readEvents: h.readEvents, agentSetAt, now: h.now, sleep: h.sleep });
+
+test("relayToolsAfterSet: the event appears 300 ms after the app set the agent: found (no tools)", async () => {
+  const h = slowHistory({ appearAt: 300 });
+  assert.deepEqual(await afterSet(h, "limited", { value: "limited", at: h.now() }), none);
+  assert.equal(h.elapsed(), 300);
+  assert.equal(h.reads(), 4); // at 0, 100, 200, 300 ms
+});
+
+test("relayToolsAfterSet: the event never appears: gives up 2 s after the set, with today's answer", async () => {
+  const h = slowHistory();
+  assert.deepEqual(await afterSet(h, "limited", { value: "limited", at: h.now() - 500 }), both);
+  assert.equal(h.elapsed(), 1500); // the deadline counts from the set, not from the call
+  assert.equal(h.reads(), 16);
+});
+
+test("relayToolsAfterSet: a set of another agent, or one 2 s old, reads once and does not wait", async () => {
+  for (const agentSetAt of [{ value: "relayok", at: 10_000 }, { value: "limited", at: 10_000 - 2000 }, null, undefined]) {
+    const h = slowHistory({ appearAt: 300 });
+    assert.deepEqual(await afterSet(h, "limited", agentSetAt), both, JSON.stringify(agentSetAt));
+    assert.equal(h.reads(), 1);
+    assert.equal(h.elapsed(), 0);
+  }
+});
+
+test("relayToolsAfterSet: the event already there: one read, no wait", async () => {
+  const h = slowHistory({ appearAt: 0 });
+  assert.deepEqual(await afterSet(h, "limited", { value: "limited", at: h.now() }), none);
+  assert.equal(h.reads(), 1);
+  assert.equal(h.elapsed(), 0);
+});
+
+test("relayToolsAfterSet: the default agent reads nothing", async () => {
+  for (const agent of ["", undefined]) {
+    const h = slowHistory({ appearAt: 300 });
+    assert.deepEqual(await afterSet(h, agent, { value: "", at: h.now() }), both);
+    assert.equal(h.reads(), 0);
+    assert.equal(h.elapsed(), 0);
+  }
+});
+
+test("relayToolsAfterSet: a reader that throws counts as no event yet", async () => {
+  let t = 0;
+  let reads = 0;
+  const readEvents = () => {
+    reads++;
+    if (t < 200) throw new Error("not written yet");
+    return { events: [{ type: "session.start", data: {} }, LIMITED], lines: [] };
+  };
+  const tools = await relayToolsAfterSet({ agent: "limited", readEvents, agentSetAt: { value: "limited", at: 0 }, now: () => t, sleep: async (ms) => void (t += ms) });
+  assert.deepEqual(tools, none);
+  assert.equal(reads, 3);
 });
