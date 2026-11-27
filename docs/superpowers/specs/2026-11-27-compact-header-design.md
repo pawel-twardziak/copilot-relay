@@ -21,20 +21,26 @@ models. The app still adds its own synthetic "Context" select (`context-tier.mjs
 ### Context
 
 - `context-tier.mjs`
-  - `nativeContextOption(configOptions)` finds Copilot's option: a select that is not ours, whose id, category or
-    name matches `/context/i`, or one of whose values is `long_context`. Its real id could not be read on this
-    machine (the local account offers only the `auto` model). The heuristic is the call made here; the real id goes
-    to the backlog as unverified.
+  - `nativeContextOption(configOptions)` finds Copilot's option. First choice: a select that is not ours, with a
+    `long_context` value. Second choice: a select whose id, category or name matches `/context/i` and whose values
+    map both tiers to two different values. Anything else is left alone: it is not hidden and not set. Its real id
+    could not be read on this machine (the local account offers only the `auto` model). The heuristic is the call
+    made here; the real id goes to the backlog as unverified.
   - `nativeValueFor(option, tier)`: the option value for a tier. An exact value match first, then by value or name:
     long_context ↔ `/long|1m/i`, default ↔ `/default|200k/i` and not long. Otherwise null.
-  - `withContextOption` also drops the native option from what the window gets.
-  - `tierArgs` always passes `--context <tier>`, including `default`. Copilot otherwise falls back to its own
-    persisted tier, and the one select could show 200k while the session runs with 1M. `copilot --help` lists
-    `default` and `long_context` as values that override the persisted setting.
+  - `withContextOption` also drops the native option from what the window gets. When the native option's current
+    value maps to a tier other than the stored one, the select shows Copilot's live tier. A model change or Copilot
+    itself may reset it, and picking the other value repairs it.
+  - `tierArgs` is unchanged: `--context long_context` only. An explicit `--context default` was tried and dropped
+    after review. It would override a `--context` in the user's own Copilot command, and it could break wrappers or
+    older CLIs on every default-tier start. The live value shown above covers the mismatch it was meant to fix,
+    whenever Copilot offers its option.
 - `main.mjs` `sessions:setContextTier`: if the open entry's raw options contain a native option and
   `nativeValueFor(native, effectiveTier(value, settings))` is not null, it sets that value live, stores the override
   and returns `{ configOptions }` (the view's options). Otherwise it uses today's `switchTier` (restart). The same
-  refusals apply to both paths (busy turn, deleting, opening…). A failed live set leaves the override as it was.
+  refusals apply to both paths (busy turn, deleting, opening…). The live set holds `historyBusy`, so a delete or a
+  restart is refused meanwhile. It has a 15 s deadline. A failed save or set leaves the override as it was and
+  comes back as `{ refused, configOptions }`, carrying the options as they are now.
 - `app.js` `switchContext`: a `{ configOptions }` answer updates the selects without a reopen. The status line says
   that the context window changed without a restart.
 
