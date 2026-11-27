@@ -186,14 +186,16 @@ export function extractMessages(text) {
 }
 
 /** Search `query` in `messages`: the total number of occurrences, the newest time of a hit, and the first `shown`
- *  hits. `k` numbers the occurrences in file order; without pre-compaction replay the older ones get -1 and the
+ *  hits. A message with a cached `folded` (FindText.foldText of its text) that lacks the query is skipped unfolded. `k` numbers the occurrences in file order; without pre-compaction replay the older ones get -1 and the
  *  numbering starts after the compaction. */
 export function searchMessages(messages, query, { shown = 3 } = {}) {
   const hits = [];
   let count = 0;
   let latest = null;
   let k = 0;
+  const folded = FindText.foldText(String(query ?? "").trim());
   for (const m of messages) {
+    if (typeof m.folded === "string" && !m.folded.includes(folded)) continue; // cached fold: no match, no k used
     for (const { start, end } of FindText.findMatches(m.text, query)) {
       count++;
       if (m.at !== null && (latest === null || m.at > latest)) latest = m.at;

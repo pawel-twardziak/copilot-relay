@@ -28,6 +28,12 @@
     return { folded, map };
   }
 
+  /** The folded form of text that findMatches searches (no index map): for caching and for skipping texts that
+   *  cannot contain a query. */
+  function foldText(text) {
+    return fold(String(text ?? "")).folded;
+  }
+
   /** Offsets in text of the non-overlapping matches of query, left to right; none for an empty (trimmed) query. */
   function findMatches(text, query) {
     const q = fold(String(query ?? "").trim()).folded;
@@ -85,7 +91,7 @@
     return { index: Math.max(0, Math.min(wanted.k, n - 1)), exact: false };
   }
 
-  const FindText = { findMatches, makeSnippet, pickTarget };
+  const FindText = { findMatches, foldText, makeSnippet, pickTarget };
   globalThis.FindText = FindText;
   if (typeof module !== "undefined") module.exports = FindText;
 })();

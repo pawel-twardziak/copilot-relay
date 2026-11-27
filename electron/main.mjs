@@ -13,6 +13,7 @@ import { AcpConnection } from "./acp.mjs";
 import { createCommsForward } from "./comms-forward.mjs";
 import { isNotFoundExit, normalizeCommand, resolveCommand, shellLine, startFailureText } from "./copilot-command.mjs";
 import { countUserMessages, deleteSession, describeCut, forkSession, isSessionId, messageTimes, purgeDeleted, sessionCreatedAt, sessionDir, truncateSession } from "./history.mjs";
+import { createContentSearch } from "./content-search.mjs";
 import { createLastActivity } from "./last-activity.mjs";
 import { createCopilotRuntime } from "./copilot-runtime.mjs";
 import { createQuotaService, createUsagePusher, quotaView, readCacheExpiry, readLiveQuota } from "./usage.mjs";
@@ -974,6 +975,13 @@ handle("sessions:userMessages", async (sessionId) => countUserMessages(sessionId
 
 // Times of the recorded messages, for the chat's message times after a replay (never fails: no history, no times).
 handle("sessions:messageTimes", async (sessionId) => messageTimes(sessionId));
+
+// Message search across sessions; the scan runs in a worker thread (a newer query cancels the older one).
+const contentSearch = createContentSearch();
+handle("sessions:search", async (query, ids) => {
+  if (typeof query !== "string" || !Array.isArray(ids)) throw new Error("Bad search request");
+  return contentSearch.search(query, ids.filter((id) => typeof id === "string"));
+});
 
 // Copilot's own /rename command: it runs no model turn and isn't stored in the history, so turn numbers
 // used by fork/delete stay right. Copilot saves the name in workspace.yaml (user_named: true).
@@ -2100,6 +2108,7 @@ if (!app.requestSingleInstanceLock()) {
     e.preventDefault();
     Promise.all([runtimeStopping, ...live.map((c) => exited(c, 3500))]).then(() => app.quit());
   });
+  app.on("quit", () => void contentSearch.close());
   app.on("before-quit", (e) => {
     if (confirmLeavingChildren()) {
       killAll();

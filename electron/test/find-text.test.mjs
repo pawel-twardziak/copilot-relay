@@ -60,3 +60,10 @@ test("pickTarget", () => {
   assert.deepEqual(pickTarget(snips, { k: 7, before: "nope", after: "nope" }), { index: 2, exact: false });
   assert.deepEqual(pickTarget([], { k: 0, before: "", after: "" }), { index: -1, exact: false });
 });
+
+test("foldText is the folded form findMatches searches", () => {
+  const { foldText } = createRequire(import.meta.url)("../renderer/find-text.js");
+  assert.equal(foldText("A\n\n B"), "a b");
+  assert.equal(foldText(" X"), " x");
+  assert.equal(findMatches("A\n\n B", foldText("a b")).length, 1);
+});

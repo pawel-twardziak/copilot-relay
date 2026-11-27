@@ -29,6 +29,7 @@ contextBridge.exposeInMainWorld("api", {
   userMessages: (sessionId) => call("sessions:userMessages", sessionId),
   // times (ms) of the recorded messages: { users: in order, agents: by messageId }, see electron/history.mjs
   messageTimes: (sessionId) => call("sessions:messageTimes", sessionId),
+  searchSessions: (query, ids) => call("sessions:search", query, ids),
   cancel: (sessionId) => call("sessions:cancel", sessionId),
   closeSession: (sessionId) => call("sessions:close", sessionId),
   // target: { ordinal, text, where } – the message to cut at, see electron/history.mjs
