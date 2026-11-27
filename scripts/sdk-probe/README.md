@@ -171,3 +171,23 @@ node context-on-load.mjs <session-id>
 What to read in it: `compaction_start` / `compaction_summarized` with no `compaction_complete` before the shutdown,
 or a `truncation` before the first call, means the history changed size at the reopen and the shutdown figure is
 stale. A **SIZE DIFFERS** mark means the window size changed (model or tier switch).
+
+## replay-vs-file.mjs
+
+Which messages of `events.jsonl` does `session/load` replay as `user_message_chunk` / `agent_message_chunk` text
+(content search: `phase: "commentary"` messages, and messages from before a compaction). Free: it only loads sessions
+over ACP and sends no prompt.
+
+```
+cd scripts/sdk-probe
+node replay-vs-file.mjs
+node replay-vs-file.mjs <session-id> [<id>...] [--fallback-cwd <dir>]
+```
+
+- Default: the newest 20 sessions (`--sessions <n>`). A session whose `cwd` (from `workspace.yaml`) no longer exists
+  is skipped and listed, unless `--fallback-cwd <dir>` gives a folder to load it with.
+- Per session and in total: file messages (no sub-agent events, no keep-alive prompts) found / not found in the
+  replay, split by kind, `phase` and before/after the last `session.compaction_complete`.
+- `--make-compacted` creates a session in a temp folder and sends two prompts and `/compact`: it costs AIU, use it
+  only when asked.
+- The report goes to `results/replay-vs-file-<time>.md` (ignored by git): counts only, no message text.

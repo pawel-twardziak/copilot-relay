@@ -169,3 +169,25 @@ after the compaction. `/compact` itself is not a `user.message` in the file and 
 So `REPLAY_HAS_PRE_COMPACTION = true`: the pre-compaction marking, dimming and note are not built (plan Task 8 is
 skipped). The corp-PC (Windows, Claude models) repeat goes to the backlog. `phase: "commentary"` is still open
 (this session used no tools): plan Task 1 settles it on existing local sessions, without new prompts.
+
+## Probe result: commentary (2026-11-27, Linux, Copilot CLI 1.0.117-2, ACP)
+
+`scripts/sdk-probe/replay-vs-file.mjs` (free, `session/load` only) over the newest 20 sessions plus the sessions
+with a `phase` field. Counts of file messages found in the replay (normalized whitespace, containment):
+
+| kind / phase / vs compaction | found | not found |
+|---|---|---|
+| agent / `commentary` / after | 1 | 0 |
+| agent / `final_answer` / before | 10 | 0 |
+| agent / `final_answer` / after | 5 | 0 |
+| agent / no phase / after | 8 | 0 |
+| user / before compaction | 10 | 0 |
+| user / after compaction | 14 | 0 |
+
+So `SEARCH_COMMENTARY = true`: `assistant.message` events with `phase: "commentary"` are replayed as main-thread
+`agent_message_chunk` text, so they are searched. The compaction split confirms `REPLAY_HAS_PRE_COMPACTION = true`
+(session `07bdbe50-…`: 10 + 10 messages before the compaction all replayed).
+
+Limits: only one `commentary` message exists in the local files (session `29de9870-…`, a tool-using run whose
+`cwd` is gone, loaded with `--fallback-cwd /tmp`); the sample is thin. Of the newest 20 sessions, 7 were skipped
+(cwd no longer exists) and 1 had no `workspace.yaml`. Windows / Claude models (corp PC) not run: repeat there.
