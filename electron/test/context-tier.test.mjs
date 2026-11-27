@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
-import { contextOption, createTierStore, effectiveTier, isContextChoice, saveAndReopen, switchTier, tierArgs, withContextOption } from "../context-tier.mjs";
+import { contextOption, createTierStore, effectiveTier, isContextChoice, nativeContextOption, nativeValueFor, saveAndReopen, switchTier, tierArgs, withContextOption } from "../context-tier.mjs";
 
 let dir;
 let file;
@@ -23,9 +23,10 @@ test("effectiveTier: override wins, then the Settings default, then 200k", () =>
   assert.equal(effectiveTier("bogus", undefined), "default");
 });
 
-test("tierArgs gives the Copilot flag only for the long tier", () => {
+test("tierArgs always names the tier, so Copilot's own saved tier never applies", () => {
   assert.deepEqual(tierArgs("long_context"), ["--context", "long_context"]);
-  assert.deepEqual(tierArgs("default"), []);
+  assert.deepEqual(tierArgs("default"), ["--context", "default"]);
+  assert.deepEqual(tierArgs("bogus"), ["--context", "default"]);
 });
 
 test("contextOption labels the Default entry with the Settings value", () => {
@@ -58,6 +59,59 @@ test("withContextOption appends the select once and keeps Copilot's options", ()
   assert.deepEqual(
     withContextOption(null, null, "default").map((o) => o.id),
     ["context_tier"],
+  );
+});
+
+const sel = (id, extra = {}, options = [["default", "200K"], ["long_context", "1M"]]) => ({
+  id,
+  name: extra.name ?? id,
+  category: extra.category,
+  type: "select",
+  currentValue: options[0][0],
+  options: options.map(([value, name]) => ({ value, name })),
+});
+
+test("nativeContextOption finds Copilot's own context option by id, category, name or a long_context value", () => {
+  const model = sel("model", {}, [["a"], ["b"]]);
+  assert.equal(nativeContextOption([model]), null);
+  assert.equal(nativeContextOption(null), null);
+  for (const native of [
+    sel("context_size"),
+    sel("x", { category: "context" }),
+    sel("x", { name: "Context window" }),
+    sel("x", {}, [["small", "200K"], ["long_context", "1M"]]),
+  ]) {
+    assert.equal(nativeContextOption([model, native]), native);
+  }
+  // ours never counts, nor a select without options
+  assert.equal(nativeContextOption([sel("context_tier")]), null);
+  assert.equal(nativeContextOption([{ id: "context", type: "select" }]), null);
+  assert.equal(nativeContextOption([{ id: "context", type: "boolean", options: [] }]), null);
+});
+
+test("nativeValueFor maps a tier to the option's value: exact value, then value or name", () => {
+  const exact = sel("context");
+  assert.equal(nativeValueFor(exact, "default"), "default");
+  assert.equal(nativeValueFor(exact, "long_context"), "long_context");
+  const named = sel("context", {}, [["s", "Default (200K)"], ["l", "Long (1M)"]]);
+  assert.equal(nativeValueFor(named, "default"), "s");
+  assert.equal(nativeValueFor(named, "long_context"), "l");
+  const byValue = sel("context", {}, [["200k", "Standard"], ["1m", "Extended"]]);
+  assert.equal(nativeValueFor(byValue, "default"), "200k");
+  assert.equal(nativeValueFor(byValue, "long_context"), "1m");
+  const unknown = sel("context", {}, [["a", "A"], ["b", "B"]]);
+  assert.equal(nativeValueFor(unknown, "default"), null);
+  assert.equal(nativeValueFor(unknown, "long_context"), null);
+  assert.equal(nativeValueFor(null, "default"), null);
+  assert.equal(nativeValueFor(exact, "bogus"), null);
+});
+
+test("withContextOption hides Copilot's own context option: one select", () => {
+  const model = sel("model", {}, [["a"], ["b"]]);
+  const out = withContextOption([model, sel("context_size")], null, "default");
+  assert.deepEqual(
+    out.map((o) => o.id),
+    ["model", "context_tier"],
   );
 });
 
@@ -108,7 +162,7 @@ test("store: copy and delete are best-effort, set reports a failed write", () =>
   assert.throws(() => s.set("a", "long_context"));
 });
 
-function fakeSwitch({ refusal = null, closeError = null, saved = null, storeFile = file } = {}) {
+function fakeSwitch({ refusal = null, closeError = null, saved = null, storeFile = file, live = undefined } = {}) {
   const store = createTierStore(storeFile);
   if (saved) store.set("s1", saved);
   let closed = 0;
@@ -122,9 +176,37 @@ function fakeSwitch({ refusal = null, closeError = null, saved = null, storeFile
         closed++;
         if (closeError) throw closeError;
       },
+      live,
     });
   return { store, run, closed: () => closed };
 }
+
+test("switchTier live: sets Copilot's option, saves the override, closes nothing", async () => {
+  const seen = [];
+  const f = fakeSwitch({ live: async () => (seen.push(f.store.get("s1")), [{ id: "model" }]) });
+  assert.deepEqual(await f.run("long_context"), { configOptions: [{ id: "model" }] });
+  assert.deepEqual(seen, ["long_context"], "saved before the live set");
+  assert.equal(f.closed(), 0);
+  assert.equal(f.store.get("s1"), "long_context");
+});
+
+test("switchTier live: a refusal changes nothing", async () => {
+  let called = 0;
+  const f = fakeSwitch({ refusal: "busy", saved: "default", live: async () => (called++, []) });
+  assert.deepEqual(await f.run("long_context"), { refused: "busy" });
+  assert.equal(called, 0);
+  assert.equal(f.store.get("s1"), "default");
+});
+
+test("switchTier live: a failed set restores the override and is refused, nothing closed", async () => {
+  const f = fakeSwitch({ saved: "default", live: async () => { throw new Error("nope"); } });
+  assert.deepEqual(await f.run("long_context"), { refused: "nope" });
+  assert.equal(f.store.get("s1"), "default");
+  assert.equal(f.closed(), 0);
+  const g = fakeSwitch({ live: async () => { throw new Error("nope"); }, storeFile: path.join(dir, "g.json") });
+  await g.run("inherit");
+  assert.equal(g.store.get("s1"), null, "no override before: none after");
+});
 
 test("switchTier: a refusal changes nothing and closes nothing", async () => {
   const f = fakeSwitch({ refusal: "Wait until Copilot finishes this turn.", saved: "default" });

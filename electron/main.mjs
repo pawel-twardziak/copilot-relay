@@ -26,7 +26,7 @@ import { readLinksCache, writeLinksCache } from "./links-cache.mjs";
 import { listAllPages } from "./session-list.mjs";
 import { beginPrompt, endPrompt } from "./prompt-count.mjs";
 import { normalizePanelMode } from "./activity-panel.mjs";
-import { createTierStore, effectiveTier, normalizeTier, switchTier, tierArgs, withContextOption } from "./context-tier.mjs";
+import { createTierStore, effectiveTier, nativeContextOption, nativeValueFor, normalizeTier, switchTier, tierArgs, withContextOption } from "./context-tier.mjs";
 import { saveSetup } from "./session-setup.mjs";
 import { CHILD_PART, DEFAULT_PART, applyPromptSettings, clearPromptDirs, composePrompt, createPromptStore, effectiveChildPart, effectiveDefaultPart, instructionsEnv, migratePromptDefault, normalizeTemplates, writePromptDir } from "./session-prompts.mjs";
 import { createRestarter, realEffects, reconnectClients } from "./broker-restart.mjs";
@@ -1472,14 +1472,30 @@ handle("sessions:setConfig", async (sessionId, configId, value) => {
   return updated && viewConfig(sessionId, updated);
 });
 
-// a new context window takes a new Copilot process: the session is closed here and the renderer reopens it
-// (sessions:open starts Copilot with the new flag and replays the history). Refusals come back as { refused }
-// with the session untouched: the window must not close and reopen it (a delegated child may still be set up).
+// a new context window: live through Copilot's own context option when the open session has one that takes the tier
+// ({ configOptions }: no restart); otherwise it takes a new Copilot process: the session is closed here and the
+// renderer reopens it (sessions:open starts Copilot with the new flag and replays the history). Refusals come back as
+// { refused } with the session untouched: the window must not close and reopen it (a delegated child may still be
+// set up).
 handle("sessions:setContextTier", async (sessionId, value) => {
   if (!isSessionId(sessionId)) return { refused: `Invalid session id: ${sessionId}` };
   await keeper.whenIdle(sessionId);
-  return switchTier({ sessionId, value, tiers, ...restartGuards(sessionId) });
+  return switchTier({ sessionId, value, tiers, ...restartGuards(sessionId), live: liveTierSwitch(sessionId, value) });
 });
+
+/** How the open session switches to the tier `value` stands for without a restart, or null: through Copilot's own
+ *  context option, when it has one with a value for that tier. */
+function liveTierSwitch(sessionId, value) {
+  const entry = open.get(sessionId);
+  const native = nativeContextOption(entry?.configOptions);
+  const target = nativeValueFor(native, effectiveTier(value, loadSettings().contextTier));
+  if (!entry || target == null) return null;
+  return async () => {
+    keeper.activity(sessionId); // another context window has no fresh cache entry: the keeper waits for a turn
+    const updated = target === native.currentValue ? null : await setConfigOption(sessionId, entry, native.id, target);
+    return viewConfig(sessionId, updated ?? entry.configOptions);
+  };
+}
 
 /** What sessions:setContextTier and sessions:setPrompt share: the refusals that leave the session untouched, and the
  *  close (marked as a history op while it runs, so a delete or another restart is refused meanwhile). */

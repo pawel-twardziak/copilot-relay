@@ -463,6 +463,21 @@ class SessionView {
     this.holdBar = h("span", { class: "held-switches", hidden: true }, "Approve:", ...HeldReplies.SWITCH_KINDS.map((kind) => this.holdLabels[kind]));
     this.editBar = h("div", { class: "edit-bar", hidden: true }, this.editText, h("button", { onclick: () => this.cancelEdit() }, "Cancel"));
 
+    // the ⋯ menu: the header's rare and destructive actions (Setup, Copy thread, Close all sub-sessions, Close, Delete)
+    this.moreMenu = h(
+      "div",
+      { class: "more-menu", role: "menu", hidden: true },
+      this.promptBtn,
+      h("button", { title: "Copy the whole conversation as Markdown", onclick: () => this.copyThread() }, "Copy thread"),
+      this.closeChildrenBtn,
+      h("hr"),
+      h("button", { class: "danger", title: "Close this session in the app (it stays resumable)", onclick: () => closeView(this.sessionId) }, "Close"),
+      h("button", { class: "danger", title: "Delete this whole session from disk", onclick: () => deleteSessionFlow({ sessionId: this.sessionId, cwd: this.cwd, title: this.title }) }, "Delete"),
+    );
+    for (const b of this.moreMenu.querySelectorAll("button")) b.setAttribute("role", "menuitem");
+    this.moreBtn = h("button", { class: "more-btn", title: "More actions", "aria-haspopup": "menu", "aria-expanded": "false", onclick: () => this.toggleMore() }, "⋯");
+    this.bindMoreMenu();
+
     this.el = h(
       "section",
       { class: "session-view" },
@@ -474,14 +489,14 @@ class SessionView {
         this.usageChip,
         this.keeperChip,
         this.selects,
-        this.promptBtn,
-        this.closeChildrenBtn,
-        h("button", { title: "Changes in this session's repositories", onclick: () => filePreview.show(this) }, "Changes"),
-        this.activityBtn,
-        this.commsBtn,
-        h("button", { title: "Copy the whole conversation as Markdown", onclick: (e) => this.copyThread(e.currentTarget) }, "Copy thread"),
-        h("button", { class: "danger", title: "Close this session in the app (it stays resumable)", onclick: () => closeView(this.sessionId) }, "Close"),
-        h("button", { class: "danger", title: "Delete this whole session from disk", onclick: () => deleteSessionFlow({ sessionId: this.sessionId, cwd: this.cwd, title: this.title }) }, "Delete"),
+        h(
+          "div",
+          { class: "head-actions" },
+          h("button", { title: "Changes in this session's repositories", onclick: () => filePreview.show(this) }, "Changes"),
+          this.activityBtn,
+          this.commsBtn,
+          h("div", { class: "more" }, this.moreBtn, this.moreMenu),
+        ),
       ),
       this.relationsEl,
       this.row,
@@ -2583,7 +2598,8 @@ class SessionView {
     }
   }
 
-  /** A new context window needs a new Copilot process: main closes the session, the reopen replays it. */
+  /** A new context window: live when Copilot's own option takes it (main answers { configOptions }); otherwise it
+   *  needs a new Copilot process: main closes the session, the reopen replays it. */
   async switchContext(sel, previous) {
     if (this.busy || this.dead || this.deleting) {
       sel.value = previous;
@@ -2591,7 +2607,7 @@ class SessionView {
       return;
     }
     this.setBusy(true);
-    this.statusEl.textContent = "Restarting Copilot with the new context window…";
+    this.statusEl.textContent = "Changing the context window…";
     let failure = null;
     try {
       const res = await api.setContextTier(this.sessionId, sel.value);
@@ -2600,6 +2616,12 @@ class SessionView {
         sel.value = previous;
         this.setBusy(false);
         this.error(`Could not change the context window: ${res.refused}`);
+        return;
+      }
+      if (res?.configOptions) {
+        this.setConfig(res.configOptions);
+        this.setBusy(false);
+        this.statusEl.textContent = "Context window changed (no restart needed).";
         return;
       }
     } catch (e) {
@@ -2671,9 +2693,11 @@ class SessionView {
         .map((c) => {
           const seen = new Set();
           const opts = c.options.filter((o) => !seen.has(o.value) && seen.add(o.value));
+          // the title: the option's name and its full chosen value (a narrow select cuts it), then the description
+          const titleOf = () => [`${c.name}: ${sel.selectedOptions[0]?.textContent ?? ""}`, c.description].filter(Boolean).join("\n");
           const sel = h(
             "select",
-            { title: c.description ?? c.name },
+            {},
             opts.map((o) => {
               const usage = o._meta?.copilotUsage ? ` (${o._meta.copilotUsage})` : "";
               const opt = h("option", { value: o.value, title: o.description ?? "" }, o.name + usage);
@@ -2681,7 +2705,9 @@ class SessionView {
               return opt;
             }),
           );
+          sel.title = titleOf();
           sel.addEventListener("change", async () => {
+            sel.title = titleOf();
             if (c.id === "context_tier") return this.switchContext(sel, c.currentValue);
             try {
               const updated = await api.setConfig(this.sessionId, c.id, sel.value);
@@ -2738,17 +2764,65 @@ class SessionView {
   }
 
   /** Whole conversation as Markdown: prompts, relay messages, answers, tool calls and plans (not thinking). */
-  async copyThread(btn) {
+  async copyThread() {
     this.flush();
     const parts = [`# ${this.title ? shortTitle(this.title) : "Copilot session"}`, `_${this.cwd} · ${this.sessionId}_`];
     for (const el of this.log.children) {
       const t = el._md?.();
       if (t && t.trim()) parts.push(t.trim());
     }
-    await api.copy(parts.join("\n\n"));
-    const old = btn.textContent;
-    btn.textContent = "Copied";
-    setTimeout(() => (btn.textContent = old), 1200);
+    try {
+      await api.copy(parts.join("\n\n"));
+      this.statusEl.textContent = "Thread copied to the clipboard as Markdown.";
+    } catch (e) {
+      this.error(`Could not copy the thread: ${e.message}`);
+    }
+  }
+
+  // --- the header's ⋯ menu
+
+  /** Opens or closes the ⋯ menu; open, the focus goes to its first item. */
+  toggleMore(open = this.moreMenu.hidden) {
+    this.moreMenu.hidden = !open;
+    this.moreBtn.setAttribute("aria-expanded", String(open));
+    this.moreBtn.classList.toggle("open", open);
+    if (open) {
+      this.moreItems()[0]?.focus();
+      document.addEventListener("pointerdown", this.onMoreOutside, true);
+    } else document.removeEventListener("pointerdown", this.onMoreOutside, true);
+  }
+
+  /** The menu's items that can be used now (shown, enabled). */
+  moreItems() {
+    return [...this.moreMenu.querySelectorAll("button")].filter((b) => !b.hidden && !b.disabled);
+  }
+
+  /** An item click closes the menu; Esc closes it (the focus back on ⋯), Tab closes it, arrows walk the items; a
+   *  press outside the menu and the button closes it. */
+  bindMoreMenu() {
+    this.onMoreOutside = (e) => {
+      if (!this.moreMenu.contains(e.target) && !this.moreBtn.contains(e.target)) this.toggleMore(false);
+    };
+    this.moreMenu.addEventListener("click", (e) => {
+      if (e.target.closest("button")) this.toggleMore(false);
+    });
+    this.moreMenu.addEventListener("keydown", (e) => {
+      const items = this.moreItems();
+      const at = items.indexOf(document.activeElement);
+      if (e.key === "Escape") {
+        this.toggleMore(false);
+        this.moreBtn.focus();
+      } else if (e.key === "Tab") {
+        this.toggleMore(false);
+        return; // the focus moves on as usual
+      } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        const step = e.key === "ArrowDown" ? 1 : -1;
+        items[(at + step + items.length) % items.length]?.focus();
+      } else if (e.key === "Home" || e.key === "End") items[e.key === "Home" ? 0 : items.length - 1]?.focus();
+      else return;
+      e.preventDefault();
+      e.stopPropagation(); // Esc here does not also stop the turn
+    });
   }
 
   send() {

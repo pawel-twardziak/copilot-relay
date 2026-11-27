@@ -95,19 +95,37 @@ code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberat
 .empty h1 { color: var(--text); font-weight: 600; }
 .session-view { flex: 1; display: none; flex-direction: column; min-height: 0; }
 .session-view.active { display: flex; }
+/* the session header: one row on a normal width (title, chips, selects, actions, the ⋯ menu); a narrow window wraps it */
 .head {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 8px 14px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 6px 12px;
   border-bottom: 1px solid var(--border); background: var(--panel);
 }
-.head .title { flex: 1 1 140px; min-width: 100px; }
+.head .title { flex: 1 1 160px; min-width: 100px; line-height: 1.3; }
 .head .title b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .head .title b.renamable { cursor: text; }
 .head .title b.renamable:hover { text-decoration: underline dotted; }
 .title-rename { display: block; width: 100%; font-weight: bold; }
 .head .title a { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12px; cursor: pointer; text-decoration: none; }
 .head .title a:hover { text-decoration: underline; }
-.head .selects { display: flex; flex-wrap: nowrap; gap: 6px; flex-shrink: 0; }
-.head select { max-width: 120px; }
+.head .selects { display: flex; flex-wrap: nowrap; gap: 4px; flex-shrink: 0; }
+/* one height for the header's controls and chips */
+.head select, .head button, .head .usage-chip, .head .keeper-chip { height: 26px; font-size: 12px; }
+.head select { max-width: 130px; padding: 0 4px 0 6px; text-overflow: ellipsis; }
+.head button { padding: 0 9px; }
+.head .usage-chip, .head .keeper-chip { padding: 0 9px; }
+.head-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; margin-left: auto; }
+.head-actions button[hidden] { display: none; }
+.more { position: relative; display: flex; }
+.head .more-btn { width: 30px; padding: 0; font-size: 16px; line-height: 1; letter-spacing: 1px; }
+.head .more-btn.open { border-color: var(--muted); background: var(--bg); }
+.more-menu {
+  position: absolute; right: 0; top: calc(100% + 4px); z-index: 50; min-width: 210px; display: flex; flex-direction: column;
+  padding: 4px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 24px var(--shadow);
+}
+.more-menu[hidden], .more-menu button[hidden] { display: none; }
+.head .more-menu button { height: auto; padding: 6px 10px; border: none; border-radius: 5px; background: none; text-align: left; font-size: 13px; }
+.head .more-menu button:hover:not(:disabled), .more-menu button:focus-visible { background: var(--bg); outline: none; }
+.more-menu hr { width: 100%; margin: 4px 0; border: none; border-top: 1px solid var(--border); }
 .composer .agent-picker { align-self: flex-end; max-width: 150px; }
 .head button { white-space: nowrap; flex-shrink: 0; }
 /* relation bar: Parent / Sub-sessions of this session */
@@ -753,3 +771,4 @@ body.comms-resizing { cursor: row-resize; user-select: none; }
 .cl-row.open .cl-text { display: block; color: var(--text); white-space: pre-wrap; user-select: text; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 12px; padding: 6px 8px; margin-top: 5px; border-radius: 6px; background: var(--bg); border: 1px solid var(--border); max-height: 60vh; overflow: auto; }
 .cl-text.loading::after { content: " · loading…"; color: var(--muted); }
 .cl-error { color: var(--err); }
+.head .keeper-chip button { height: 20px; padding: 0 7px; font-size: 11px; }

@@ -25,6 +25,7 @@ const SETTINGS_NOTE = "Changes here reach a running session the next time its Co
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const FIXTURES = path.join(ROOT, "electron", "test", "fixtures", "acp");
 const SCRIPTED_AGENT = path.join(FIXTURES, "scripted-agent.mjs"); // the command settings.json holds in a launch
+const HEADER_SCENARIO = path.join(FIXTURES, "header-scenario.mjs");
 export const PANEL_SCENARIO = path.join(FIXTURES, "panel-scenario.mjs");
 const BASELINE_DIR = path.join(ROOT, "electron", "test", "fixtures", "ui-baseline");
 
@@ -4545,6 +4546,65 @@ export const checks = [
       assert.match(meta, /^b · /, "the child shows its own folder");
       assert.doesNotMatch(meta, /child of/);
       assert.deepEqual(strip(out.second), ["# 📌 Pinned", "Q:0", "P:0", "C:1", "# Open in app", "scripted-work:0", "# work (0) +", "# a (1) +", "R:0", "# b (0) +"]);
+    },
+  },
+  {
+    // one context select: Copilot's own option is hidden; a switch goes through it live (no reopen, the same Copilot)
+    // and is stored as the session's override for the next start
+    name: "header-one-context",
+    scenario: HEADER_SCENARIO,
+    modes: ["off"],
+    sessionId: HISTORY_ID, // main switches the context of a UUID session only
+    async run(app) {
+      const V = `views.get(${JSON.stringify(HISTORY_ID)})`;
+      await app.newSession();
+      const ids = await app.ev(`[...${V}.selects.querySelectorAll("select")].map((s) => [...s.options].map((o) => o.value).join(","))`);
+      assert.equal(ids.filter((v) => v.includes("long_context")).length, 1, `one context select: ${JSON.stringify(ids)}`);
+      const before = { view: await app.ev(`(window.__headerView = ${V}, true)`), agents: (await app.agents()).join() };
+      await app.ev(`(() => { const s = [...${V}.selects.querySelectorAll("select")].find((x) => [...x.options].some((o) => o.value === "inherit")); s.value = "long_context"; s.dispatchEvent(new Event("change")); })()`);
+      await app.check(`${V}.statusEl.textContent === "Context window changed (no restart needed)." && !${V}.busy`, "the live switch");
+      assert.equal(await app.ev(`${V} === window.__headerView`), before.view, "the same view: no reopen");
+      assert.equal((await app.agents()).join(), before.agents, "the same Copilot process");
+      const stored = JSON.parse(readFileSync(path.join(app.dir, "config", "copilot-relay-desktop", "context-tiers.json"), "utf8"));
+      assert.equal(stored[HISTORY_ID], "long_context", "the override is stored for the next start");
+      assert.equal(await app.ev(`[...${V}.selects.querySelectorAll("select")].find((x) => [...x.options].some((o) => o.value === "inherit")).value`), "long_context");
+    },
+  },
+  {
+    // the ⋯ menu: opens with the focus on its first item, arrows walk it, Esc closes it (focus back on ⋯), a click
+    // outside closes it, an item runs and closes it
+    name: "header-more-menu",
+    scenario: HEADER_SCENARIO,
+    modes: ["off"],
+    async run(app) {
+      await app.newSession();
+      const open = () => app.ev(`!${V}.moreMenu.hidden && ${V}.moreBtn.getAttribute("aria-expanded") === "true"`);
+      const focused = () => app.ev(`document.activeElement.textContent`);
+      await app.click(".session-view.active .more-btn");
+      assert.equal(await open(), true, "opened");
+      assert.equal(await focused(), "Setup");
+      assert.deepEqual(await app.ev(`${V}.moreItems().map((b) => b.textContent)`), ["Setup", "Copy thread", "Close", "Delete"], "no Close all sub-sessions outside a tree");
+      const key = (k) => app.ev(`document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: ${JSON.stringify(k)}, bubbles: true }))`);
+      await key("ArrowDown");
+      assert.equal(await focused(), "Copy thread");
+      await key("ArrowUp");
+      await key("ArrowUp");
+      assert.equal(await focused(), "Delete", "Up from the first item wraps to the last");
+      await app.pressEscape();
+      assert.equal(await open(), false, "Esc closes it");
+      assert.equal(await app.ev(`document.activeElement === ${V}.moreBtn`), true, "the focus back on ⋯");
+      assert.equal(await app.ev(`!!${V}.busy`), false);
+      await app.click(".session-view.active .more-btn");
+      assert.equal(await open(), true);
+      await app.click(".session-view.active .log");
+      assert.equal(await open(), false, "a click outside closes it");
+      await app.click(".session-view.active .more-btn");
+      await app.click(".session-view.active .more-btn");
+      assert.equal(await open(), false, "a second click on ⋯ closes it");
+      await app.click(".session-view.active .more-btn");
+      await app.ev(`[...${V}.moreMenu.querySelectorAll("button")].find((b) => b.textContent === "Copy thread").click()`);
+      assert.equal(await open(), false, "an item closes it");
+      await app.check(`${V}.statusEl.textContent === "Thread copied to the clipboard as Markdown."`, "the copy note");
     },
   },
   ...commsChecks,
