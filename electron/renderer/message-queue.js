@@ -3,7 +3,7 @@
 // state (a task waiting to be continued after the answers), and when the queue may deliver.
 // Loaded as a classic <script> (sets globalThis.MessageQueue) and via require() in tests.
 //
-// Queue item: { id, kind: "app" | "relay", text, prompt, from, human, fromCwd, deliveryId, command }
+// Queue item: { id, kind: "app" | "relay", text, prompt, from, fromKey, human, fromCwd, deliveryId, command }
 // `text` is what the bubble shows, `prompt` what is sent, `command` is true for a slash command.
 "use strict";
 

@@ -47,8 +47,19 @@ export function fallbackNote({ toName, kind }) {
   );
 }
 
-/** Removes a trailing note block added by fallbackNote. */
+// the note's fixed text around the recipient's name, for each kind (stripNote recognises a whole note by them)
+const NAME = "\u0000";
+const NOTE_PARTS = ["report", "message"].map((kind) => fallbackNote({ toName: NAME, kind }).split(NAME));
+const isNote = (s) => NOTE_PARTS.some(([head, tail]) => s.length >= head.length + tail.length && s.startsWith(head) && s.endsWith(tail));
+
+/** Removes a trailing note block added by fallbackNote ("\n\n" + the whole note, to the end); any other text is
+ *  unchanged. The window keeps a copy (electron/renderer/fallback.js). */
 export function stripNote(text) {
-  const i = String(text).lastIndexOf(`\n\n${NOTE_MARK}`);
-  return i < 0 ? text : text.slice(0, i);
+  const s = String(text);
+  const sep = `\n\n${NOTE_MARK}\n`;
+  // from the last marker back: the latest one that starts a whole note (a name may contain the marker too)
+  for (let i = s.lastIndexOf(sep); i >= 0; i = i > 0 ? s.lastIndexOf(sep, i - 1) : -1) {
+    if (isNote(s.slice(i + 2))) return s.slice(0, i);
+  }
+  return text;
 }

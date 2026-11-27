@@ -102,3 +102,14 @@ test("note and strip", () => {
   assert.equal(stripNote(`hi\n\n${note}`), "hi");
   assert.equal(stripNote("hi there"), "hi there");
 });
+
+test("strip takes only a whole trailing note", () => {
+  const note = fallbackNote({ toName: "p", kind: "message" });
+  for (const text of [`hi\n\n${NOTE_MARK}`, `hi\n\n${NOTE_MARK}\nsomething else`, `hi\n\n${note}\n\nmore`, `hi\n\n${note}.`, `hi\n${note}`]) {
+    assert.equal(stripNote(text), text, JSON.stringify(text));
+  }
+  const quoted = `quote:\n\n${NOTE_MARK}\nnot a note`;
+  assert.equal(stripNote(`${quoted}\n\n${note}`), quoted);
+  const odd = fallbackNote({ toName: `x\n\n${NOTE_MARK}\ny`, kind: "report" }); // a name with the marker in it
+  assert.equal(stripNote(`hi\n\n${odd}`), "hi");
+});
