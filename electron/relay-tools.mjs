@@ -38,21 +38,27 @@ export const agentIsLastSelected = (agent, events) => {
 
 /** Relay tools the agent can call, from events.jsonl. The default agent ("" or undefined) and unknown ones have both.
  *  Of the agent's last subagent.selected and its last tool baseline, the later one in the list counts: a reload after
- *  the agent file changed writes a new baseline but no new subagent.selected. A baseline is the agent's when it was
- *  written after the agent's own selection with no switch since (its surface carries the file name, which can differ
- *  from the agent's `name:`), or when its surface ends with `agent=<name>` or `agent=<file-style name>`. */
+ *  the agent file changed writes a new baseline but no new subagent.selected. The baseline's surface carries the
+ *  agent's file name, which can differ from its `name:` ("Poeta wspomnień" / `agent=poeta-wspomnien`):
+ *  - the selection's `__copilotSelectedAgentDefinitionId` (CLI 1.0.117) is that file name: a baseline is the agent's
+ *    when its surface ends with `agent=<definition id>` or `agent=<name>`;
+ *  - without it (older CLIs): when it was written after the agent's own selection with no switch since, or when its
+ *    surface ends with `agent=<name>` or `agent=<file-style name>`. */
 export function agentRelayTools(agent, events) {
   if (!agent) return both();
   const list = ownEvents(events);
   const selAt = list.findLastIndex((e) => e?.type === "subagent.selected" && e.data?.agentName === agent);
-  const ownFrom = selAt >= 0 && list.findLastIndex(isSwitch) === selAt ? selAt : Infinity;
+  const defId = selAt >= 0 ? list[selAt].__copilotSelectedAgentDefinitionId : undefined;
+  const known = typeof defId === "string" && defId !== "";
+  const ownFrom = !known && selAt >= 0 && list.findLastIndex(isSwitch) === selAt ? selAt : Infinity;
   // never a bare "agent=": that is the default agent's surface (a name without Latin letters has an empty slug)
-  const slug = agentSlug(agent);
+  const slug = known ? defId : agentSlug(agent);
   const names = [`agent=${agent}`, ...(slug ? [`agent=${slug}`] : [])];
   const baseAt = list.findLastIndex((e, i) => {
     if (e?.type !== "session.tool_baseline") return false;
     const surface = String(e.data?.surface ?? "");
-    if (i > ownFrom && !surface.endsWith("agent=")) return true; // a default-agent baseline is never this agent's
+    // by order: a named, non-default surface only (a default-agent baseline is never this agent's)
+    if (i > ownFrom && /agent=.+$/.test(surface)) return true;
     return names.some((n) => surface.endsWith(n));
   });
   if (selAt < 0 && baseAt < 0) return both();

@@ -109,7 +109,8 @@ None of these blocked the merge. Line numbers were taken at the review and may d
 26. A failed write of `fallback-pending.json` leaves older content on disk: a forward sent or dropped in memory can
     come back after a restart and be sent again (a report is deduplicated by the broker, a message is not).
 
-27. The name / file-style-name match of a baseline ignores order and switches: if another agent's file name equals
+27. Only when the selection has no `__copilotSelectedAgentDefinitionId` (CLIs before 1.0.117?): the order rule and the
+    name / file-style-name match of a baseline ignore which agent a baseline is for; the match ignores order and switches: if another agent's file name equals
     this agent's slug (agent "Reviewer" in `strict.agent.md`, another agent in `reviewer.agent.md`), the other one's
     baseline counts for "Reviewer" while it is later than Reviewer's own selection (in practice only in the ~500 ms
     lag). `agentSlug` turns letters NFD does not split (ø, ß, đ) into `-`; only `ł`/`Ł` are mapped.

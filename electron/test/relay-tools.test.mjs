@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  agentIsLastSelected,
   agentRelayTools,
   agentSlug,
   fallbackNote,
@@ -78,6 +79,34 @@ const relayBase = (surfaceAgent, names) => ({
   data: { surface: `responses:capi:none:agent=${surfaceAgent}`, tools: names.map((name) => ({ name, deferred: false })) },
 });
 const POET = "Poeta wspomnień";
+
+// Copilot 1.0.117 puts the agent's definition id (its file name, the baseline surface's name) on the envelope.
+const selectedDef = (agentName, tools, def) => ({ __copilotSelectedAgentDefinitionId: def, ...selected(agentName, tools) });
+
+test("with the definition id, a baseline counts only when its surface names it", () => {
+  const sel = selectedDef(POET, ["edit"], "poeta-wspomnien");
+  const relay = ["relay-report_result", "relay-send_message"];
+  // the real session: gained all tools, resumed, a new baseline under the file name
+  assert.deepEqual(agentRelayTools(POET, [sel, relayBase("poeta-wspomnien", ["view"]), relayBase("poeta-wspomnien", relay)]), both);
+  // another agent's baseline after the selection, with no switch recorded: not this agent's
+  assert.deepEqual(agentRelayTools(POET, [sel, relayBase("explore", relay)]), none);
+  // a baseline without a surface: not this agent's
+  assert.deepEqual(agentRelayTools(POET, [sel, { type: "session.tool_baseline", data: { tools: [{ name: "relay-send_message" }] } }]), none);
+});
+
+test("without the definition id (older CLIs), a baseline with no surface never counts by order", () => {
+  const noSurface = { type: "session.tool_baseline", data: { tools: [{ name: "relay-send_message" }] } };
+  assert.deepEqual(agentRelayTools(POET, [selected(POET, ["edit"]), noSurface]), none);
+});
+
+test("agentIsLastSelected", () => {
+  const dese = { type: "subagent.deselected", data: {} };
+  assert.equal(agentIsLastSelected(POET, [selected(POET, ["edit"])]), true);
+  assert.equal(agentIsLastSelected(POET, [selected(POET, ["edit"]), dese]), false);
+  assert.equal(agentIsLastSelected(POET, [selected(POET, ["edit"]), selected("x", [])]), false);
+  assert.equal(agentIsLastSelected(POET, [selected(POET, ["edit"]), { ...selected("x", []), agentId: "t" }]), true);
+  assert.equal(agentIsLastSelected(POET, []), false);
+});
 
 test("a baseline after the agent's own selection counts, whatever name its surface carries", () => {
   const events = [

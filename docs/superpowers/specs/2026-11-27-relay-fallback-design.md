@@ -109,8 +109,10 @@ the probe showed a reliable signal before the prompt.
 - Otherwise two events count: the last `subagent.selected` with `agentName === agent`, and the last
   `session.tool_baseline` that is this agent's. The option value and `agentName` are the agent's `name:` ("Poeta
   wspomnień"), but a baseline's `surface` carries the agent's file name (`agent=poeta-wspomnien`; verified on CLI
-  1.0.117, 2026-11-27). So a baseline is the agent's when it comes after the agent's own `subagent.selected` with no
-  other `subagent.selected`/`deselected` since (and its surface does not end in an empty `agent=`), or when its
+  1.0.117, 2026-11-27). The selection's envelope carries `__copilotSelectedAgentDefinitionId`, which is exactly that file
+  name: when it is there, a baseline is the agent's when its surface ends with `agent=<definition id>` or
+  `agent=<name>`, and nothing else. Without it (older CLIs), a baseline is the agent's when it comes after the agent's own `subagent.selected` with no
+  other `subagent.selected`/`deselected` since (and its surface names a non-default agent), or when its
   surface ends with `agent=<agent>` or `agent=<file-style name>` (`agentSlug`: lower case, no diacritics, other
   characters as `-`; an empty slug is never used) (v0.38.2). A sub-agent's events (`agentId` on the envelope) never
   count. The order rule trusts that every agent switch writes `subagent.selected` or `deselected` (unverified for
