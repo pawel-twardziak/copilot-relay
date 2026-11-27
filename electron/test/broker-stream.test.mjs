@@ -87,3 +87,16 @@ for (const [label, size] of [["small", SMALL], ["medium", INCIDENT], ["large", L
     assert.deepEqual(texts(third.got), ["end"]);
   });
 }
+
+test("an older stream of a session that closes after a newer one registered does not take the session offline", async (t) => {
+  const b = await startBroker(t);
+  const sender = await b.connect(newKey(), { name: "sender" });
+  const older = await b.connect(newKey(), { name: "receiver" });
+  const newer = await b.connect(older.key); // e.g. a reconnect whose old request the broker sees closing only now
+  older.client.stop();
+  await new Promise((r) => setTimeout(r, 300)); // the broker handles the older stream's close
+  const answer = await sender.client.send(older.client.name, "after the old close");
+  assert.match(answer, / delivered\./);
+  await until(() => newer.got.some((m) => m.text === "after the old close"), "the message on the newer stream");
+  assert.deepEqual(texts(older.got), []);
+});

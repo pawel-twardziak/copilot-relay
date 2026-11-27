@@ -405,7 +405,9 @@ const server = http.createServer(async (req, res) => {
         req.on("close", () => {
           clearInterval(ping);
           registry.off("peer_renamed", onRenamed);
-          if (registry.get(key)?.push) registry.disconnect(key);
+          // only this stream's own session: a newer stream of the same key (a reconnect whose old request closes
+          // only now) keeps the session online
+          if (registry.get(key)?.control === control) registry.disconnect(key);
         });
         return;
       }
