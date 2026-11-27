@@ -42,6 +42,10 @@ None of these blocked the merge. Line numbers were taken at the review and may d
    - Open: whether the request reached main. With this build, `main.log` has either `[delegation] session_request <id>
      from <session>` (then the step it stopped at) or `session_request <id> dropped: session <id> is not open` if it
      did. Neither line: the session's relay stream was dead while the broker still wrote to it.
+   - 2026-11-27: a restart of the corp PC made both work again (before this build, so no log of the case). Fits a
+     broker process that kept running old code across updates of the app and the checkout, a dead stream, or the race
+     above; a restart clears all three. Next time: the `← registered … (broker <build>)` line in main.log shows which
+     broker the sessions talk to, and broker.log the path of each event.
    - Proposal: if the stream is the cause, the broker should treat a `control` write as delivered only after the app
      acknowledges it (or the app should re-register on a stalled stream), and `requestCreate` should say "not delivered"
      instead of "sent". Decide after the log of one real case.
