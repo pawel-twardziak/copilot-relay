@@ -448,6 +448,11 @@ const server = http.createServer(async (req, res) => {
         if (parent) delegation.link(key, parent); // before upsert: the first message may already depend on the link
         const onRenamed = (ev) => ev.key === key && write("renamed", { name: ev.name });
         registry.on("peer_renamed", onRenamed);
+        // a second client of the same session (e.g. the copilot-relay extension inside a Copilot the app started):
+        // from now on this stream gets the session's events, the other one none
+        const before = registry.get(key);
+        if (before?.online && before.control)
+          console.warn(`[stream ${sid}] takes ${key} over from a stream that is still open${before.app && !app ? " — the app's; this one has no app alias, so the app gets nothing for this session" : ""}`);
         const peer = registry.upsert({
           key,
           name: pickName(key, q.get("name")),

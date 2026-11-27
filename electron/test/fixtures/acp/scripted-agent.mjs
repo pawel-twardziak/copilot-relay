@@ -46,6 +46,8 @@ const { prompts = [], load = {}, uniqueIds = false, configOptions = [] } = proce
 // $SCRIPTED_ARGV_FILE: the arguments this process was started with, one JSON line per start (a check reads what
 // reached the agent through the command line, the app's --acp --stdio included)
 if (process.env.SCRIPTED_ARGV_FILE) appendFileSync(process.env.SCRIPTED_ARGV_FILE, JSON.stringify(process.argv.slice(2)) + "\n");
+// $SCRIPTED_ENV_FILE: the relay variables this process was started with, one JSON line per start
+if (process.env.SCRIPTED_ENV_FILE) appendFileSync(process.env.SCRIPTED_ENV_FILE, JSON.stringify({ COPILOT_RELAY_MANAGED: process.env.COPILOT_RELAY_MANAGED ?? null }) + "\n");
 
 const send = (msg) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...msg }) + "\n");
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

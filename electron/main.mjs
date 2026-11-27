@@ -12,7 +12,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { AcpConnection } from "./acp.mjs";
 import { createCommsForward } from "./comms-forward.mjs";
-import { isNotFoundExit, normalizeCommand, resolveCommand, shellLine, startFailureText } from "./copilot-command.mjs";
+import { copilotEnv, isNotFoundExit, normalizeCommand, resolveCommand, shellLine, startFailureText } from "./copilot-command.mjs";
 import { countUserMessages, deleteSession, describeCut, forkSession, isSessionId, messageTimes, purgeDeleted, sessionCreatedAt, sessionDir, truncateSession } from "./history.mjs";
 import { createContentSearch } from "./content-search.mjs";
 import { createLastActivity } from "./last-activity.mjs";
@@ -138,8 +138,8 @@ function friendly(err) {
 
 // ---------- copilot-relay ----------
 //
-// ACP sessions don't load Copilot CLI extensions, so the app does what the extension does in a terminal:
-// it registers each open session with the relay broker under the same key (cli:<sessionId>, so the session
+// The app does what the extension does in a terminal (and keeps the extension out of the Copilot it starts, which may
+// load it even with --acp: COPILOT_RELAY_MANAGED, see copilotEnv): it registers each open session with the relay broker under the same key (cli:<sessionId>, so the session
 // keeps its relay name) and gives Copilot the relay tools as an MCP server. The MCP URL needs the identity
 // before session/new returns the session ID, so it carries a random alias that the broker maps to the key.
 
@@ -364,7 +364,7 @@ const START_TIMEOUT_TEXT = `Copilot did not answer within ${START_TIMEOUT_MS / 1
  *  start, so no session runs without the prompt it was given. `command` is { command, source } (see
  *  resolveCommand); the start ends at `deadline` (the caller's) or after START_TIMEOUT_MS, whichever comes first. */
 async function connect(cwd, { deadline, args = [], prompt = "", command = settingsCommand() } = {}) {
-  let env = process.env;
+  let env = copilotEnv(process.env); // the extension stays out: the app registers the session (see copilotEnv)
   let promptDir = null;
   // never throws: it runs inside the exit event (before the session's own exit handling) and on failed starts, where
   // the start's error must win; a folder that can't be removed now (a Windows lock) goes at the next start
@@ -383,7 +383,7 @@ async function connect(cwd, { deadline, args = [], prompt = "", command = settin
       throw failure(`Could not write this session's prompt to ${promptRoot}: ${e.message}`);
     }
     try {
-      env = instructionsEnv(process.env, promptDir.dir);
+      env = instructionsEnv(env, promptDir.dir);
     } catch (e) {
       removeDir();
       throw failure(e.message); // the data folder's path contains a comma
