@@ -291,11 +291,11 @@ export class Delegation {
    * first reply to its live parent is a report, anything else a send_message. The log items carry `fallback: true`.
    */
   fallback(callerKey, toKey, text) {
-    const name = this.registry.get(toKey)?.name || this.store.nameOf(toKey);
-    if (!name) return `No session "${toKey}". Call list_sessions to see who is online.`;
     this.#inFallback = true;
     try {
       if (this.#liveParent(callerKey) === toKey && !this.store.isReported(callerKey)) return this.report(callerKey, text);
+      const name = this.registry.get(toKey)?.name || this.store.nameOf(toKey) || this.nameOf(toKey);
+      if (!name) return `No session "${toKey}". Call list_sessions to see who is online.`;
       return this.registry.send(callerKey, name, text, { fallback: true });
     } finally {
       this.#inFallback = false;

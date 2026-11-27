@@ -1380,3 +1380,11 @@ test("fallback log items carry fallback: true, the tool paths do not", () => {
   base.registry.send("cli:child", base.registry.get("cli:parent").name, "tool");
   assert.deepEqual(items.map((i) => [i.kind, i.fallback]), [["report", true], ["message", true], ["message", undefined]]);
 });
+
+test("fallback to a parent that left the registry still stores the report", () => {
+  const { d, registry, store } = fallbackSetup();
+  registry.remove("cli:parent");
+  assert.match(d.fallback("cli:child", "cli:parent", "done"), /Report stored/);
+  assert.equal(store.isReported("cli:child"), true);
+  assert.equal(store.pending("cli:parent").length, 1);
+});
